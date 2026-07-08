@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+build/
+*.zip
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary
+tmp/
+temp/
+
+# Claude Code worktrees
+.claude/worktrees/
+.playwright-mcp/
+
+# Local config
+config/trans.json
+config/tag.json
+config/cron.json
+
+# Local-only dev docs (kept on disk, not published)
+CLAUDE.md
+docs/
+worklog/
+
+# Local data (runtime output)
+db/timeline.csv

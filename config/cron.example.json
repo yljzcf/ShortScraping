@@ -1,0 +1,7 @@
+{
+  "scheduleMode": "cron",
+  "scrapeInterval": 1,
+  "translateInterval": 1,
+  "scrapeCron": "45 * * * *",
+  "translateCron": "50 * * * *"
+}

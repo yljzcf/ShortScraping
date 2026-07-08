@@ -1,0 +1,9 @@
+{
+  "name": "shortscraping",
+  "version": "1.2.5",
+  "private": true,
+  "description": "ShortScraping browser extension and local CSV sync service",
+  "scripts": {
+    "sync": "node server/sync-server.js"
+  }
+}

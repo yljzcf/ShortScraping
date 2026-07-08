@@ -1,0 +1,732 @@
+/* 基础变量 */
+:root {
+  --primary: #6366f1;
+  --primary-hover: #4f46e5;
+  --bg: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-card: #1e293b;
+  --text: #f8fafc;
+  --text-secondary: #94a3b8;
+  --border: #334155;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --radius: 12px;
+  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+}
+
+/* 重置 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 520px;
+  height: 600px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* 头部 */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logo-icon {
+  font-size: 24px;
+}
+
+.logo h1 {
+  font-size: 18px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--primary), #8b5cf6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 分类标签（取代原标题，按站点筛选；纯图标，title 提示站名） */
+.category-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.category-tab {
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+/* 24px 盒 + 2px 内边距 = 20px 图标；激活时只变衬底色，几何不跳动 */
+.category-tab img {
+  display: block;
+  width: 24px;
+  height: 24px;
+  padding: 2px;
+  border-radius: 5px;
+  filter: grayscale(1);
+  opacity: 0.55;
+  transition: all 0.2s;
+}
+
+.category-tab:hover {
+  background: var(--bg);
+}
+
+.category-tab:hover img {
+  opacity: 0.85;
+}
+
+.category-tab.active {
+  background: linear-gradient(135deg, var(--primary), #8b5cf6);
+}
+
+.category-tab.active img {
+  filter: none;
+  opacity: 1;
+}
+
+/* 再次点击已激活标签触发站点刷新：图标转圈作为进行中反馈 */
+.category-tab.is-refreshing img {
+  animation: spin 1s linear infinite;
+}
+
+.btn-icon {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 8px;
+  font-size: 16px;
+  transition: all 0.2s;
+}
+
+.btn-icon:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* 状态栏：左侧同步服务，右侧版本 */
+.status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: rgba(15, 23, 42, 0.92);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.sync-service {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.sync-service-hint {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.sync-service-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.sync-service.is-on {
+  color: var(--success);
+}
+
+.sync-service.is-on .sync-service-dot {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+}
+
+.sync-service.is-off {
+  color: var(--danger);
+}
+
+.sync-service.is-off .sync-service-dot {
+  background: var(--danger);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+}
+
+.sync-service.is-on .sync-service-hint,
+.sync-service.is-off .sync-service-hint {
+  color: var(--text-secondary);
+}
+
+.version-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.version-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.version-status.is-latest {
+  color: var(--success);
+}
+
+.version-status.is-latest .version-status-dot {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+}
+
+.version-status.is-upgrade {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.version-status.is-upgrade .version-status-dot {
+  background: var(--warning);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.6);
+}
+
+.version-status.is-fail {
+  color: var(--danger);
+}
+
+.version-status.is-fail .version-status-dot {
+  background: var(--danger);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+}
+
+/* 内容区域 */
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.view {
+  display: none;
+}
+
+.view.active {
+  display: block;
+}
+
+/* 时间线视图 */
+.timeline-container {
+  position: relative;
+  padding-left: 20px;
+}
+
+.timeline-container::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+
+/* 日期分组 */
+.timeline-date-group {
+  margin-bottom: 24px;
+}
+
+.timeline-date-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  margin-left: -20px;
+  padding-left: 28px;
+}
+
+/* 卡片外的时间标签 */
+.timeline-time {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  margin-left: 4px;
+}
+
+/* 卡片 */
+.drama-card {
+  position: relative;
+  margin-bottom: 16px;
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  transition: all 0.2s;
+}
+
+/* 状态标签 - 固定右上角 */
+.status-badge {
+  position: absolute;
+  top: 8px;
+  right: 40px;
+  padding: 3px 8px;
+  background: var(--success);
+  color: white;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  z-index: 1;
+}
+
+/* 翻译按钮 - 固定右上角 */
+.btn-translate {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  font-size: 16px;
+  cursor: pointer;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.btn-translate:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: scale(1.1);
+}
+
+.btn-translate:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.drama-card:hover {
+  border-color: var(--primary);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2);
+}
+
+.drama-card::before {
+  content: '';
+  position: absolute;
+  left: -17px;
+  top: 24px;
+  width: 8px;
+  height: 8px;
+  background: var(--primary);
+  border-radius: 50%;
+  border: 2px solid var(--bg);
+}
+
+/* 卡片内部布局：纵向堆叠（上半部分 + 贯穿整宽的标签区） */
+.card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+/* 封面：固定宽度、高度按图片原始比例自适应，不裁切（兼容 IMDB 竖版海报与 Steam 横版封面）
+   IMDB 竖版取原图原生尺寸 90×133（宽 90px，高按 2:3 比例自适应） */
+.card-poster {
+  flex-shrink: 0;
+  width: 90px;
+  height: auto;
+  align-self: flex-start;
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+/* 横版封面：置于文字上方、整行铺开（上半部分改纵向堆叠；标签区本就整行） */
+.drama-card.card-landscape .card-top {
+  flex-direction: column;
+}
+
+.drama-card.card-landscape .card-poster {
+  width: 100%;
+  height: auto;
+}
+
+.drama-card.card-landscape .card-title {
+  padding-right: 0;
+}
+
+/* Steam 分类：日期组内双列网格，日期/时间标签横跨两列 */
+.timeline-container[data-source="steam"] .timeline-date-group {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.timeline-container[data-source="steam"] .timeline-date-header,
+.timeline-container[data-source="steam"] .timeline-time {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+}
+
+.timeline-container[data-source="steam"] .drama-card {
+  margin-bottom: 0;
+}
+
+/* 奇数张时首卡横跨整行（renderTimeline 标记 card-full），其余成对双列 */
+.timeline-container[data-source="steam"] .drama-card.card-full {
+  grid-column: 1 / -1;
+}
+
+/* 同排卡片等高（grid 默认拉伸），标签区贴卡片底部对齐 */
+.timeline-container[data-source="steam"] .card-content {
+  height: 100%;
+}
+
+.timeline-container[data-source="steam"] .card-footer {
+  margin-top: auto;
+}
+
+/* 单语简介的窄卡放宽行数，用内容填充等高拉伸的空间，避免简介下方大段空白 */
+.timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-desc-en.desc-en-only {
+  -webkit-line-clamp: 6;
+}
+
+.timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-desc-zh.desc-zh-only {
+  -webkit-line-clamp: 5;
+}
+
+/* 双列窄卡：底部标签改两行（标签行 / 厂商行），单行超长时横向滚动，不堆高 */
+.timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-footer {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-tags-left,
+.timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-tags-right {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-tags-left::-webkit-scrollbar,
+.timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-tags-right::-webkit-scrollbar {
+  display: none;
+}
+
+.timeline-container[data-source="steam"] .drama-card:not(.card-full) .tag {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 双列下卡片圆点无法对齐左侧竖线，隐藏；竖线与日期/时间标签保留 */
+.timeline-container[data-source="steam"] .drama-card::before {
+  display: none;
+}
+
+/* RoyalRoad 分类：简介存全文，卡片内截断显示；单语（未翻译）卡放宽行数 */
+.timeline-container[data-source="royalroad"] .card-desc-en.desc-en-only {
+  -webkit-line-clamp: 6;
+}
+
+.timeline-container[data-source="royalroad"] .card-desc-zh.desc-zh-only {
+  -webkit-line-clamp: 5;
+}
+
+/* 上半部分：竖版海报在左、文字在右；横版封面在上、文字在下 */
+.card-top {
+  display: flex;
+  gap: 14px;
+}
+
+/* 主体部分（标题+简介） */
+.card-main {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 标题 */
+.card-title {
+  margin-bottom: 8px;
+}
+
+.card-title-zh {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+
+.card-title-en {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* 简介 */
+.card-description {
+  margin-bottom: 10px;
+}
+
+.card-desc-zh {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5;
+  margin-bottom: 4px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.card-desc-en {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 简介动态排版由 popup.js 按实际渲染行数测量后设置（行数走内联 line-clamp）。
+   中英文全文放完仍有大段空白的稀疏卡片：整体放大字号填充，行数回到 3中+2英 */
+.card-description.desc-large .card-desc-zh {
+  font-size: 14px;
+  -webkit-line-clamp: 3;
+}
+
+.card-description.desc-large .card-desc-en {
+  font-size: 14px;
+  -webkit-line-clamp: 2;
+}
+
+/* 底部标签区域 */
+.card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* 左侧标签 */
+.card-tags-left {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* 右侧标签 */
+.card-tags-right {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* 标签样式 */
+.tag {
+  display: inline-block;
+  padding: 3px 8px;
+  background: var(--bg);
+  border-radius: 4px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.tag-source {
+  color: var(--primary);
+}
+
+.tag-company {
+  color: var(--warning);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+/* 卡片状态 */
+.drama-card.status-new {
+  border-left: 3px solid var(--success);
+}
+
+/* 标题区域 */
+.card-title {
+  margin-bottom: 8px;
+  padding-right: 80px; /* 为状态标签留空间 */
+}
+
+.card-title-text {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-desc-empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* 空状态 */
+.empty-state {
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.empty-state h3 {
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.empty-state p {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: 20px;
+}
+
+.btn-primary {
+  padding: 8px 20px;
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-primary:hover {
+  background: var(--primary-hover);
+}
+
+/* 加载状态 */
+.loading-state {
+  text-align: center;
+  padding: 40px;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  margin: 0 auto 16px;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 底部 */
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--success);
+  border-radius: 50%;
+}
+
+.stats {
+  color: var(--text-secondary);
+}
+
+.divider {
+  margin: 0 6px;
+  color: var(--border);
+}
+
+/* 隐藏 */
+.hidden {
+  display: none !important;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}

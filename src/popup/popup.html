@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ShortScraping - 短剧监控</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+    <!-- 头部导航 -->
+    <header class="header">
+      <div class="category-tabs" id="categoryTabs">
+        <button type="button" class="category-tab" data-source="imdb" title="IMDB" aria-label="IMDB"><img src="../../assets/icons/site-imdb.png" alt=""></button>
+        <button type="button" class="category-tab" data-source="steam" title="Steam" aria-label="Steam"><img src="../../assets/icons/site-steam.png" alt=""></button>
+        <button type="button" class="category-tab" data-source="royalroad" title="RoyalRoad" aria-label="RoyalRoad"><img src="../../assets/icons/site-royalroad.png" alt=""></button>
+        <button type="button" class="category-tab" data-source="mydrama" title="MyDrama" aria-label="MyDrama"><img src="../../assets/icons/site-mydrama.png" alt=""></button>
+        <button type="button" class="category-tab" data-source="reelshort" title="ReelShort" aria-label="ReelShort"><img src="../../assets/icons/site-reelshort.png" alt=""></button>
+      </div>
+      <div class="header-actions">
+        <button id="btnRefresh" class="btn-icon" title="刷新数据">🔄</button>
+        <button id="btnClear" class="btn-icon" title="清除数据">🗑️</button>
+        <button id="btnSettings" class="btn-icon" title="设置">⚙️</button>
+      </div>
+    </header>
+
+    <!-- 状态栏：左侧同步服务，右侧版本 -->
+    <section class="status-bar">
+      <div class="sync-service" id="syncServiceStatus" title="正在检测本地 CSV 同步服务">
+        <span class="sync-service-dot" aria-hidden="true"></span>
+        <span id="syncServiceText">同步服务：检测中</span>
+        <span class="sync-service-hint">点击刷新状态</span>
+      </div>
+      <div class="version-status" id="versionStatus" title="正在检查远端版本">
+        <span class="version-status-dot" aria-hidden="true"></span>
+        <span id="versionStatusText">版本：检查中</span>
+      </div>
+    </section>
+
+    <!-- 内容区域 -->
+    <main class="content">
+      <!-- 时间线视图 -->
+      <div id="timelineView" class="view active">
+        <div class="timeline-container">
+          <!-- 动态生成 -->
+        </div>
+      </div>
+
+      <!-- 空状态 -->
+      <div id="emptyState" class="empty-state hidden">
+        <div class="empty-icon">📺</div>
+        <h3>暂无监控数据</h3>
+        <p>该分类下还没有数据，请先访问对应榜单页面并点击抓取按钮</p>
+        <button id="btnGoScrape" class="btn-primary">前往榜单页面</button>
+      </div>
+
+      <!-- 加载状态 -->
+      <div id="loadingState" class="loading-state hidden">
+        <div class="spinner"></div>
+        <p>正在加载数据...</p>
+      </div>
+    </main>
+
+    <!-- 底部状态栏 -->
+    <footer class="footer">
+      <div class="status">
+        <span class="status-dot"></span>
+        <span id="statusText">就绪</span>
+      </div>
+      <div class="stats">
+        <span id="statsTotal">0 部短剧</span>
+        <span class="divider">|</span>
+        <span id="statsLastUpdate">未更新</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="../shared/translator.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

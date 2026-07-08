@@ -1,0 +1,62 @@
+[
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&genres=short",
+    "tags": ["IMDB", "short"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&genres=Drama",
+    "tags": ["IMDB", "drama"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&interests=in0000310",
+    "tags": ["IMDB", "micro-drama"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1116954",
+    "tags": ["IMDB", "MyDrama"]
+  },
+  {
+    "url": "https://store.steampowered.com/category/visual_novel?flavor=contenthub_newandtrending",
+    "tags": ["Steam", "视觉小说", "人气蹿升"]
+  },
+  {
+    "url": "https://store.steampowered.com/category/visual_novel?flavor=popularcomingsoon",
+    "tags": ["Steam", "视觉小说", "翘首以盼"]
+  },
+  {
+    "url": "https://store.steampowered.com/tags/zh-cn/%E5%85%A8%E5%8A%A8%E6%80%81%E5%BD%B1%E5%83%8F/?flavor=contenthub_newandtrending",
+    "tags": ["Steam", "全动态影像", "人气蹿升"]
+  },
+  {
+    "url": "https://store.steampowered.com/tags/zh-cn/%E5%85%A8%E5%8A%A8%E6%80%81%E5%BD%B1%E5%83%8F/?flavor=popularcomingsoon",
+    "tags": ["Steam", "全动态影像", "翘首以盼"]
+  },
+  {
+    "url": "https://www.royalroad.com/fictions/trending",
+    "tags": ["RoyalRoad", "trending"]
+  },
+  {
+    "url": "https://my-drama.com/",
+    "tags": ["MyDrama", "最流行"]
+  },
+  {
+    "url": "https://my-drama.com/?list=best_choices",
+    "tags": ["MyDrama", "最佳选择"]
+  },
+  {
+    "url": "https://fandom.my-drama.com/?list=trending",
+    "tags": ["MyDrama", "fandom", "Trending"]
+  },
+  {
+    "url": "https://fandom.my-drama.com/",
+    "tags": ["MyDrama", "fandom"]
+  },
+  {
+    "url": "https://www.reelshort.com/",
+    "tags": ["ReelShort", "TOP"]
+  },
+  {
+    "url": "https://www.reelshort.com/fandom/",
+    "tags": ["ReelShort", "fandom"]
+  }
+]

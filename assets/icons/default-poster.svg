@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="300" viewBox="0 0 200 300">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1e293b;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0f172a;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="200" height="300" fill="url(#grad)"/>
+  <text x="100" y="140" font-family="Arial, sans-serif" font-size="60" fill="#334155" text-anchor="middle">🎬</text>
+  <text x="100" y="180" font-family="Arial, sans-serif" font-size="14" fill="#475569" text-anchor="middle">暂无海报</text>
+</svg>
