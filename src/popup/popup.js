@@ -116,7 +116,7 @@
 
     elements.buttons.goScrape.addEventListener('click', () => {
       const urls = getConfiguredScrapeUrls();
-      const hostBySource = { imdb: 'imdb.com', steam: 'store.steampowered.com', royalroad: 'royalroad.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com' };
+      const hostBySource = { imdb: 'imdb.com', steam: 'store.steampowered.com', royalroad: 'royalroad.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io' };
       const host = hostBySource[state.activeSource] || 'imdb.com';
       const target = urls.find(u => u.includes(host)) || urls[0];
       if (target) {
@@ -424,8 +424,8 @@
   /**
    * 渲染时间线
    */
-  // 分类标签：按 source（imdb / steam / royalroad / mydrama / reelshort）筛选时间线
-  const CATEGORY_SOURCES = ['imdb', 'steam', 'royalroad', 'mydrama', 'reelshort'];
+  // 分类标签：按 source（imdb / steam / royalroad / mydrama / reelshort / dramashorts）筛选时间线
+  const CATEGORY_SOURCES = ['imdb', 'steam', 'royalroad', 'mydrama', 'reelshort', 'dramashorts'];
 
   function dramaSource(drama) {
     return CATEGORY_SOURCES.includes(drama.source) ? drama.source : 'imdb';
@@ -657,7 +657,7 @@
       return drama.tags.slice(0, 3);
     }
 
-    const sourceNames = { imdb: 'IMDB', steam: 'Steam', royalroad: 'RoyalRoad', mydrama: 'MyDrama', reelshort: 'ReelShort' };
+    const sourceNames = { imdb: 'IMDB', steam: 'Steam', royalroad: 'RoyalRoad', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts' };
     const tags = [sourceNames[drama.source] || 'IMDB'];
 
     if (drama.genre) {

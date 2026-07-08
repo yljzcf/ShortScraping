@@ -58,5 +58,21 @@
   {
     "url": "https://www.reelshort.com/fandom/",
     "tags": ["ReelShort", "fandom"]
+  },
+  {
+    "url": "https://dramashorts.io/top-movies",
+    "tags": ["DramaShorts", "Top"]
+  },
+  {
+    "url": "https://dramashorts.io/?list=top_trending",
+    "tags": ["DramaShorts", "Trending"]
+  },
+  {
+    "url": "https://dramashorts.io/?list=popular_now",
+    "tags": ["DramaShorts", "Popular"]
+  },
+  {
+    "url": "https://dramashorts.io/?list=audience_favorite",
+    "tags": ["DramaShorts", "Favorite"]
   }
 ]

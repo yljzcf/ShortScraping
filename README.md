@@ -106,13 +106,14 @@ server\fix-csv-encoding.bat
 ]
 ```
 
-目前支持五个站点（内容脚本按域名自动识别）：
+目前支持六个站点（内容脚本按域名自动识别）：
 
 - **IMDB** 榜单/搜索页：列表取条目，进详情页补简介与公司。
 - **Steam** 内容中心页（`/category/<name>` 与 `/tags/<locale>/<标签名>`）：列表来自官方动态查询接口，再用 `appdetails` 接口（`?l=english`）补英文名/简介/开发者；成人专属或受限作品（接口 `success=false`）自动跳过。
 - **RoyalRoad** 榜单页（`/fictions/*`）：服务端渲染，列表自带标题/封面/全文简介，详情页补作者。
 - **My Drama** 主站首页「最流行」板块与 fandom 子域（`fandom.my-drama.com`）文章流 / Trending 菜单：fandom 条目通过文章内回主站链接与主站条目全局去重。
 - **ReelShort** 主站首页「TOP」板块（`www.reelshort.com`，解析页内 `__NEXT_DATA__` SSR 数据）与 `/fandom/` 文章流：fandom 条目通过文章内回主站 `/movie/` 链接与主站条目全局去重。
+- **DramaShorts**（`dramashorts.io`，解析页内 `__NEXT_DATA__` SSR 数据）：`/top-movies` 榜单页与首页板块；首页订阅 URL 用 `?list=<板块id>` 选板块（`top_trending` / `popular_now` / `audience_favorite`），列表自带全文简介，无需请求详情页。
 
 ### `config/cron.json`
 

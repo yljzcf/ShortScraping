@@ -46,6 +46,7 @@
     if (hostname.endsWith('royalroad.com')) return 'royalroad';
     if (hostname.endsWith('my-drama.com')) return 'mydrama';
     if (hostname.endsWith('reelshort.com')) return 'reelshort';
+    if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
     return null;
   }
 
@@ -319,8 +320,47 @@
     }
   };
 
+  /**
+   * DramaShorts 适配器（dramashorts.io，Next.js Pages Router）：列表数据全部由
+   * SSR 在 script#__NEXT_DATA__ 直出，无需等待 hydrate，也无需请求详情页——
+   * 详情页 movieDetails.movie.description 与列表逐字一致（实测简介以省略号
+   * 结尾的也是站点原始数据，非接口截断）。两类入口，同一去重键空间：
+   * - /top-movies 榜单页：pageProps.movies 直出第 1 页 20 条（不翻页）；
+   * - 首页 discover 板块：订阅 URL 用约定参数 ?list=<板块id> 选板块（同 mydrama
+   *   范式，Next.js 忽略未知参数照常渲染），板块 id 即站点数据自身的 section id
+   *   （top_trending / popular_now / audience_favorite），无参数默认 top_trending。
+   * 基础域恒为英文（语言版本在 /es /ja 等子路径，zh-CN 浏览器不重定向），
+   * 无平台中文，status 走 new 交给 AI 翻译。
+   */
+  const dramashortsAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        if (!u.hostname.endsWith('dramashorts.io')) return false;
+        return u.pathname === '/' || u.pathname.replace(/\/+$/, '') === '/top-movies';
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return getDramashortsMovies();
+    },
+    extractId(item) {
+      // 条目 id 是 UUID，加 ds 前缀与 tt/纯数字/rr/md/rs 的全局去重键约定保持一致
+      const id = item && typeof item.id === 'string' ? item.id : '';
+      return /^[0-9a-f-]{36}$/.test(id) ? `ds${id}` : null;
+    },
+    extractBasic(item, tags, id, index) {
+      return extractDramashortsFromMovie(item, index, tags, id);
+    },
+    async fetchDetail(drama) {
+      // 列表数据已含全文简介（与详情页逐字一致），无需二次请求
+      return drama;
+    }
+  };
+
   // 站点适配器注册表。
-  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter };
+  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter };
 
   /**
    * 添加抓取按钮
@@ -952,10 +992,10 @@
   }
 
   /**
-   * 读取 Next.js Pages Router 的 SSR 数据（script#__NEXT_DATA__），列表页与详情页共用。
-   * 解析失败返回 null。
+   * 读取 Next.js Pages Router 的 SSR 数据（script#__NEXT_DATA__），列表页与详情页
+   * 共用，ReelShort 与 DramaShorts 两站通用。解析失败返回 null。
    */
-  function readReelshortNextData(doc = document) {
+  function readNextData(doc = document) {
     try {
       const script = doc.querySelector('script#__NEXT_DATA__');
       return script ? JSON.parse(script.textContent) : null;
@@ -969,7 +1009,7 @@
    * 板块列表首项没有 books 字段，顺序不可信。定位失败返回空数组（scrapePage 安全跳过）。
    */
   function getReelshortTopBooks() {
-    const data = readReelshortNextData();
+    const data = readNextData();
     const shelves = data?.props?.pageProps?.fallback?.['/api/ms/hall/webInfo']?.bookShelfList;
     if (!Array.isArray(shelves)) {
       console.log('[ShortScraping] ReelShort 首页 __NEXT_DATA__ 板块数据未找到');
@@ -1038,7 +1078,7 @@
       const parser = new DOMParser();
       const doc = parser.parseFromString(html, 'text/html');
 
-      const detail = readReelshortNextData(doc)?.props?.pageProps?.data;
+      const detail = readNextData(doc)?.props?.pageProps?.data;
       if (detail) {
         const fullDesc = (detail.special_desc || '').trim();
         if (fullDesc) drama.description = fullDesc;
@@ -1168,6 +1208,67 @@
     }
 
     return drama;
+  }
+
+  /**
+   * DramaShorts 列表数据：/top-movies 直取 pageProps.movies；首页按 ?list=<板块id>
+   * 从 pageProps.discover 选板块（板块项形如 {id, type, data: {title, movies}}），
+   * 无参数或非法值默认 top_trending。定位失败返回空数组（scrapePage 安全跳过）。
+   */
+  function getDramashortsMovies() {
+    const pageProps = readNextData()?.props?.pageProps;
+    if (!pageProps) {
+      console.log('[ShortScraping] DramaShorts __NEXT_DATA__ 未找到');
+      return [];
+    }
+    if (window.location.pathname.replace(/\/+$/, '') === '/top-movies') {
+      return Array.isArray(pageProps.movies) ? pageProps.movies : [];
+    }
+    const list = new URLSearchParams(window.location.search).get('list') || '';
+    const sectionId = /^[a-z0-9_-]+$/.test(list) ? list : 'top_trending';
+    const sections = Array.isArray(pageProps.discover) ? pageProps.discover : [];
+    const section = sections.find(s => s && s.id === sectionId);
+    const movies = section && section.data ? section.data.movies : null;
+    if (!Array.isArray(movies)) {
+      console.log(`[ShortScraping] DramaShorts 首页板块未找到: ${sectionId}`);
+      return [];
+    }
+    return movies;
+  }
+
+  /**
+   * 封面走站点 Next.js 图片优化端点（站内卡片同款取图方式）：CDN 原图约 1.5MB/张，
+   * w=384 约 72KB（浏览器协商 WebP 更小），弹窗一屏多卡不至于拖垮带宽与加载。
+   */
+  function buildDramashortsPosterUrl(rawUrl) {
+    if (!rawUrl) return '';
+    return `https://dramashorts.io/_next/image?url=${encodeURIComponent(rawUrl)}&w=384&q=75`;
+  }
+
+  /**
+   * 从 movie 对象提取基础信息。简介为全文；封面用 coverWithTitle（站点卡片
+   * cover+title 双图叠加的预合成版），退化取 cover。观看页 /shorts/<UUID>
+   * 仅凭 id 即可构造。
+   */
+  function extractDramashortsFromMovie(movie, index, tags, dsId) {
+    const images = movie.images || {};
+    return {
+      id: `dramashorts_${dsId}_${index}`,
+      imdbId: dsId,
+      title: (movie.title || '').trim() || dsId,
+      titleZh: '',
+      poster: buildDramashortsPosterUrl(images.coverWithTitle || images.cover),
+      tags,
+      description: (movie.description || '').trim(),
+      descriptionZh: '',
+      company: '',               // 平台自制剧，无独立制作公司信息
+      source: 'dramashorts',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      url: `https://dramashorts.io/shorts/${dsId.slice(2)}`,
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
   }
 
   /**

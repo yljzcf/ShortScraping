@@ -459,6 +459,7 @@ function siteOfUrl(url) {
     if (hostname.endsWith('royalroad.com')) return 'royalroad';
     if (hostname.endsWith('my-drama.com')) return 'mydrama';
     if (hostname.endsWith('reelshort.com')) return 'reelshort';
+    if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
   } catch (e) {
     // 无效 URL 视为不属于任何站点
   }
