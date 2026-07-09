@@ -716,7 +716,7 @@ function saveDramaRecord(drama) {
 }
 
 /**
- * 清空 dramas 表（安装初始化与弹窗「清除数据」共用）。
+ * 清空 dramas 表（仅安装初始化使用；弹窗「清除数据」入口已移除）。
  */
 function clearAllDramas() {
   return enqueueDramaWrite('清空数据', () => chrome.storage.local.set({
@@ -867,8 +867,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'triggerTranslate') {
-    performTranslate().then(() => {
-      sendResponse({ success: true });
+    performTranslate().then((summary) => {
+      sendResponse({ success: true, summary });
+    }).catch((error) => {
+      sendResponse({ success: false, error: error.message });
     });
     return true;
   }
@@ -885,15 +887,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'applyTranslation') {
     updateSingleDramaTranslation(request.dramaId, request.result).then((updated) => {
       sendResponse({ success: true, updated });
-    }).catch((error) => {
-      sendResponse({ success: false, error: error.message });
-    });
-    return true;
-  }
-
-  if (request.action === 'clearDramas') {
-    clearAllDramas().then(() => {
-      sendResponse({ success: true });
     }).catch((error) => {
       sendResponse({ success: false, error: error.message });
     });

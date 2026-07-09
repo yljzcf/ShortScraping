@@ -64,7 +64,7 @@
 
     elements.buttons = {
       refresh: document.getElementById('btnRefresh'),
-      clear: document.getElementById('btnClear'),
+      translateAll: document.getElementById('btnTranslateAll'),
       settings: document.getElementById('btnSettings'),
       goScrape: document.getElementById('btnGoScrape')
     };
@@ -98,7 +98,7 @@
    */
   function bindEvents() {
     elements.buttons.refresh.addEventListener('click', refreshData);
-    elements.buttons.clear.addEventListener('click', clearData);
+    elements.buttons.translateAll.addEventListener('click', translateAllData);
     elements.buttons.settings.addEventListener('click', openSettings);
     elements.syncService.container.addEventListener('click', checkSyncServiceStatus);
     elements.versionStatus.container.addEventListener('click', checkVersionStatus);
@@ -336,18 +336,42 @@
   }
 
   /**
-   * 清除数据
+   * 全部翻译：让后台检查所有待翻译条目（status=new 且属订阅来源）并执行一轮翻译。
+   * 任务跑在后台 SW，弹窗关闭也会继续；每条译文经单写者队列落库后由
+   * storage.onChanged 实时刷新卡片，翻译过程肉眼可见。
    */
-  function clearData() {
-    if (!confirm('确定要清除所有数据吗？此操作不可撤销。')) {
-      return;
-    }
+  async function translateAllData() {
+    const btn = elements.buttons.translateAll;
+    btn.disabled = true;
+    btn.textContent = '⏳';
 
-    chrome.runtime.sendMessage({ action: 'clearDramas' }, () => {
-      state.dramas = [];
-      renderTimeline();
-      updateStats();
-    });
+    try {
+      console.log('[ShortScraping] 手动触发全部翻译');
+      const response = await chrome.runtime.sendMessage({ action: 'triggerTranslate' });
+
+      if (!response?.success) {
+        throw new Error(response?.error || '后台翻译失败');
+      }
+      if (response.summary?.error) {
+        throw new Error(response.summary.error);
+      }
+
+      const { pendingCount = 0, translatedCount = 0 } = response.summary || {};
+      btn.title = pendingCount > 0
+        ? `全部翻译：本轮检查到 ${pendingCount} 条待翻译，已翻译 ${translatedCount} 条`
+        : '全部翻译：当前没有待翻译条目';
+      console.log('[ShortScraping] 全部翻译完成:', response.summary);
+      btn.textContent = '✅';
+    } catch (e) {
+      console.error('[ShortScraping] 全部翻译失败:', e);
+      btn.title = `全部翻译失败：${e.message}，可点击重试`;
+      btn.textContent = '❌';
+    } finally {
+      setTimeout(() => {
+        btn.textContent = '🌐';
+        btn.disabled = false;
+      }, 2000);
+    }
   }
 
   /**
