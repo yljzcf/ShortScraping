@@ -11,6 +11,14 @@
   if (window.__dramamoContentLoaded) return;
   window.__dramamoContentLoaded = true;
 
+  // 抓取进行中护栏：后台兜底路径（waitForTabComplete 超时 → 强制注入 →
+  // sendScrapeWhenReady 轮询补发）可能让同一标签页先后收到多条 'scrape'。
+  // 并行双跑会经保存点去重互相分走对方的新增卡——入库不重复，但每个 response
+  // 都只有部分结果，performScrape 报告计数失真（实测报 83 存 87）。
+  // 复用进行中的 Promise，让每条消息都拿到同一份完整结果；结束后复位，
+  // 后续消息照常开启新一轮。
+  let scrapeInFlight = null;
+
   /**
    * 初始化
    */
@@ -19,7 +27,10 @@
 
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       if (request.action === 'scrape') {
-        scrapePage().then(data => {
+        if (!scrapeInFlight) {
+          scrapeInFlight = scrapePage().finally(() => { scrapeInFlight = null; });
+        }
+        scrapeInFlight.then(data => {
           sendResponse({ success: true, data: data });
         }).catch(e => {
           console.error('[ShortScraping] 抓取出错:', e);
