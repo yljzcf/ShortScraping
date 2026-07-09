@@ -1360,25 +1360,17 @@
   }
 
   /**
-   * 保存单条数据（立即更新 storage）
+   * 保存单条数据：经后台单写者队列入库。此前这里直接「get 全表 → set 全表」，
+   * 落在后台翻译线读改写窗口内时，新卡会被翻译线的整表写回覆盖丢失。
    */
   async function saveSingleDrama(drama) {
-    const { dramas: existing = [] } = await chrome.storage.local.get('dramas');
+    const response = await chrome.runtime.sendMessage({ action: 'saveDrama', drama });
 
-    // 检查是否已存在
-    if (existing.some(d => d.imdbId === drama.imdbId)) {
-      return false;
+    if (!response?.success) {
+      throw new Error(response?.error || '后台保存失败');
     }
 
-    // 添加到列表开头
-    const updated = [drama, ...existing];
-
-    await chrome.storage.local.set({
-      dramas: updated,
-      lastScrape: new Date().toISOString()
-    });
-
-    return true;
+    return response.saved;
   }
 
   /**

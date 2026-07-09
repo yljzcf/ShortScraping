@@ -343,11 +343,7 @@
       return;
     }
 
-    chrome.storage.local.set({
-      dramas: [],
-      lastScrape: null,
-      lastTranslate: null
-    }, () => {
+    chrome.runtime.sendMessage({ action: 'clearDramas' }, () => {
       state.dramas = [];
       renderTimeline();
       updateStats();
@@ -388,22 +384,12 @@
         throw new Error('翻译结果为空，请检查翻译接口配置或控制台错误');
       }
 
-      // 更新数据
-      const { dramas } = await chrome.storage.local.get('dramas');
-      const index = dramas.findIndex(d => d.id === dramaId);
-
-      if (index !== -1) {
-        dramas[index] = {
-          ...dramas[index],
-          titleZh: result.title || dramas[index].titleZh,
-          descriptionZh: result.desc || dramas[index].descriptionZh,
-          status: 'trans',
-          translatedAt: new Date().toISOString()
-        };
-
-        await chrome.storage.local.set({ dramas });
-        // UI 会通过 storage.onChanged 自动更新
+      // 写入结果：经后台单写者队列，避免与并行的抓取/翻译写互相覆盖
+      const applied = await chrome.runtime.sendMessage({ action: 'applyTranslation', dramaId, result });
+      if (!applied?.success) {
+        throw new Error(applied?.error || '后台写入翻译结果失败');
       }
+      // UI 会通过 storage.onChanged 自动更新
 
       btn.innerHTML = '✅';
       setTimeout(() => {

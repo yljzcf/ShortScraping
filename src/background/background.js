@@ -36,6 +36,21 @@ let csvSyncTimer = null;
 const CSV_SYNC_ENDPOINT = 'http://127.0.0.1:31919/sync';
 const POST_SCRAPE_TRANSLATE_DELAY_MS = 10000;
 
+// dramas 表全局单写者队列：内容脚本/弹窗的写请求经消息转到这里，与后台
+// 翻译线、清理迁移共用同一条 Promise 链严格串行。此前内容脚本与翻译线各自
+// 「get 全表 → 内存改 → set 全表」，一方的 set 落在另一方 get/set 窗口内时
+// 整表写回会覆盖丢卡（实测抓取报 80 条、storage 仅 79 条）。
+let dramaWriteQueue = Promise.resolve();
+
+function enqueueDramaWrite(label, operation) {
+  const run = dramaWriteQueue.then(operation);
+  dramaWriteQueue = run.then(
+    () => {},
+    (e) => console.warn(`[ShortScraping] dramas 写操作失败（${label}）:`, e?.message || e)
+  );
+  return run;
+}
+
 const SCHEDULE_TASKS = {
   'scrape-task': {
     intervalKey: 'scrapeInterval',
@@ -60,11 +75,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   await loadConfigFromJsonFiles();
 
   if (details.reason === 'install') {
-    await chrome.storage.local.set({
-      dramas: [],
-      lastScrape: null,
-      lastTranslate: null
-    });
+    await clearAllDramas();
 
     // 打开设置页面
     chrome.tabs.create({ url: chrome.runtime.getURL('src/settings/settings.html') });
@@ -487,14 +498,16 @@ function filterDramasByConfiguredUrls(dramas, urlTags) {
   });
 }
 
-async function pruneDramasOutsideConfiguredUrls(urlTags) {
-  const { dramas = [] } = await chrome.storage.local.get('dramas');
-  const filtered = filterDramasByConfiguredUrls(dramas, urlTags);
+function pruneDramasOutsideConfiguredUrls(urlTags) {
+  return enqueueDramaWrite('清理非订阅来源', async () => {
+    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    const filtered = filterDramasByConfiguredUrls(dramas, urlTags);
 
-  if (filtered.length !== dramas.length) {
-    await chrome.storage.local.set({ dramas: filtered });
-    console.log(`[ShortScraping] 已清理 ${dramas.length - filtered.length} 条非订阅来源历史记录`);
-  }
+    if (filtered.length !== dramas.length) {
+      await chrome.storage.local.set({ dramas: filtered });
+      console.log(`[ShortScraping] 已清理 ${dramas.length - filtered.length} 条非订阅来源历史记录`);
+    }
+  });
 }
 
 /**
@@ -502,21 +515,23 @@ async function pruneDramasOutsideConfiguredUrls(urlTags) {
  * 只碰 tags 显示标签，不碰去重键 imdbId 的 rr 前缀。
  * 幂等：无变化时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
  */
-async function migrateLegacyTags() {
-  const { dramas = [] } = await chrome.storage.local.get('dramas');
-  let changedCount = 0;
+function migrateLegacyTags() {
+  return enqueueDramaWrite('标签迁移', async () => {
+    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    let changedCount = 0;
 
-  const migrated = dramas.map(drama => {
-    if (!Array.isArray(drama.tags) || !drama.tags.includes('RR')) return drama;
-    changedCount++;
-    const tags = Array.from(new Set(drama.tags.map(tag => (tag === 'RR' ? 'RoyalRoad' : tag))));
-    return { ...drama, tags };
+    const migrated = dramas.map(drama => {
+      if (!Array.isArray(drama.tags) || !drama.tags.includes('RR')) return drama;
+      changedCount++;
+      const tags = Array.from(new Set(drama.tags.map(tag => (tag === 'RR' ? 'RoyalRoad' : tag))));
+      return { ...drama, tags };
+    });
+
+    if (changedCount > 0) {
+      await chrome.storage.local.set({ dramas: migrated });
+      console.log(`[ShortScraping] 已迁移 ${changedCount} 条历史记录的显示标签 RR -> RoyalRoad`);
+    }
   });
-
-  if (changedCount > 0) {
-    await chrome.storage.local.set({ dramas: migrated });
-    console.log(`[ShortScraping] 已迁移 ${changedCount} 条历史记录的显示标签 RR -> RoyalRoad`);
-  }
 }
 
 /**
@@ -657,24 +672,58 @@ async function performTranslate() {
 }
 
 /**
- * 原子化更新单条翻译结果，避免后台翻译线覆盖并行抓取线刚写入的新卡片。
+ * 更新单条翻译结果。读改写在单写者队列内执行，不会覆盖并行提交的新卡片。
  */
-async function updateSingleDramaTranslation(dramaId, result) {
-  const { dramas = [] } = await chrome.storage.local.get('dramas');
-  const index = dramas.findIndex(d => d.id === dramaId);
+function updateSingleDramaTranslation(dramaId, result) {
+  return enqueueDramaWrite('翻译更新', async () => {
+    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    const index = dramas.findIndex(d => d.id === dramaId);
 
-  if (index === -1) return false;
+    if (index === -1) return false;
 
-  dramas[index] = {
-    ...dramas[index],
-    titleZh: result.title || dramas[index].titleZh,
-    descriptionZh: result.desc || dramas[index].descriptionZh,
-    status: 'trans',
-    translatedAt: new Date().toISOString()
-  };
+    dramas[index] = {
+      ...dramas[index],
+      titleZh: result.title || dramas[index].titleZh,
+      descriptionZh: result.desc || dramas[index].descriptionZh,
+      status: 'trans',
+      translatedAt: new Date().toISOString()
+    };
 
-  await chrome.storage.local.set({ dramas });
-  return true;
+    await chrome.storage.local.set({ dramas });
+    return true;
+  });
+}
+
+/**
+ * 保存一张新卡（内容脚本经 saveDrama 消息提交）。去重键 imdbId 的权威判定
+ * 在队列内完成，两个标签页并发抓到同一条也只会入库一次。
+ */
+function saveDramaRecord(drama) {
+  return enqueueDramaWrite('保存新卡', async () => {
+    const { dramas: existing = [] } = await chrome.storage.local.get('dramas');
+
+    if (existing.some(d => d.imdbId === drama.imdbId)) {
+      return false;
+    }
+
+    await chrome.storage.local.set({
+      dramas: [drama, ...existing],
+      lastScrape: new Date().toISOString()
+    });
+
+    return true;
+  });
+}
+
+/**
+ * 清空 dramas 表（安装初始化与弹窗「清除数据」共用）。
+ */
+function clearAllDramas() {
+  return enqueueDramaWrite('清空数据', () => chrome.storage.local.set({
+    dramas: [],
+    lastScrape: null,
+    lastTranslate: null
+  }));
 }
 
 /**
@@ -820,6 +869,33 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'triggerTranslate') {
     performTranslate().then(() => {
       sendResponse({ success: true });
+    });
+    return true;
+  }
+
+  if (request.action === 'saveDrama') {
+    saveDramaRecord(request.drama).then((saved) => {
+      sendResponse({ success: true, saved });
+    }).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'applyTranslation') {
+    updateSingleDramaTranslation(request.dramaId, request.result).then((updated) => {
+      sendResponse({ success: true, updated });
+    }).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'clearDramas') {
+    clearAllDramas().then(() => {
+      sendResponse({ success: true });
+    }).catch((error) => {
+      sendResponse({ success: false, error: error.message });
     });
     return true;
   }
