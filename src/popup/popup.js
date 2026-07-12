@@ -230,9 +230,13 @@
 
     const url = state.lanUrls[0];
     try {
-      await navigator.clipboard.writeText(url);
+      // 无用户激活/文档失焦时 writeText 可能既不成功也不拒绝地挂起，超时即走兜底
+      await Promise.race([
+        navigator.clipboard.writeText(url),
+        new Promise((resolve, reject) => setTimeout(() => reject(new Error('clipboard timeout')), 600))
+      ]);
     } catch (e) {
-      // 剪贴板 API 被拒时退回隐藏输入框方案
+      // 剪贴板 API 被拒或超时，退回隐藏输入框方案
       const input = document.createElement('textarea');
       input.value = url;
       document.body.appendChild(input);
