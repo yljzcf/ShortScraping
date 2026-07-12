@@ -5,7 +5,7 @@ set "PORT=31919"
 set "HEALTH_URL=http://127.0.0.1:%PORT%/health"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$connections = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue;" ^
+  "$connections = Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue;" ^
   "if (-not $connections) { Write-Host '[ShortScraping Sync] Service is not running.'; exit 0 }" ^
   "$pids = $connections | Select-Object -ExpandProperty OwningProcess -Unique;" ^
   "foreach ($pidValue in $pids) {" ^

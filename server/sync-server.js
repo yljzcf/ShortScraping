@@ -1,21 +1,32 @@
 /**
- * ShortScraping Local CSV Sync Server
+ * ShortScraping Local Sync & LAN Share Server
  *
  * Chrome 扩展无法直接写入项目目录文件，因此由本地 Node 服务接收扩展数据，
- * 并将时间线内容实时同步到 db/timeline.csv。
+ * 将时间线内容实时同步到 db/timeline.csv，并向局域网提供只读时间线页面。
  *
- * 启动：node server/sync-server.js
+ * 启动：node server/sync-server.js [--local-only]
+ *   默认监听 0.0.0.0，局域网设备可通过 http://<本机IP>:31919/ 访问只读共享页；
+ *   --local-only 退回仅本机 127.0.0.1。测试可用环境变量 PORT 覆盖端口。
+ *
+ * 安全边界：写入接口（POST /sync、POST /config/*）仅接受本机回环地址调用，
+ * 局域网设备只能访问只读页面与只读数据接口；trans.json（含 API Key）无读取接口。
  */
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
-const PORT = 31919;
+const PORT = Number(process.env.PORT) || 31919;
+const LOCAL_ONLY = process.argv.includes('--local-only');
 const PROJECT_DIR = path.join(__dirname, '..');
 const DB_DIR = path.join(PROJECT_DIR, 'db');
 const CONFIG_DIR = path.join(PROJECT_DIR, 'config');
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const SHARED_DIR = path.join(PROJECT_DIR, 'src', 'shared');
+const ICONS_DIR = path.join(PROJECT_DIR, 'assets', 'icons');
 const CSV_PATH = path.join(DB_DIR, 'timeline.csv');
+const TIMELINE_JSON_PATH = path.join(DB_DIR, 'timeline.json');
 const TAG_CONFIG_PATH = path.join(CONFIG_DIR, 'tag.json');
 const TRANS_CONFIG_PATH = path.join(CONFIG_DIR, 'trans.json');
 const CSV_BOM = '﻿';
@@ -38,6 +49,12 @@ const CSV_COLUMNS = [
   'scrapedAt',
   'translatedAt'
 ];
+
+// —— 局域网共享状态：最新时间线快照（内存 + db/timeline.json 持久化） ——
+let latestDramas = [];
+let dataVersion = 0;
+let updatedAt = null;
+const sseClients = new Set();
 
 function serializeTimelineCsv(rows) {
   const body = [CSV_COLUMNS.join(','), ...rows].join(CSV_NEWLINE);
@@ -185,6 +202,91 @@ function filterDramasByTagConfig(dramas) {
   });
 }
 
+// —— 局域网共享：快照持久化、SSE 广播与地址枚举 ——
+
+function loadSnapshot() {
+  try {
+    if (!fs.existsSync(TIMELINE_JSON_PATH)) return;
+    const raw = JSON.parse(fs.readFileSync(TIMELINE_JSON_PATH, 'utf8'));
+    latestDramas = Array.isArray(raw.dramas) ? raw.dramas : [];
+    dataVersion = Number.isInteger(raw.version) ? raw.version : 0;
+    updatedAt = raw.updatedAt || null;
+    console.log(`[ShortScraping Sync] 已恢复时间线快照：${latestDramas.length} 条（version ${dataVersion}）`);
+  } catch (error) {
+    console.warn('[ShortScraping Sync] 读取时间线快照失败，将等待扩展下一次推送:', error.message);
+  }
+}
+
+function saveSnapshot() {
+  ensureDb();
+  const tmpPath = `${TIMELINE_JSON_PATH}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify({ version: dataVersion, updatedAt, dramas: latestDramas }), 'utf8');
+  fs.renameSync(tmpPath, TIMELINE_JSON_PATH);
+}
+
+function broadcastUpdate() {
+  const payload = `event: update\ndata: ${JSON.stringify({ version: dataVersion })}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(payload);
+    } catch (error) {
+      sseClients.delete(client);
+    }
+  }
+}
+
+// 局域网地址优先级：家用网段 192.168.* 最常见，排最前便于弹窗默认展示
+function lanScore(ip) {
+  if (ip.startsWith('192.168.')) return 0;
+  if (ip.startsWith('10.')) return 1;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return 2;
+  return 3;
+}
+
+function getLanUrls() {
+  const ips = [];
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const addr of addrs || []) {
+      if (addr.family === 'IPv4' && !addr.internal) ips.push(addr.address);
+    }
+  }
+  ips.sort((a, b) => lanScore(a) - lanScore(b));
+  return ips.map(ip => `http://${ip}:${PORT}`);
+}
+
+function isLocalRequest(req) {
+  const addr = req.socket.remoteAddress || '';
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+// —— 静态文件（显式白名单，防路径穿越） ——
+
+const STATIC_ROUTES = {
+  '/': { file: path.join(PUBLIC_DIR, 'share.html'), type: 'text/html; charset=utf-8' },
+  '/public/share.css': { file: path.join(PUBLIC_DIR, 'share.css'), type: 'text/css; charset=utf-8' },
+  '/public/share.js': { file: path.join(PUBLIC_DIR, 'share.js'), type: 'text/javascript; charset=utf-8' },
+  '/shared/timeline-render.js': { file: path.join(SHARED_DIR, 'timeline-render.js'), type: 'text/javascript; charset=utf-8' }
+};
+
+const ICON_TYPES = {
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon'
+};
+
+function serveFile(res, filePath, contentType, cacheSeconds) {
+  fs.readFile(filePath, (error, content) => {
+    if (error) {
+      return sendJson(res, 404, { ok: false, error: 'Not Found' });
+    }
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Cache-Control': cacheSeconds > 0 ? `max-age=${cacheSeconds}` : 'no-cache'
+    });
+    res.end(content);
+  });
+}
+
 function sendJson(res, statusCode, body) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -211,20 +313,73 @@ function readBody(req) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const pathname = new URL(req.url, 'http://localhost').pathname;
+
   if (req.method === 'OPTIONS') {
     return sendJson(res, 200, { ok: true });
   }
 
-  if (req.method === 'GET' && req.url === '/health') {
-    return sendJson(res, 200, { ok: true, csvPath: CSV_PATH });
+  // 写入接口仅限本机：局域网设备只读
+  if (req.method === 'POST' && !isLocalRequest(req)) {
+    return sendJson(res, 403, { ok: false, error: '写入接口仅限本机调用' });
   }
 
-  if (req.method === 'POST' && req.url === '/sync') {
+  if (req.method === 'GET' && pathname === '/health') {
+    return sendJson(res, 200, {
+      ok: true,
+      csvPath: CSV_PATH,
+      localOnly: LOCAL_ONLY,
+      lanUrls: LOCAL_ONLY ? [] : getLanUrls(),
+      version: dataVersion
+    });
+  }
+
+  if (req.method === 'GET' && pathname === '/api/timeline') {
+    return sendJson(res, 200, { ok: true, version: dataVersion, updatedAt, dramas: latestDramas });
+  }
+
+  if (req.method === 'GET' && pathname === '/api/events') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
+    });
+    res.write('retry: 3000\n\n');
+    res.write(`event: update\ndata: ${JSON.stringify({ version: dataVersion })}\n\n`);
+    sseClients.add(res);
+    req.on('close', () => sseClients.delete(res));
+    return;
+  }
+
+  if (req.method === 'GET' && STATIC_ROUTES[pathname]) {
+    const route = STATIC_ROUTES[pathname];
+    return serveFile(res, route.file, route.type, 0);
+  }
+
+  if (req.method === 'GET' && pathname.startsWith('/assets/icons/')) {
+    const name = pathname.slice('/assets/icons/'.length);
+    const ext = path.extname(name).toLowerCase();
+    if (!/^[\w.-]+$/.test(name) || !ICON_TYPES[ext]) {
+      return sendJson(res, 404, { ok: false, error: 'Not Found' });
+    }
+    return serveFile(res, path.join(ICONS_DIR, name), ICON_TYPES[ext], 3600);
+  }
+
+  if (req.method === 'POST' && pathname === '/sync') {
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
       const dramas = Array.isArray(payload.dramas) ? payload.dramas : [];
-      const count = writeTimelineCsv(filterDramasByTagConfig(dramas));
+      const configured = filterDramasByTagConfig(dramas);
+      const count = writeTimelineCsv(configured);
+
+      // 更新局域网共享快照并广播给已连接页面
+      latestDramas = configured;
+      dataVersion += 1;
+      updatedAt = new Date().toISOString();
+      saveSnapshot();
+      broadcastUpdate();
+
       return sendJson(res, 200, { ok: true, count, csvPath: CSV_PATH });
     } catch (error) {
       console.error('[ShortScraping Sync] 同步失败:', error);
@@ -232,7 +387,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (req.method === 'POST' && req.url === '/config/tag') {
+  if (req.method === 'POST' && pathname === '/config/tag') {
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
@@ -245,7 +400,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (req.method === 'POST' && req.url === '/config/trans') {
+  if (req.method === 'POST' && pathname === '/config/trans') {
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
@@ -261,7 +416,27 @@ const server = http.createServer(async (req, res) => {
 });
 
 ensureDb();
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`[ShortScraping Sync] 服务已启动：http://127.0.0.1:${PORT}`);
+loadSnapshot();
+
+// SSE 心跳：防止空闲长连接被中间设备掐断
+setInterval(() => {
+  for (const client of sseClients) {
+    try {
+      client.write(': ping\n\n');
+    } catch (error) {
+      sseClients.delete(client);
+    }
+  }
+}, 30000);
+
+server.listen(PORT, LOCAL_ONLY ? '127.0.0.1' : '0.0.0.0', () => {
+  console.log(`[ShortScraping Sync] 服务已启动：http://127.0.0.1:${PORT}${LOCAL_ONLY ? '（仅本机模式）' : ''}`);
   console.log(`[ShortScraping Sync] CSV 输出：${CSV_PATH}`);
+  if (!LOCAL_ONLY) {
+    const lanUrls = getLanUrls();
+    if (lanUrls.length > 0) {
+      console.log(`[ShortScraping Sync] 局域网共享页：${lanUrls.join('  ')}`);
+      console.log('[ShortScraping Sync] 首次启动如弹出 Windows 防火墙提示，请允许 node.exe 访问专用网络。');
+    }
+  }
 });

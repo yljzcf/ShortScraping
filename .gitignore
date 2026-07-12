@@ -39,3 +39,4 @@ worklog/
 
 # Local data (runtime output)
 db/timeline.csv
+db/timeline.json
