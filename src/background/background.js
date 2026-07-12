@@ -95,6 +95,10 @@ loadConfigFromJsonFiles().then(setupAlarms).catch(error => {
   console.error('[ShortScraping] 从 JSON 恢复配置失败:', error);
 });
 
+// SW 每次启动预热一次共享快照：扩展重载/同步服务重启后局域网共享页
+// 立即有数据，无需等下一次抓取；服务端对相同内容不会广播刷新。
+scheduleCsvSync();
+
 /**
  * 从扩展 config 目录的 tag.json / cron.json / trans.json 恢复配置。
  */

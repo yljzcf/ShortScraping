@@ -52,6 +52,7 @@ const CSV_COLUMNS = [
 
 // —— 局域网共享状态：最新时间线快照（内存 + db/timeline.json 持久化） ——
 let latestDramas = [];
+let latestSerialized = '[]';
 let dataVersion = 0;
 let updatedAt = null;
 const sseClients = new Set();
@@ -209,6 +210,7 @@ function loadSnapshot() {
     if (!fs.existsSync(TIMELINE_JSON_PATH)) return;
     const raw = JSON.parse(fs.readFileSync(TIMELINE_JSON_PATH, 'utf8'));
     latestDramas = Array.isArray(raw.dramas) ? raw.dramas : [];
+    latestSerialized = JSON.stringify(latestDramas);
     dataVersion = Number.isInteger(raw.version) ? raw.version : 0;
     updatedAt = raw.updatedAt || null;
     console.log(`[ShortScraping Sync] 已恢复时间线快照：${latestDramas.length} 条（version ${dataVersion}）`);
@@ -373,12 +375,17 @@ const server = http.createServer(async (req, res) => {
       const configured = filterDramasByTagConfig(dramas);
       const count = writeTimelineCsv(configured);
 
-      // 更新局域网共享快照并广播给已连接页面
-      latestDramas = configured;
-      dataVersion += 1;
-      updatedAt = new Date().toISOString();
-      saveSnapshot();
-      broadcastUpdate();
+      // 更新局域网共享快照并广播给已连接页面；内容未变化时不 bump 版本
+      // 不广播——扩展 SW 每次唤醒都会预热推送，避免共享页无谓重渲染
+      const serialized = JSON.stringify(configured);
+      if (serialized !== latestSerialized) {
+        latestSerialized = serialized;
+        latestDramas = configured;
+        dataVersion += 1;
+        updatedAt = new Date().toISOString();
+        saveSnapshot();
+        broadcastUpdate();
+      }
 
       return sendJson(res, 200, { ok: true, count, csvPath: CSV_PATH });
     } catch (error) {
