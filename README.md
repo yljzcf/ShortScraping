@@ -40,7 +40,16 @@ npm run sync
 node server/sync-server.js
 ```
 
-Windows 推荐使用脚本管理。`server/` 根目录只放两个日常入口，其余管理脚本在 `server/tools/`：
+跨平台命令（Windows / macOS / Linux 通用，需已安装 Node.js）：
+
+```bash
+npm run start         # 启动（前台常驻，Ctrl+C 停止）
+npm run stop          # 停止
+npm run restart       # 重启
+npm run fix-encoding  # 修复 CSV 编码
+```
+
+Windows 也可用脚本管理。`server/` 根目录只放两个日常入口，其余管理脚本在 `server/tools/`：
 
 ```bat
 server\start-sync.bat          # 启动服务（日常入口）
@@ -49,7 +58,16 @@ server\tools\stop-sync.bat     # 关闭
 server\tools\restart-sync.bat  # 重启（升级后用）
 ```
 
-`server/start-sync.bat` 会先检查 `http://127.0.0.1:31919/health`，如果服务已经运行就提示后退出，避免重复启动；否则会在当前命令窗口中启动 `server/sync-server.js`。启动后同步服务会常驻该命令窗口，持续监听扩展写入请求；关闭窗口、按 `Ctrl+C` 或运行 `server/tools/stop-sync.bat` 后服务才会停止。
+macOS 可双击对应 `.command` 脚本（首次使用前先授予执行权限 `chmod +x server/start-sync.command server/tools/*.command`）：
+
+```bash
+server/start-sync.command              # 启动（根目录，日常入口）
+server/tools/stop-sync.command         # 停止
+server/tools/restart-sync.command      # 重启
+server/tools/fix-csv-encoding.command  # 修复 CSV 编码
+```
+
+`server/start-sync.bat` 会先检查 `http://127.0.0.1:31919/health`，如果服务已经运行就提示后退出，避免重复启动；否则会在当前命令窗口中启动 `server/sync-server.js`。启动后同步服务会常驻该命令窗口，持续监听扩展写入请求；关闭窗口、按 `Ctrl+C`、运行 `npm run stop` 或 `server/tools/stop-sync.bat` 后服务才会停止。`npm run stop`（及 `.command` 停止脚本）通过本机 `POST /shutdown` 接口请服务优雅退出，只会停掉本服务自身；`npm run start` 若端口已被占用会打印提示后退出。
 
 扩展弹窗顶部状态栏分左右两段：左侧显示同步服务状态（`同步服务：已开启/已关闭`，点击重新检测），最前方的 `📁` 可打开同步服务脚本所在文件夹（未注册一键集成时退化为复制路径），服务关闭时还会出现 `▶ 启动` 按钮（见下方「一键启动集成」）；右侧显示当前版本与远端版本状态（读取 GitHub 仓库 master 分支的 `manifest.json`，点击重新检查）。远端有新版本时右侧会以橙色高亮提示 `v当前 → v新版 可更新`，此时 `git pull` 更新代码后在 `chrome://extensions` 重载扩展即可。如果同步服务显示已关闭，点 `▶ 启动` 或运行 `server/start-sync.bat` 后点击状态条重新检测。
 
@@ -73,11 +91,13 @@ db/timeline.csv
 
 CSV 默认写入为带 BOM 的 UTF-8，并使用 Windows 换行，便于 Excel/WPS 直接识别中文。如果已有 CSV 仍乱码，可先关闭 Excel/WPS，然后运行：
 
-```bat
-server\tools\fix-csv-encoding.bat
+```bash
+npm run fix-encoding
+# 或 Windows 双击 server\tools\fix-csv-encoding.bat
+# 或 macOS 双击 server/tools/fix-csv-encoding.command
 ```
 
-该脚本会把现有 `db/timeline.csv` 重新保存为 UTF-8 with BOM。也可以启动同步服务后打开一次扩展弹窗——弹窗检测到服务健康会自动补推当前时间线，让服务重新写出 CSV。
+该命令会把现有 `db/timeline.csv` 重新保存为 UTF-8 with BOM + CRLF。也可以启动同步服务后打开一次扩展弹窗——弹窗检测到服务健康会自动补推当前时间线，让服务重新写出 CSV。
 
 > 如果未启动同步服务，扩展仍可正常使用，只是控制台会提示 CSV 同步失败。
 
@@ -106,10 +126,10 @@ server\tools\fix-csv-encoding.bat
 同步服务运行时会同时提供一个**只读**的局域网时间线页面：局域网内的手机、平板、其他电脑打开 `http://<本机IP>:31919/` 即可浏览与弹窗一致的时间线（六站点切换、日期分组、卡片样式），扩展抓取/翻译产生新数据时页面自动刷新（SSE 推送），无需手动刷新。
 
 - **链接位置**：扩展弹窗底部状态栏（与翻译状态、抓取时间同一行）显示 `📡 <IP>:31919`，点击复制完整链接；旁边 `▦` 按钮弹出二维码，手机扫码直达。服务未启动时显示灰色「未启动」。
-- **防火墙**：更新后首次启动同步服务时，Windows 会询问是否允许 `node.exe` 访问网络，请勾选**专用网络**并允许；拒绝后局域网设备将无法访问。
+- **防火墙**：更新后首次启动同步服务时，系统可能询问是否允许 Node 访问网络（Windows 为 `node.exe`，请勾选**专用网络**并允许；macOS 会弹出「是否接受传入网络连接」，选择允许），拒绝后局域网设备将无法访问。
 - **只读边界**：局域网设备只能浏览页面与时间线数据；写入接口（CSV 同步、订阅/翻译配置写回）仅接受本机调用，翻译 API Key 无任何读取接口。
 - **仅本机模式**：不需要局域网共享时，可用 `node server/sync-server.js --local-only` 启动，退回仅 127.0.0.1 监听（此时弹窗底栏显示「不可用」）。
-- **更新提示**：从旧版本升级后需重启同步服务（`server/tools/restart-sync.bat`），否则弹窗底栏拿不到局域网地址。
+- **更新提示**：从旧版本升级后需重启同步服务（`npm run restart`，Windows 可双击 `server/tools/restart-sync.bat`，macOS 可双击 `server/tools/restart-sync.command`），否则弹窗底栏拿不到局域网地址。
 - **共享页没数据？**：打开一次扩展弹窗即可——弹窗检测到服务健康会自动把当前时间线推给共享服务（服务与扩展的启动先后顺序不再影响）。
 
 ## ⚙️ 配置说明
@@ -192,9 +212,9 @@ ShortScraping/
 │   └── shared/                   # 共享模块：translator.js（翻译）、timeline-render.js（时间线渲染，弹窗与共享页共用）、qrcode.js（二维码）
 ├── assets/icons/                 # 扩展图标、站点图标与默认海报
 ├── config/                       # 本地配置与示例配置
-├── server/                       # 本地同步服务（CSV + 局域网共享页）；根目录仅日常入口 start-sync.bat / setup-launcher.bat
+├── server/                       # 本地同步服务（CSV + 局域网共享页）；根目录仅日常入口 start-sync.bat/.command、setup-launcher.bat
 │   ├── public/                   # 局域网只读时间线页面（share.html/css/js）
-│   └── tools/                    # 管理脚本：stop/restart-sync、fix-csv-encoding、remove-launcher、launcher.vbs（协议分发器）
+│   └── tools/                    # 管理脚本：stop-sync/restart-sync/fix-csv-encoding（.bat + macOS .command）+ 跨平台 Node 助手 stop.js/fix-csv-encoding.js、remove-launcher、launcher.vbs（协议分发器）
 ├── db/timeline.csv               # 本地 CSV 输出
 └── db/timeline.json              # 时间线快照（局域网页面数据源，服务重启后回读）
 ```

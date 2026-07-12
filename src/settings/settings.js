@@ -628,7 +628,7 @@
     if (status === 'off') {
       container.classList.add('is-off');
       text.textContent = '同步服务：已关闭';
-      archiveInfo.textContent = '请运行 server/start-sync.bat 或 npm run sync 后再使用文件写回能力。';
+      archiveInfo.textContent = '请运行 npm run sync（Windows 可双击 start-sync.bat）后再使用文件写回能力。';
       return;
     }
 

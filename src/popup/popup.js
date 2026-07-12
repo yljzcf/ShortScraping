@@ -259,7 +259,7 @@
 
     const dir = await getSyncServerDir();
     if (!dir) {
-      showToast('尚未获取到路径：请先启动一次同步服务（server/start-sync.bat）', { type: 'error', duration: 4000 });
+      showToast('尚未获取到路径：请先启动一次同步服务（运行 npm run sync）', { type: 'error', duration: 4000 });
       return;
     }
 
@@ -332,7 +332,7 @@
 
     if (lanUrls === null) {
       container.classList.add('is-off');
-      container.title = '同步服务未启动：运行 server/start-sync.bat 后点击重新检测';
+      container.title = '同步服务未启动：运行 npm run sync（Windows 可双击 start-sync.bat）后点击重新检测';
       text.textContent = '未启动';
       qrBtn.classList.add('hidden');
       popover.classList.add('hidden');
@@ -432,7 +432,7 @@
 
     if (status === 'off') {
       container.classList.add('is-off');
-      container.title = '本地 CSV 同步服务未开启，请运行 server/start-sync.bat；点击可重新检测';
+      container.title = '本地 CSV 同步服务未开启，请运行 npm run sync（Windows 可双击 start-sync.bat）；点击可重新检测';
       text.textContent = '同步服务：已关闭';
       return;
     }

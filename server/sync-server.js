@@ -338,6 +338,21 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // 停止服务：仅本机可调用（已受上方 POST 回环护栏保护），供 stop.js / 停止脚本优雅关停
+  if (req.method === 'POST' && pathname === '/shutdown') {
+    sendJson(res, 200, { ok: true, message: 'shutting down' });
+    console.log('[ShortScraping Sync] 收到停止请求，正在关闭服务...');
+    // 主动断开 SSE 长连接，否则 server.close 会一直等待其结束
+    for (const client of sseClients) {
+      try { client.end(); } catch (error) { /* 忽略断开异常 */ }
+    }
+    sseClients.clear();
+    server.close(() => process.exit(0));
+    // 兜底：即使仍有未结束的连接，也在短暂延迟后强制退出
+    setTimeout(() => process.exit(0), 500).unref();
+    return;
+  }
+
   if (req.method === 'GET' && pathname === '/api/timeline') {
     return sendJson(res, 200, { ok: true, version: dataVersion, updatedAt, dramas: latestDramas });
   }
@@ -438,6 +453,16 @@ setInterval(() => {
   }
 }, 30000);
 
+server.on('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`[ShortScraping Sync] 端口 ${PORT} 已被占用（可能同步服务已在运行）。`);
+    console.error('[ShortScraping Sync] 如需停止，请运行 npm run stop（macOS 可双击 stop-sync.command）。');
+    process.exit(1);
+  }
+  console.error('[ShortScraping Sync] 服务发生错误：', error);
+  process.exit(1);
+});
+
 server.listen(PORT, LOCAL_ONLY ? '127.0.0.1' : '0.0.0.0', () => {
   console.log(`[ShortScraping Sync] 服务已启动：http://127.0.0.1:${PORT}${LOCAL_ONLY ? '（仅本机模式）' : ''}`);
   console.log(`[ShortScraping Sync] CSV 输出：${CSV_PATH}`);
@@ -445,7 +470,7 @@ server.listen(PORT, LOCAL_ONLY ? '127.0.0.1' : '0.0.0.0', () => {
     const lanUrls = getLanUrls();
     if (lanUrls.length > 0) {
       console.log(`[ShortScraping Sync] 局域网共享页：${lanUrls.join('  ')}`);
-      console.log('[ShortScraping Sync] 首次启动如弹出 Windows 防火墙提示，请允许 node.exe 访问专用网络。');
+      console.log('[ShortScraping Sync] 首次启动如系统弹出防火墙授权提示，请允许 Node 访问局域网（专用网络）。');
     }
   }
 });

@@ -1,9 +1,13 @@
 {
   "name": "shortscraping",
-  "version": "1.4.0",
+  "version": "1.4.2",
   "private": true,
   "description": "ShortScraping browser extension and local CSV sync service",
   "scripts": {
-    "sync": "node server/sync-server.js"
+    "sync": "node server/sync-server.js",
+    "start": "node server/sync-server.js",
+    "stop": "node server/tools/stop.js",
+    "restart": "node server/tools/stop.js && node server/sync-server.js",
+    "fix-encoding": "node server/tools/fix-csv-encoding.js"
   }
 }
