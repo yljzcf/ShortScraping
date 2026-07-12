@@ -175,6 +175,11 @@
       const result = await response.json();
       updateSyncServiceStatus(result?.ok ? 'on' : 'off');
       updateLanShare(result?.ok ? (Array.isArray(result.lanUrls) ? result.lanUrls : []) : null);
+      if (result?.ok) {
+        // 服务健康即让后台预热一次共享快照：服务比扩展后启动时，
+        // SW 启动时的预热推送已丢失，靠弹窗打开补喂（服务端同内容不广播）
+        chrome.runtime.sendMessage({ action: 'warmupCsvSync' }).catch(() => {});
+      }
     } catch (e) {
       updateSyncServiceStatus('off');
       updateLanShare(null);

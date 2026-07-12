@@ -852,6 +852,14 @@ function showNotification(message) {
  * 监听消息
  */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'warmupCsvSync') {
+    // 弹窗检测到同步服务健康时的补喂：服务启动晚于 SW 预热推送时，
+    // 快照会一直空着，打开弹窗即可把当前时间线重新推给服务
+    scheduleCsvSync();
+    sendResponse({ success: true });
+    return false;
+  }
+
   if (request.action === 'updateAlarms') {
     setupAlarms({ force: Boolean(request.force) }).then(() => {
       sendResponse({ success: true });
