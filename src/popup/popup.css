@@ -708,6 +708,70 @@ body {
   color: var(--border);
 }
 
+/* 底栏局域网共享区块（与翻译状态、抓取时间同一行） */
+.lan-share {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.lan-share.is-on:hover {
+  color: var(--text);
+}
+
+.lan-share.is-off {
+  opacity: 0.65;
+}
+
+.lan-qr-btn {
+  width: 18px;
+  height: 18px;
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 18px;
+  border-radius: 4px;
+}
+
+.lan-qr-btn:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* 二维码浮层：固定在底栏上方右侧 */
+.lan-qr-popover {
+  position: fixed;
+  right: 12px;
+  bottom: 42px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+
+.lan-qr-popover canvas {
+  border-radius: 6px;
+}
+
+.lan-qr-url {
+  font-size: 11px;
+  color: var(--text-secondary);
+  user-select: text;
+}
+
 /* 隐藏 */
 .hidden {
   display: none !important;

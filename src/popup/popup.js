@@ -16,7 +16,8 @@
     lastScrape: null,
     lastTranslate: null,
     isLoading: false,
-    activeSource: null
+    activeSource: null,
+    lanUrls: []
   };
 
   // DOM 元素
@@ -90,6 +91,15 @@
       status: document.getElementById('statusText')
     };
 
+    elements.lanShare = {
+      container: document.getElementById('lanShare'),
+      text: document.getElementById('lanShareText'),
+      qrBtn: document.getElementById('btnLanQr'),
+      popover: document.getElementById('lanQrPopover'),
+      qrCanvas: document.getElementById('lanQrCanvas'),
+      qrUrl: document.getElementById('lanQrUrl')
+    };
+
     elements.categoryTabs = Array.from(document.querySelectorAll('.category-tab'));
   }
 
@@ -102,6 +112,20 @@
     elements.buttons.settings.addEventListener('click', openSettings);
     elements.syncService.container.addEventListener('click', checkSyncServiceStatus);
     elements.versionStatus.container.addEventListener('click', checkVersionStatus);
+    elements.lanShare.container.addEventListener('click', onLanShareClick);
+    elements.lanShare.qrBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleLanQrPopover();
+    });
+    // 点浮层与局域网区块之外的任意位置关闭二维码
+    document.addEventListener('click', (e) => {
+      const { popover, container } = elements.lanShare;
+      if (!popover.classList.contains('hidden') &&
+          !popover.contains(e.target) &&
+          !container.contains(e.target)) {
+        popover.classList.add('hidden');
+      }
+    });
 
     elements.categoryTabs.forEach(tab => {
       tab.addEventListener('click', () => {
@@ -150,8 +174,95 @@
 
       const result = await response.json();
       updateSyncServiceStatus(result?.ok ? 'on' : 'off');
+      updateLanShare(result?.ok ? (Array.isArray(result.lanUrls) ? result.lanUrls : []) : null);
     } catch (e) {
       updateSyncServiceStatus('off');
+      updateLanShare(null);
+    }
+  }
+
+  /**
+   * 更新底栏局域网共享区块。
+   * lanUrls 为 null：同步服务未启动；空数组：服务在但无局域网地址
+   * （--local-only 模式或旧版服务）；非空：展示首个地址，其余进悬停提示。
+   */
+  function updateLanShare(lanUrls) {
+    const { container, text, qrBtn, popover } = elements.lanShare;
+    container.classList.remove('is-on', 'is-off');
+    state.lanUrls = Array.isArray(lanUrls) ? lanUrls : [];
+
+    if (lanUrls === null) {
+      container.classList.add('is-off');
+      container.title = '同步服务未启动：运行 server/start-sync.bat 后点击重新检测';
+      text.textContent = '未启动';
+      qrBtn.classList.add('hidden');
+      popover.classList.add('hidden');
+      return;
+    }
+
+    if (state.lanUrls.length === 0) {
+      container.classList.add('is-off');
+      container.title = '同步服务未返回局域网地址（--local-only 模式或旧版服务）；重启最新版同步服务后点击重新检测';
+      text.textContent = '不可用';
+      qrBtn.classList.add('hidden');
+      popover.classList.add('hidden');
+      return;
+    }
+
+    const primary = state.lanUrls[0];
+    container.classList.add('is-on');
+    const extra = state.lanUrls.length > 1
+      ? `\n其他候选：${state.lanUrls.slice(1).join('、')}`
+      : '';
+    container.title = `局域网共享链接：点击复制 ${primary}${extra}`;
+    text.textContent = primary.replace(/^https?:\/\//, '');
+    qrBtn.classList.remove('hidden');
+  }
+
+  /**
+   * 点击局域网区块：有链接则复制，无链接则触发重新检测。
+   */
+  async function onLanShareClick() {
+    if (state.lanUrls.length === 0) {
+      checkSyncServiceStatus();
+      return;
+    }
+
+    const url = state.lanUrls[0];
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch (e) {
+      // 剪贴板 API 被拒时退回隐藏输入框方案
+      const input = document.createElement('textarea');
+      input.value = url;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      input.remove();
+    }
+
+    const restore = url.replace(/^https?:\/\//, '');
+    elements.lanShare.text.textContent = '已复制 ✓';
+    setTimeout(() => {
+      elements.lanShare.text.textContent = restore;
+    }, 1200);
+  }
+
+  function toggleLanQrPopover() {
+    const { popover, qrCanvas, qrUrl } = elements.lanShare;
+    if (!popover.classList.contains('hidden')) {
+      popover.classList.add('hidden');
+      return;
+    }
+    if (state.lanUrls.length === 0) return;
+
+    const url = state.lanUrls[0];
+    try {
+      QrCode.drawToCanvas(qrCanvas, url, 4, 4);
+      qrUrl.textContent = url;
+      popover.classList.remove('hidden');
+    } catch (e) {
+      console.error('[ShortScraping] 二维码生成失败:', e);
     }
   }
 

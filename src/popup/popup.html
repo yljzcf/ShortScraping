@@ -68,15 +68,27 @@
         <span class="status-dot"></span>
         <span id="statusText">就绪</span>
       </div>
+      <div class="lan-share" id="lanShare" title="局域网共享链接">
+        <span class="lan-share-icon" aria-hidden="true">📡</span>
+        <span id="lanShareText">检测中</span>
+        <button id="btnLanQr" class="lan-qr-btn hidden" title="显示二维码，手机扫码打开">▦</button>
+      </div>
       <div class="stats">
         <span id="statsTotal">0 部短剧</span>
         <span class="divider">|</span>
         <span id="statsLastUpdate">未更新</span>
       </div>
     </footer>
+
+    <!-- 局域网链接二维码浮层 -->
+    <div id="lanQrPopover" class="lan-qr-popover hidden">
+      <canvas id="lanQrCanvas" width="0" height="0"></canvas>
+      <div class="lan-qr-url" id="lanQrUrl"></div>
+    </div>
   </div>
 
   <script src="../shared/timeline-render.js"></script>
+  <script src="../shared/qrcode.js"></script>
   <script src="../shared/translator.js"></script>
   <script src="popup.js"></script>
 </body>
