@@ -1,6 +1,8 @@
 @echo off
 setlocal
 
+rem Pass --no-pause to skip key prompts (used by restart-sync.bat).
+set "SKIP_PAUSE=%~1"
 set "PORT=31919"
 set "HEALTH_URL=http://127.0.0.1:%PORT%/health"
 
@@ -21,7 +23,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 
 if errorlevel 2 (
   echo [ShortScraping Sync] Stop skipped because port %PORT% is not owned by node.exe.
-  pause
+  if /I not "%SKIP_PAUSE%"=="--no-pause" pause
   exit /b 2
 )
 
@@ -29,10 +31,10 @@ timeout /t 1 /nobreak >nul
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-RestMethod -Uri '%HEALTH_URL%' -TimeoutSec 2; if ($r.ok) { exit 1 } exit 0 } catch { exit 0 }" >nul 2>nul
 if errorlevel 1 (
   echo [ShortScraping Sync] Stop command was sent, but service still responds at %HEALTH_URL%.
-  pause
+  if /I not "%SKIP_PAUSE%"=="--no-pause" pause
   exit /b 1
 )
 
 echo [ShortScraping Sync] Service stopped.
-pause
+if /I not "%SKIP_PAUSE%"=="--no-pause" pause
 exit /b 0

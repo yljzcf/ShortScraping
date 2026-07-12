@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-for %%I in ("%~dp0..") do set "PROJECT_DIR=%%~fI"
+for %%I in ("%~dp0..\..") do set "PROJECT_DIR=%%~fI"
 set "CSV_PATH=%PROJECT_DIR%\db\timeline.csv"
 
 if not exist "%CSV_PATH%" (

@@ -40,15 +40,16 @@ npm run sync
 node server/sync-server.js
 ```
 
-Windows 推荐使用脚本管理：
+Windows 推荐使用脚本管理。`server/` 根目录只放两个日常入口，其余管理脚本在 `server/tools/`：
 
 ```bat
-server\start-sync.bat    # 启动
-server\stop-sync.bat     # 关闭
-server\restart-sync.bat  # 重启
+server\start-sync.bat          # 启动服务（日常入口）
+server\setup-launcher.bat      # 一次性注册一键启动集成（见下节）
+server\tools\stop-sync.bat     # 关闭
+server\tools\restart-sync.bat  # 重启（升级后用）
 ```
 
-`server/start-sync.bat` 会先检查 `http://127.0.0.1:31919/health`，如果服务已经运行就提示后退出，避免重复启动；否则会在当前命令窗口中启动 `server/sync-server.js`。启动后同步服务会常驻该命令窗口，持续监听扩展写入请求；关闭窗口、按 `Ctrl+C` 或运行 `server/stop-sync.bat` 后服务才会停止。
+`server/start-sync.bat` 会先检查 `http://127.0.0.1:31919/health`，如果服务已经运行就提示后退出，避免重复启动；否则会在当前命令窗口中启动 `server/sync-server.js`。启动后同步服务会常驻该命令窗口，持续监听扩展写入请求；关闭窗口、按 `Ctrl+C` 或运行 `server/tools/stop-sync.bat` 后服务才会停止。
 
 扩展弹窗顶部状态栏分左右两段：左侧显示同步服务状态（`同步服务：已开启/已关闭`，点击重新检测），最前方的 `📁` 可打开同步服务脚本所在文件夹（未注册一键集成时退化为复制路径），服务关闭时还会出现 `▶ 启动` 按钮（见下方「一键启动集成」）；右侧显示当前版本与远端版本状态（读取 GitHub 仓库 master 分支的 `manifest.json`，点击重新检查）。远端有新版本时右侧会以橙色高亮提示 `v当前 → v新版 可更新`，此时 `git pull` 更新代码后在 `chrome://extensions` 重载扩展即可。如果同步服务显示已关闭，点 `▶ 启动` 或运行 `server/start-sync.bat` 后点击状态条重新检测。
 
@@ -73,7 +74,7 @@ db/timeline.csv
 CSV 默认写入为带 BOM 的 UTF-8，并使用 Windows 换行，便于 Excel/WPS 直接识别中文。如果已有 CSV 仍乱码，可先关闭 Excel/WPS，然后运行：
 
 ```bat
-server\fix-csv-encoding.bat
+server\tools\fix-csv-encoding.bat
 ```
 
 该脚本会把现有 `db/timeline.csv` 重新保存为 UTF-8 with BOM。也可以启动同步服务后打开一次扩展弹窗——弹窗检测到服务健康会自动补推当前时间线，让服务重新写出 CSV。
@@ -91,8 +92,8 @@ server\fix-csv-encoding.bat
 
 - Chrome 首次触发协议时会弹「打开外部应用」确认框，勾选「一律允许」后不再询问。
 - 未运行注册脚本时点击这两个按钮无副作用：`📁` 退化为复制路径 + 按系统提示（Windows 提示 Win+E 粘贴，macOS 提示 Finder ⌘⇧G），`▶` 轮询超时后给出手动启动指引。
-- 协议分发器 `server/launcher.vbs` 只做固定动作匹配（打开文件夹 / 运行 start-sync.bat），从不把 URL 参数拼进命令行；网页即使构造 `shortscraping://` 链接也必须经过浏览器确认框，最坏结果只是打开文件夹或启动本地只读服务。
-- 撤销注册：运行 `server/remove-launcher.bat`。
+- 协议分发器 `server/tools/launcher.vbs` 只做固定动作匹配（打开 server 文件夹 / 运行 start-sync.bat），从不把 URL 参数拼进命令行；网页即使构造 `shortscraping://` 链接也必须经过浏览器确认框，最坏结果只是打开文件夹或启动本地只读服务。
+- 撤销注册：运行 `server/tools/remove-launcher.bat`。
 
 ### Windows 登录自启动
 
@@ -108,7 +109,7 @@ server\fix-csv-encoding.bat
 - **防火墙**：更新后首次启动同步服务时，Windows 会询问是否允许 `node.exe` 访问网络，请勾选**专用网络**并允许；拒绝后局域网设备将无法访问。
 - **只读边界**：局域网设备只能浏览页面与时间线数据；写入接口（CSV 同步、订阅/翻译配置写回）仅接受本机调用，翻译 API Key 无任何读取接口。
 - **仅本机模式**：不需要局域网共享时，可用 `node server/sync-server.js --local-only` 启动，退回仅 127.0.0.1 监听（此时弹窗底栏显示「不可用」）。
-- **更新提示**：从旧版本升级后需重启同步服务（`server/restart-sync.bat`），否则弹窗底栏拿不到局域网地址。
+- **更新提示**：从旧版本升级后需重启同步服务（`server/tools/restart-sync.bat`），否则弹窗底栏拿不到局域网地址。
 - **共享页没数据？**：打开一次扩展弹窗即可——弹窗检测到服务健康会自动把当前时间线推给共享服务（服务与扩展的启动先后顺序不再影响）。
 
 ## ⚙️ 配置说明
@@ -191,8 +192,9 @@ ShortScraping/
 │   └── shared/                   # 共享模块：translator.js（翻译）、timeline-render.js（时间线渲染，弹窗与共享页共用）、qrcode.js（二维码）
 ├── assets/icons/                 # 扩展图标、站点图标与默认海报
 ├── config/                       # 本地配置与示例配置
-├── server/                       # 本地同步服务（CSV + 局域网共享页）与 Windows 管理脚本
-│   └── public/                   # 局域网只读时间线页面（share.html/css/js）
+├── server/                       # 本地同步服务（CSV + 局域网共享页）；根目录仅日常入口 start-sync.bat / setup-launcher.bat
+│   ├── public/                   # 局域网只读时间线页面（share.html/css/js）
+│   └── tools/                    # 管理脚本：stop/restart-sync、fix-csv-encoding、remove-launcher、launcher.vbs（协议分发器）
 ├── db/timeline.csv               # 本地 CSV 输出
 └── db/timeline.json              # 时间线快照（局域网页面数据源，服务重启后回读）
 ```

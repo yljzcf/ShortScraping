@@ -6,10 +6,10 @@ rem start the sync service with one click. Undo with remove-launcher.bat.
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-set "LAUNCHER=%SCRIPT_DIR%\launcher.vbs"
+set "LAUNCHER=%SCRIPT_DIR%\tools\launcher.vbs"
 
 if not exist "%LAUNCHER%" (
-  echo [ShortScraping] launcher.vbs was not found next to this script.
+  echo [ShortScraping] tools\launcher.vbs was not found under %SCRIPT_DIR%.
   pause
   exit /b 1
 )
@@ -25,7 +25,7 @@ echo [ShortScraping] Protocol shortscraping:// registered successfully.
 echo   - Popup folder button opens: %SCRIPT_DIR%
 echo   - Popup start button runs:   %SCRIPT_DIR%\start-sync.bat
 echo   - Chrome asks for confirmation on first use; tick "Always allow" to skip it.
-echo   - To undo, run remove-launcher.bat.
+echo   - To undo, run tools\remove-launcher.bat.
 pause
 exit /b 0
 
