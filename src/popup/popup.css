@@ -141,6 +141,7 @@ body {
 
 /* 状态栏：左侧同步服务，右侧版本 */
 .status-bar {
+  position: relative; /* 临时提示条的定位锚点 */
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -153,12 +154,94 @@ body {
   flex-shrink: 0;
 }
 
+/* 临时提示条：悬浮在状态栏正下方，不占文档流（显示/消失时时间线不跳动） */
+.toast-bar {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 12px;
+  right: 12px;
+  z-index: 30;
+  padding: 7px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: var(--shadow);
+  animation: toast-in 0.18s ease-out;
+}
+
+.toast-bar.is-info {
+  background: rgba(30, 41, 59, 0.96);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.toast-bar.is-success {
+  background: rgba(16, 185, 129, 0.16);
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  color: #34d399;
+}
+
+.toast-bar.is-error {
+  background: rgba(239, 68, 68, 0.16);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  color: #f87171;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .sync-service {
   display: flex;
   align-items: center;
   gap: 8px;
   color: var(--text-secondary);
   cursor: pointer;
+}
+
+/* 状态栏内联小按钮：📁 打开脚本文件夹、▶ 一键启动 */
+.sync-inline-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 4px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.sync-inline-btn:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.sync-start-btn {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--success);
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.sync-start-btn:hover {
+  background: rgba(16, 185, 129, 0.16);
+  color: var(--success);
+}
+
+.sync-start-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .sync-service-hint {

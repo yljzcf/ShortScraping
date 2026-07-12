@@ -33,6 +33,13 @@ let postScrapeTranslateTimer = null;
 let postScrapeTranslateRunning = false;
 let csvSyncTimer = null;
 
+// 翻译轮 in-flight 共享：同一时刻只跑一轮，手动/定时/抓取后翻译线的并发调用
+// join 同一 promise，消灭重复翻译同一批条目。
+let translateRun = null;
+// 最近写出的 translateRunState 内存镜像：getTranslateState 从这里同步应答，
+// 不读 storage，避免拿到孤儿清理尚未落库前的僵尸 running:true。
+let translateRunStateMirror = null;
+
 const CSV_SYNC_ENDPOINT = 'http://127.0.0.1:31919/sync';
 const POST_SCRAPE_TRANSLATE_DELAY_MS = 10000;
 
@@ -98,6 +105,49 @@ loadConfigFromJsonFiles().then(setupAlarms).catch(error => {
 // SW 每次启动预热一次共享快照：扩展重载/同步服务重启后局域网共享页
 // 立即有数据，无需等下一次抓取；服务端对相同内容不会广播刷新。
 scheduleCsvSync();
+
+// SW 重启孤儿清理：storage 里 running:true 但本实例没有在跑的轮，说明上一
+// 实例连同其翻译轮已死（顶层代码只在新实例启动时求值一次），把状态归位，
+// 避免弹窗按持久化状态永远显示「翻译中」。
+cleanupOrphanTranslateRunState();
+
+/**
+ * translateRunState 的唯一写入口。独立 key 直接 set，不进 dramas 写队列
+ * （单写者 + 无读改写，不存在竞态）；镜像同步更新供 getTranslateState 应答。
+ */
+function writeTranslateRunState(state) {
+  translateRunStateMirror = state;
+  return chrome.storage.local.set({ translateRunState: state }).catch(error => {
+    console.warn('[ShortScraping] 翻译运行状态写入失败:', error?.message || error);
+  });
+}
+
+async function cleanupOrphanTranslateRunState() {
+  try {
+    const { translateRunState } = await chrome.storage.local.get('translateRunState');
+    if (!translateRunState?.running || translateRun) return;
+
+    console.warn('[ShortScraping] 检测到上一实例遗留的翻译运行状态，已重置');
+    const now = Date.now();
+    await writeTranslateRunState({
+      running: false,
+      startedAt: translateRunState.startedAt || null,
+      updatedAt: now,
+      finishedAt: now,
+      pendingCount: translateRunState.pendingCount || 0,
+      processedCount: translateRunState.processedCount || 0,
+      translatedCount: translateRunState.translatedCount || 0,
+      summary: {
+        pendingCount: translateRunState.pendingCount || 0,
+        processedCount: translateRunState.processedCount || 0,
+        translatedCount: translateRunState.translatedCount || 0,
+        error: '后台重启，翻译中断'
+      }
+    });
+  } catch (error) {
+    console.warn('[ShortScraping] 翻译孤儿状态清理失败:', error?.message || error);
+  }
+}
 
 /**
  * 从扩展 config 目录的 tag.json / cron.json / trans.json 恢复配置。
@@ -613,16 +663,42 @@ function waitForTabComplete(tabId) {
 }
 
 /**
- * 执行翻译任务
+ * 执行翻译任务。同一时刻只跑一轮：已有轮在跑时直接返回其 promise（join），
+ * 后来者的 source 被忽略——可 join 的轮必然非空，终态一定会写。
+ * 契约：返回的 promise 从不 reject，错误经 summary.error 传递。
  */
-async function performTranslate() {
+function performTranslate({ source = 'auto' } = {}) {
+  if (translateRun) return translateRun;
+
+  // 在第一个 await 之前同步赋值，同 tick 的并发调用不会穿过 null 检查
+  translateRun = performTranslateOnce(source).finally(() => {
+    translateRun = null;
+  });
+  return translateRun;
+}
+
+/**
+ * 翻译轮实现。运行状态持久化到 translateRunState（弹窗按钮由它驱动）：
+ * 非空轮 running:true → 每条进度（兼 SW 保活心跳）→ finally 终态；
+ * 空扫描仅手动触发时写一次终态（弹窗等着收尾信号），
+ * 定时/抓取后翻译线的空扫描静默，避免收尾期反复触发 onChanged 造成闪烁。
+ */
+async function performTranslateOnce(source) {
   console.log('[ShortScraping] 开始翻译检查...');
+
+  let pendingCount = 0;
+  let processedCount = 0;
+  let translatedCount = 0;
+  let runStartedAt = null;
+  let runError = null;
+  let stateWritten = false;
 
   try {
     const { dramas = [], translateConfig, urlTags = [] } = await chrome.storage.local.get(['dramas', 'translateConfig', 'urlTags']);
     const config = { ...DEFAULT_TRANSLATE_CONFIG, ...translateConfig };
     const configuredDramas = filterDramasByConfiguredUrls(dramas, urlTags);
     const newDramas = configuredDramas.filter(d => d.status === 'new');
+    pendingCount = newDramas.length;
 
     if (newDramas.length === 0) {
       console.log('[ShortScraping] 没有需要翻译的内容');
@@ -631,31 +707,50 @@ async function performTranslate() {
 
     console.log(`[ShortScraping] 发现 ${newDramas.length} 条待翻译`);
 
+    runStartedAt = Date.now();
+    stateWritten = true;
+    await writeTranslateRunState({
+      running: true,
+      startedAt: runStartedAt,
+      updatedAt: runStartedAt,
+      pendingCount,
+      processedCount: 0,
+      translatedCount: 0
+    });
+
     // 加载翻译模块
     await loadTranslator();
 
     // 翻译每条记录。注意：抓取线可能正在并行写入新卡片，
     // 所以不能在这里把开头读取到的 dramas 快照整体写回，否则会覆盖抓取线新增内容。
-    let translatedCount = 0;
-
     for (const drama of newDramas) {
       try {
         const result = await Translator.translateTitleAndDesc(drama.title, drama.description);
         const hasTranslation = Boolean(result?.title || result?.desc);
 
-        if (!hasTranslation) {
+        if (hasTranslation) {
+          const updated = await updateSingleDramaTranslation(drama.id, result);
+          if (updated) translatedCount++;
+        } else {
           console.warn(`[ShortScraping] 翻译结果为空，保持待翻译状态: ${drama.title}`);
-          continue;
         }
-
-        const updated = await updateSingleDramaTranslation(drama.id, result);
-        if (updated) translatedCount++;
-
-        // 延迟避免 API 限制
-        await new Promise(r => setTimeout(r, config.delayMs || 300));
       } catch (e) {
         console.warn(`[ShortScraping] 翻译失败: ${drama.title}`, e);
       }
+
+      // 成败均计入进度；不 await，同上下文的 storage 写按序落库
+      processedCount++;
+      writeTranslateRunState({
+        running: true,
+        startedAt: runStartedAt,
+        updatedAt: Date.now(),
+        pendingCount,
+        processedCount,
+        translatedCount
+      });
+
+      // 延迟避免 API 限制
+      await new Promise(r => setTimeout(r, config.delayMs || 300));
     }
 
     await chrome.storage.local.set({
@@ -668,10 +763,31 @@ async function performTranslate() {
       showNotification(`已翻译 ${translatedCount} 部短剧`);
     }
 
-    return { pendingCount: newDramas.length, translatedCount };
+    return { pendingCount, translatedCount };
   } catch (e) {
     console.error('[ShortScraping] 翻译任务失败:', e);
-    return { pendingCount: null, translatedCount: 0, error: e.message };
+    runError = e.message;
+    return { pendingCount: pendingCount || null, translatedCount, error: e.message };
+  } finally {
+    // 终态写进 finally，封死中途意外 throw 留下孤儿 running:true 的口
+    if (stateWritten || source === 'manual') {
+      const now = Date.now();
+      writeTranslateRunState({
+        running: false,
+        startedAt: runStartedAt,
+        updatedAt: now,
+        finishedAt: now,
+        pendingCount,
+        processedCount,
+        translatedCount,
+        summary: {
+          pendingCount,
+          processedCount,
+          translatedCount,
+          ...(runError ? { error: runError } : {})
+        }
+      });
+    }
   }
 }
 
@@ -879,12 +995,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'triggerTranslate') {
-    performTranslate().then((summary) => {
-      sendResponse({ success: true, summary });
-    }).catch((error) => {
-      sendResponse({ success: false, error: error.message });
+    // 立即 ack、不 await 整轮：按钮状态由持久化的 translateRunState 驱动，
+    // 不再依赖可能挂几十分钟的 sendResponse 往返（弹窗关闭也不再报 port closed）
+    performTranslate({ source: 'manual' });
+    sendResponse({ success: true, started: true });
+    return false;
+  }
+
+  if (request.action === 'getTranslateState') {
+    // 从内存应答：translateRun 存在但镜像还没写 running:true 时（预扫描阶段
+    // 或自动线空扫描），按未运行报告——真在跑的轮随后必有 onChanged 纠正，
+    // 而自动空扫描不写终态，若此处报 running 弹窗将永远等不到收尾信号
+    sendResponse({
+      running: Boolean(translateRun) && Boolean(translateRunStateMirror?.running),
+      state: translateRunStateMirror
     });
-    return true;
+    return false;
   }
 
   if (request.action === 'saveDrama') {

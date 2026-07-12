@@ -330,6 +330,8 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, {
       ok: true,
       csvPath: CSV_PATH,
+      // 弹窗 📁 依赖：扩展无法感知自己的磁盘路径，从这里学到脚本目录并缓存
+      serverDir: __dirname,
       localOnly: LOCAL_ONLY,
       lanUrls: LOCAL_ONLY ? [] : getLanUrls(),
       version: dataVersion
