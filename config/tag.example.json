@@ -70,9 +70,5 @@
   {
     "url": "https://dramashorts.io/?list=popular_now",
     "tags": ["DramaShorts", "Popular"]
-  },
-  {
-    "url": "https://dramashorts.io/?list=audience_favorite",
-    "tags": ["DramaShorts", "Favorite"]
   }
 ]
