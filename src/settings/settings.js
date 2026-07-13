@@ -35,8 +35,8 @@
     aiEndpoint: '',
     aiApiKey: '',
     aiModel: 'gpt-3.5-turbo',
-    aiPrefixPrompt: '你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请帮我将以下片名和内容简介翻译为最有网感的中文表达。输出格式为json结构，{"片名":"xxx","简介":"xxx"}。需要你翻译的内容为：',
-    batchSize: 5,
+    aiPrefixPrompt: '你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请把片名和内容简介翻译为最有网感的中文表达。',
+    batchSize: 10,
     delayMs: 200,
     requestTimeoutSec: 10
   };

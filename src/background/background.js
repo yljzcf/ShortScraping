@@ -21,8 +21,8 @@ const DEFAULT_TRANSLATE_CONFIG = {
   aiEndpoint: '',
   aiApiKey: '',
   aiModel: 'gpt-3.5-turbo',
-  aiPrefixPrompt: '你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请帮我将以下片名和内容简介翻译为最有网感的中文表达。输出格式为json结构，{"片名":"xxx","简介":"xxx"}。需要你翻译的内容为：',
-  batchSize: 5,
+  aiPrefixPrompt: '你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请把片名和内容简介翻译为最有网感的中文表达。',
+  batchSize: 10,
   delayMs: 200,
   requestTimeoutSec: 10
 };
@@ -678,6 +678,31 @@ function performTranslate({ source = 'auto' } = {}) {
 }
 
 /**
+ * 按内容长度把待翻译卡片贪心打包成批（AI 批量翻译用）：
+ * 每批最多 maxItems 条，且 title+desc 累计字符超预算就封批；单条超长自成一批。
+ * → 短简介多装、长简介少装，天然得到 1..maxItems 条/批，避免长文撑爆单次请求。
+ */
+function buildTranslateBatches(dramas, maxItems) {
+  const CHAR_BUDGET = 4000;
+  const batches = [];
+  let cur = [];
+  let curChars = 0;
+
+  for (const d of dramas) {
+    const len = (d.title || '').length + (d.description || '').length;
+    if (cur.length > 0 && (cur.length >= maxItems || curChars + len > CHAR_BUDGET)) {
+      batches.push(cur);
+      cur = [];
+      curChars = 0;
+    }
+    cur.push(d);
+    curChars += len;
+  }
+  if (cur.length > 0) batches.push(cur);
+  return batches;
+}
+
+/**
  * 翻译轮实现。运行状态持久化到 translateRunState（弹窗按钮由它驱动）：
  * 非空轮 running:true → 每条进度（兼 SW 保活心跳）→ finally 终态；
  * 空扫描仅手动触发时写一次终态（弹窗等着收尾信号），
@@ -723,34 +748,68 @@ async function performTranslateOnce(source) {
 
     // 翻译每条记录。注意：抓取线可能正在并行写入新卡片，
     // 所以不能在这里把开头读取到的 dramas 快照整体写回，否则会覆盖抓取线新增内容。
-    for (const drama of newDramas) {
-      try {
-        const result = await Translator.translateTitleAndDesc(drama.title, drama.description);
-        const hasTranslation = Boolean(result?.title || result?.desc);
+    const heartbeat = () => writeTranslateRunState({
+      running: true,
+      startedAt: runStartedAt,
+      updatedAt: Date.now(),
+      pendingCount,
+      processedCount,
+      translatedCount
+    });
 
-        if (hasTranslation) {
-          const updated = await updateSingleDramaTranslation(drama.id, result);
-          if (updated) translatedCount++;
-        } else {
-          console.warn(`[ShortScraping] 翻译结果为空，保持待翻译状态: ${drama.title}`);
-        }
-      } catch (e) {
-        console.warn(`[ShortScraping] 翻译失败: ${drama.title}`, e);
+    // 回填一条翻译结果并计进度：按 drama.id 精确定位，不依赖数组顺序（批量保对应的锚点）
+    const applyOne = async (drama, result) => {
+      const hasTranslation = Boolean(result?.title || result?.desc);
+      if (hasTranslation) {
+        const updated = await updateSingleDramaTranslation(drama.id, result);
+        if (updated) translatedCount++;
+      } else {
+        console.warn(`[ShortScraping] 翻译结果为空，保持待翻译状态: ${drama.title}`);
       }
-
-      // 成败均计入进度；不 await，同上下文的 storage 写按序落库
       processedCount++;
-      writeTranslateRunState({
-        running: true,
-        startedAt: runStartedAt,
-        updatedAt: Date.now(),
-        pendingCount,
-        processedCount,
-        translatedCount
-      });
+    };
 
-      // 延迟避免 API 限制
-      await new Promise(r => setTimeout(r, config.delayMs || 300));
+    const mode = config.translateMode || config.mode || 'api';
+
+    if (mode === 'ai') {
+      // AI 模式：按内容长度动态打包（1–10 条/批），一次请求译多条，明显减少请求数
+      const maxItems = Math.min(10, Math.max(1, Number(config.batchSize) || 10));
+      const batches = buildTranslateBatches(newDramas, maxItems);
+      console.log(`[ShortScraping] AI 批量翻译：${newDramas.length} 条分 ${batches.length} 批（每批≤${maxItems}）`);
+
+      for (const chunk of batches) {
+        let results;
+        try {
+          results = await Translator.translateBatchAI(chunk.map(d => ({ title: d.title, desc: d.description })));
+        } catch (e) {
+          console.warn('[ShortScraping] 批量翻译异常:', e);
+          results = chunk.map(() => ({ title: '', desc: '' }));
+        }
+
+        // 按批内下标 j 取 results[j]（translateBatchAI 保证等长、同序，缺失填空串）
+        for (let j = 0; j < chunk.length; j++) {
+          await applyOne(chunk[j], results[j] || { title: '', desc: '' });
+        }
+
+        // 一批一次心跳；不 await，同上下文 storage 写按序落库
+        heartbeat();
+
+        // 批间延迟避免接口限流
+        await new Promise(r => setTimeout(r, config.delayMs || 300));
+      }
+    } else {
+      // API 模式（MyMemory 等）无批量端点，保持逐条翻译
+      for (const drama of newDramas) {
+        let result = { title: '', desc: '' };
+        try {
+          result = await Translator.translateTitleAndDesc(drama.title, drama.description);
+        } catch (e) {
+          console.warn(`[ShortScraping] 翻译失败: ${drama.title}`, e);
+        }
+        await applyOne(drama, result);
+        heartbeat();
+        await new Promise(r => setTimeout(r, config.delayMs || 300));
+      }
     }
 
     await chrome.storage.local.set({

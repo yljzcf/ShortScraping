@@ -1,6 +1,6 @@
 {
   "name": "shortscraping",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "private": true,
   "description": "ShortScraping browser extension and local CSV sync service",
   "scripts": {

@@ -538,8 +538,8 @@
               </select>
             </div>
             <div class="form-field">
-              <label>批量大小</label>
-              <input type="number" id="batchSize" min="1" step="1" placeholder="5">
+              <label>每批条数上限</label>
+              <input type="number" id="batchSize" min="1" max="10" step="1" placeholder="10">
             </div>
             <div class="form-field">
               <label>请求超时（秒）</label>
@@ -576,6 +576,7 @@
             <div class="form-field" style="margin-top: 12px;">
               <label>前置提示词</label>
               <textarea id="aiPrefixPrompt" rows="5" placeholder="请输入发送给 AI 的翻译前置提示词"></textarea>
+              <p class="help-text">只需描述翻译风格/人设；翻译的输入输出 JSON 格式与批量对应关系由程序自动处理，无需在此约定格式。</p>
             </div>
           </div>
 

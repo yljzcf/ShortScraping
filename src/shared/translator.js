@@ -7,6 +7,15 @@ globalThis.Translator = (() => {
   // 默认翻译 API
   const DEFAULT_API = 'https://api.mymemory.translated.net/get';
 
+  // 批量翻译的输入/输出契约（由代码固定，拼在用户风格提示词之后）。
+  // 对应关系的命根子：要求模型按输入 id 一一回填，绝不靠返回顺序。
+  const BATCH_CONTRACT =
+    '\n\n下面是一个 JSON 数组，每个元素形如 {"id":<编号>,"title":<英文片名>,"desc":<英文简介>}。' +
+    '请逐条把片名和简介翻译为中文，并严格按输入的 id 一一对应，返回一个同样长度的 JSON 数组，' +
+    '每个元素形如 {"id":<与输入相同的编号>,"片名":<中文片名>,"简介":<中文简介>}。' +
+    '务必覆盖输入中的每一个 id，不得遗漏、增加、合并或改变 id；只输出该 JSON 数组本身，不要任何解释或代码块标记。' +
+    '\n\n需要翻译的内容：\n';
+
   /**
    * 获取翻译配置
    */
@@ -28,8 +37,8 @@ globalThis.Translator = (() => {
       aiEndpoint: rawConfig.aiEndpoint || '',
       aiApiKey: rawConfig.aiApiKey || '',
       aiModel: rawConfig.aiModel || 'gpt-3.5-turbo',
-      aiPrefixPrompt: rawConfig.aiPrefixPrompt || '你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请帮我将以下片名和内容简介翻译为最有网感的中文表达。输出格式为json结构，{"片名":"xxx","简介":"xxx"}。需要你翻译的内容为：',
-      batchSize: Number(rawConfig.batchSize) || 5,
+      aiPrefixPrompt: rawConfig.aiPrefixPrompt || '你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请把片名和内容简介翻译为最有网感的中文表达。',
+      batchSize: Number(rawConfig.batchSize) || 10,
       delayMs: Number(rawConfig.delayMs) || 200,
       requestTimeoutSec: Number(rawConfig.requestTimeoutSec) || 10
     };
@@ -205,12 +214,7 @@ globalThis.Translator = (() => {
       }
 
       const result = JSON.parse(jsonStr);
-
-      // 支持多种键名格式，并清理结果
-      const title = cleanText(result['片名'] || result.title || result.Title || '');
-      const desc = cleanText(result['简介'] || result.desc || result.description || result.Desc || '');
-
-      return { title, desc };
+      return pickTitleDesc(result);
     } catch (e) {
       console.warn('[ShortScraping] JSON 解析失败，尝试提取文本:', e.message);
 
@@ -240,48 +244,115 @@ globalThis.Translator = (() => {
   }
 
   /**
-   * 批量翻译（用于定时任务）
+   * 从 AI 返回对象里取片名/简介，兼容多种键名并清理。单条与批量解析共用。
    */
-  async function translateBatch(items, onProgress) {
+  function pickTitleDesc(obj) {
+    if (!obj || typeof obj !== 'object') return { title: '', desc: '' };
+    return {
+      title: cleanText(obj['片名'] || obj.title || obj.Title || ''),
+      desc: cleanText(obj['简介'] || obj.desc || obj.description || obj.Desc || '')
+    };
+  }
+
+  /**
+   * 批量翻译（AI 模式，一次请求译多条）。
+   * items: [{title, desc}]；返回「等长、同序」的 [{title, desc}]，失败/缺失填空串。
+   * 对应关系靠批内 id：请求带 id、解析按 id 回填，绝不依赖返回顺序。
+   * 调用方负责分批（每批条数/字符预算），本函数只把收到的这一批用一次请求译出来。
+   * 非 AI 模式退化为逐条 translateTitleAndDesc，保证调用方总能拿到对齐结果。
+   */
+  async function translateBatchAI(items) {
+    const list = Array.isArray(items) ? items : [];
+    if (list.length === 0) return [];
+
     const config = await getConfig();
-    const results = [];
 
-    for (let i = 0; i < items.length; i += config.batchSize) {
-      const batch = items.slice(i, i + config.batchSize);
-
-      for (const item of batch) {
+    if (config.mode !== 'ai') {
+      const results = [];
+      for (const it of list) {
         try {
-          const result = await translateTitleAndDesc(item.title, item.description);
-          if (result.title || result.desc) {
-            results.push({
-              ...item,
-              titleZh: result.title,
-              descriptionZh: result.desc
-            });
-          }
+          results.push(await translateTitleAndDesc(it.title, it.desc));
         } catch (e) {
-          console.warn(`[ShortScraping] 翻译失败: ${item.title}`, e);
+          results.push({ title: '', desc: '' });
         }
       }
-
-      // 进度回调
-      if (onProgress) {
-        onProgress(Math.min(i + config.batchSize, items.length), items.length);
-      }
-
-      // 延迟
-      if (i + config.batchSize < items.length) {
-        await new Promise(r => setTimeout(r, config.delayMs));
-      }
+      return results;
     }
 
-    return results;
+    if (!config.aiEndpoint || !config.aiApiKey) {
+      console.warn('[ShortScraping] AI 翻译未配置端点或密钥');
+      return list.map(() => ({ title: '', desc: '' }));
+    }
+
+    try {
+      // 批内 id 从 1 开始；调用方按下标 i 取 results[i]，本函数按 id=i+1 回填
+      const payload = list.map((it, i) => ({ id: i + 1, title: it.title || '', desc: it.desc || '' }));
+      const userMessage = `${config.aiPrefixPrompt}${BATCH_CONTRACT}${JSON.stringify(payload)}`;
+      const messages = [{ role: 'user', content: userMessage }];
+      const model = config.aiModel || 'gpt-3.5-turbo';
+
+      console.log(`[ShortScraping] 批量翻译 ${list.length} 条，模型: ${model}`);
+      const startAt = performance.now();
+      const response = await fetchWithTimeout(config.aiEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.aiApiKey}`
+        },
+        body: JSON.stringify({ model, messages, temperature: 0.3 })
+      }, config.requestTimeoutSec);
+      console.log(`[ShortScraping] 批量 AI 请求耗时: ${Math.round(performance.now() - startAt)}ms`);
+
+      if (!response.ok) {
+        console.warn('[ShortScraping] 批量 AI 请求失败:', response.status);
+        return list.map(() => ({ title: '', desc: '' }));
+      }
+
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content?.trim() || '';
+      const byId = parseAIBatchResponse(content);
+
+      // 按 id 回填；缺失 id 的条目留空串，调用方据此保留 status:'new' 下轮重试
+      return list.map((_, i) => byId.get(i + 1) || { title: '', desc: '' });
+    } catch (e) {
+      console.warn('[ShortScraping] 批量 AI 翻译失败:', e.message);
+      return list.map(() => ({ title: '', desc: '' }));
+    }
+  }
+
+  /**
+   * 解析 AI 批量返回的 JSON 数组，返回 Map<id, {title, desc}>。
+   * 解析失败或非数组返回空 Map（整批留待下一轮重试）。
+   */
+  function parseAIBatchResponse(content) {
+    const map = new Map();
+    try {
+      let jsonStr = content.replace(/[\x00-\x1F\x7F]/g, '').trim();
+
+      const fenced = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (fenced) jsonStr = fenced[1].trim();
+
+      const arrMatch = jsonStr.match(/\[[\s\S]*\]/);
+      if (arrMatch) jsonStr = arrMatch[0];
+
+      const arr = JSON.parse(jsonStr);
+      if (!Array.isArray(arr)) return map;
+
+      arr.forEach(item => {
+        const id = Number(item && item.id);
+        if (!Number.isInteger(id)) return;
+        map.set(id, pickTitleDesc(item));
+      });
+    } catch (e) {
+      console.warn('[ShortScraping] 批量 JSON 解析失败:', e.message);
+    }
+    return map;
   }
 
   return {
     translate,
     translateTitleAndDesc,
-    translateBatch,
+    translateBatchAI,
     getConfig
   };
 })();
