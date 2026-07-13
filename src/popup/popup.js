@@ -822,13 +822,62 @@
    * TimelineRender（src/shared/timeline-render.js，与局域网共享页共用同一份文件）。
    */
   function getVisibleDramas() {
-    const src = state.activeSource || 'imdb';
-    return state.dramas.filter(d => TimelineRender.dramaSource(d) === src);
+    if (!state.activeSource) return [];
+    return state.dramas.filter(d => TimelineRender.dramaSource(d) === state.activeSource);
+  }
+
+  /**
+   * 按域名判断订阅 URL 所属站点，与 background.js siteOfUrl、content.js detectSite、
+   * settings.js siteOfUrl 同规则（各上下文各留一份）。
+   */
+  function siteOfUrl(url) {
+    try {
+      const hostname = new URL(url).hostname;
+      if (hostname.endsWith('imdb.com')) return 'imdb';
+      if (hostname === 'store.steampowered.com') return 'steam';
+      if (hostname.endsWith('royalroad.com')) return 'royalroad';
+      if (hostname.endsWith('my-drama.com')) return 'mydrama';
+      if (hostname.endsWith('reelshort.com')) return 'reelshort';
+      if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
+    } catch (e) {
+      // 无效 URL 忽略
+    }
+    return null;
+  }
+
+  /**
+   * 用户实际订阅了哪些站点（按域名归类订阅 URL）。图标栏据此显隐：
+   * 只显示订阅集合内的站点，未订阅站点不出现空图标。
+   */
+  function getSubscribedSites() {
+    const set = new Set();
+    (state.urlTags || []).forEach(item => {
+      const site = siteOfUrl(item.urlPattern || item.url);
+      if (site) set.add(site);
+    });
+    return set;
+  }
+
+  /**
+   * 在已订阅站点中挑默认活动站点：按 CATEGORY_SOURCES 顺序优先选有数据的，
+   * 否则第一个已订阅的；零订阅返回 null（无图标 + 空状态）。
+   */
+  function pickActiveSource() {
+    const subscribed = getSubscribedSites();
+    if (subscribed.size === 0) return null;
+    const withData = TimelineRender.CATEGORY_SOURCES.find(
+      s => subscribed.has(s) && state.dramas.some(d => TimelineRender.dramaSource(d) === s)
+    );
+    return withData || TimelineRender.CATEGORY_SOURCES.find(s => subscribed.has(s)) || null;
   }
 
   function updateCategoryTabs() {
+    const subscribed = getSubscribedSites();
     elements.categoryTabs.forEach(tab => {
-      tab.classList.toggle('active', tab.dataset.source === state.activeSource);
+      const site = tab.dataset.source;
+      const visible = subscribed.has(site);
+      tab.classList.toggle('hidden', !visible);
+      tab.classList.toggle('active', visible && site === state.activeSource);
     });
   }
 
@@ -841,11 +890,15 @@
   }
 
   function renderTimeline() {
-    if (!state.activeSource) state.activeSource = TimelineRender.pickDefaultSource(state.dramas);
+    // 活动站点必须落在已订阅集合内；为空或已退订则在订阅站点里重挑（可能为 null）
+    const subscribed = getSubscribedSites();
+    if (!state.activeSource || !subscribed.has(state.activeSource)) {
+      state.activeSource = pickActiveSource();
+    }
     updateCategoryTabs();
 
     const hasData = TimelineRender.renderTimeline(elements.containers.timeline, getVisibleDramas(), {
-      source: state.activeSource,
+      source: state.activeSource || 'imdb',
       readOnly: false,
       assetsBase: '../../assets/icons',
       onTranslate: translateSingleCard
