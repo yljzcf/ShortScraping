@@ -45,23 +45,6 @@ globalThis.Translator = (() => {
   }
 
   /**
-   * 翻译单条文本（API 模式）
-   */
-  async function translate(text, targetLang = 'zh-CN') {
-    if (!text || text.length < 3) return '';
-
-    const config = await getConfig();
-
-    if (config.mode === 'ai') {
-      // AI 模式不支持单文本翻译，使用 translateTitleAndDesc
-      console.warn('[ShortScraping] AI 模式请使用 translateTitleAndDesc');
-      return '';
-    } else {
-      return await translateWithAPI(text, config, targetLang);
-    }
-  }
-
-  /**
    * 翻译标题和简介（AI 模式，带前置提示词）
    */
   async function translateTitleAndDesc(title, description) {
@@ -171,9 +154,9 @@ globalThis.Translator = (() => {
   /**
    * 带超时的 fetch，避免第三方接口长时间挂起导致按钮卡住。
    */
-  async function fetchWithTimeout(url, options = {}, timeoutSec = 20) {
+  async function fetchWithTimeout(url, options = {}, timeoutSec = 10) {
     const controller = new AbortController();
-    const timeoutMs = Math.max(5, Number(timeoutSec) || 20) * 1000;
+    const timeoutMs = Math.max(5, Number(timeoutSec) || 10) * 1000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
@@ -348,10 +331,9 @@ globalThis.Translator = (() => {
     return map;
   }
 
+  // 只导出实际有调用方的方法（弹窗单卡翻译 / 后台批量与逐条翻译）
   return {
-    translate,
     translateTitleAndDesc,
-    translateBatchAI,
-    getConfig
+    translateBatchAI
   };
 })();

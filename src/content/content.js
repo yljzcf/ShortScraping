@@ -38,7 +38,8 @@
         });
         return true;
       }
-      return true;
+      // 非 scrape 消息不保留异步响应通道，避免发送方端口悬挂
+      return false;
     });
 
     const site = detectSite(window.location.hostname);

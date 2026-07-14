@@ -241,10 +241,6 @@ async function setupAlarms(options = {}) {
     }
   }
 
-  await chrome.storage.local.set({
-    alarmScheduleSignature: getScheduleSignature(config)
-  });
-
   if (scheduleMode === 'cron') {
     console.log(`[ShortScraping] Cron 定时任务已设置: 抓取=${config.scrapeCron}, 翻译=${config.translateCron}`);
   } else {
@@ -319,23 +315,6 @@ function isSameAlarm(existing, alarmInfo) {
   }
 
   return false;
-}
-
-function getScheduleSignature(config) {
-  const scheduleMode = config.scheduleMode === 'cron' ? 'cron' : 'interval';
-  if (scheduleMode === 'cron') {
-    return JSON.stringify({
-      scheduleMode,
-      scrapeCron: config.scrapeCron,
-      translateCron: config.translateCron
-    });
-  }
-
-  return JSON.stringify({
-    scheduleMode,
-    scrapeInterval: config.scrapeInterval,
-    translateInterval: config.translateInterval
-  });
 }
 
 function getNextCronRun(expression, fromDate = new Date()) {
@@ -685,9 +664,6 @@ async function scrapeUrlInTab(url) {
 }
 
 /**
- * 等待标签页加载完成。
- */
-/**
  * 轮询向标签页发送抓取消息，直到 content script 就绪（接收端存在）或次数用尽。
  * 仅在 waitForTabComplete 超时后作为兜底路径使用。预算 40×3s=120s：后台节流
  * 标签页冷缓存加载 reelshort 这类重页时，DOMContentLoaded（即 document_end
@@ -863,7 +839,7 @@ async function performTranslateOnce(source) {
         heartbeat();
 
         // 批间延迟避免接口限流
-        await new Promise(r => setTimeout(r, config.delayMs || 300));
+        await new Promise(r => setTimeout(r, config.delayMs ?? 200));
       }
     } else {
       // API 模式（MyMemory 等）无批量端点，保持逐条翻译
@@ -876,7 +852,7 @@ async function performTranslateOnce(source) {
         }
         await applyOne(drama, result);
         heartbeat();
-        await new Promise(r => setTimeout(r, config.delayMs || 300));
+        await new Promise(r => setTimeout(r, config.delayMs ?? 200));
       }
     }
 
@@ -1164,16 +1140,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: true, updated });
     }).catch((error) => {
       sendResponse({ success: false, error: error.message });
-    });
-    return true;
-  }
-
-  if (request.action === 'getConfig') {
-    chrome.storage.local.get(['scheduleConfig', 'translateConfig'], (result) => {
-      sendResponse({
-        scheduleConfig: { ...DEFAULT_SCHEDULE_CONFIG, ...result.scheduleConfig },
-        translateConfig: { ...DEFAULT_TRANSLATE_CONFIG, ...result.translateConfig }
-      });
     });
     return true;
   }

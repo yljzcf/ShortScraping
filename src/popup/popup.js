@@ -14,7 +14,6 @@
     dramas: [],
     urlTags: [],
     lastScrape: null,
-    lastTranslate: null,
     isLoading: false,
     activeSource: null,
     lanUrls: [],
@@ -530,12 +529,11 @@
     showLoading(true);
 
     try {
-      const result = await chrome.storage.local.get(['dramas', 'urlTags', 'lastScrape', 'lastTranslate', 'syncServerDir']);
+      const result = await chrome.storage.local.get(['dramas', 'urlTags', 'lastScrape', 'syncServerDir']);
 
       state.urlTags = result.urlTags || [];
       state.dramas = filterDramasByConfiguredUrls(result.dramas || []);
       state.lastScrape = result.lastScrape;
-      state.lastTranslate = result.lastTranslate;
       state.syncServerDir = result.syncServerDir || state.syncServerDir;
 
       renderTimeline();

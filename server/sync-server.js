@@ -157,7 +157,7 @@ function normalizeTransConfig(rawConfig) {
     aiApiKey: String(config.aiApiKey || '').trim(),
     aiModel: String(config.aiModel || 'gpt-3.5-turbo').trim(),
     aiPrefixPrompt: String(config.aiPrefixPrompt || '').trim(),
-    batchSize: toPositiveInteger(config.batchSize, 5),
+    batchSize: toPositiveInteger(config.batchSize, 10),
     delayMs: toNonNegativeInteger(config.delayMs, 200),
     requestTimeoutSec: toPositiveInteger(config.requestTimeoutSec, 10)
   };
