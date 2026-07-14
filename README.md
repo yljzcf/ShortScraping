@@ -1,144 +1,71 @@
 # ShortScraping - 爆款短剧监控助手
 
-Chrome 浏览器插件，用于按配置 URL 监控 IMDB 等页面的新短剧条目，以时间线卡片展示，并支持 AI/API 翻译与本地 CSV 同步。
+Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRoad、My Drama、ReelShort、DramaShorts 六个平台的榜单/板块，新条目以时间线卡片展示，自动翻译为中文，并可经本地服务同步为 CSV、在局域网内只读共享。
+
+适合谁：追踪海外短剧/游戏/网文热榜动向的编辑、制片、市场与数据同学——打开弹窗就能看到"最近各平台新上了什么"，无需逐站巡逻。
 
 ## ✨ 功能特性
 
-- 🎬 **多 URL 监控**：URL 与来源标签由 `config/tag.json` 配置
-- 📅 **时间线卡片**：新增影片按抓取时间展示，同一时间段合并
-- 🌐 **翻译线**：卡片先以英文即时出现，随后按 `config/trans.json` 配置翻译为中文
-- 🔁 **抓取**：全量抓取由定时任务执行；弹窗内再次点击已激活的站点标签可手动刷新该站点，完成后状态栏下方提示本次新增条数（3 秒自动消失），按 `imdbId` 去重新增
-- 💾 **CSV 同步**：可通过本地同步服务将时间线实时写入 `db/timeline.csv`
-- 📡 **局域网共享**：局域网设备通过链接只读浏览时间线，数据更新自动刷新；链接显示在弹窗底栏（点击复制 + 二维码）
+- 🎬 **订阅式监控**：抓什么完全由 `config/tag.json` 的订阅 URL 决定，程序不内置任何默认订阅；每条订阅可配 1-3 个来源标签
+- 📅 **时间线卡片**：新条目按抓取时间倒序分组展示（同日一组、±1 分钟合并），卡片含封面、标题、简介、来源标签
+- 🌐 **翻译线**：卡片先以英文即时入库，随后按 `config/trans.json` 自动翻译为中文；平台自带官方中文的条目（Steam 中文详情、My Drama 本地化标题）直接采用、不再消耗翻译
+- 🔁 **抓取节奏**：全量抓取由定时任务（cron 或固定间隔）执行；弹窗内再点一次已激活的站点图标可手动刷新该站点，完成后提示"本次新增 N 条"；全局按去重键防重复入库
+- 💾 **CSV 同步**：本地同步服务把时间线实时写入 `db/timeline.csv`（UTF-8 BOM + CRLF，Excel/WPS 直接打开）
+- 📡 **局域网共享**：同一局域网的手机/平板/电脑打开 `http://<本机IP>:31919/` 即可只读浏览时间线，数据更新经 SSE 自动刷新；链接显示在弹窗底栏（点击复制 + 二维码）
+- 🔔 **版本自检**：弹窗对比远端仓库 master 的 `manifest.json`，有新版本以橙色提示
 
-## 📦 安装方式
+## 🌍 支持站点
 
-1. 打开 Chrome 浏览器，进入 `chrome://extensions/`
-2. 开启「开发者模式」
-3. 点击「加载已解压的扩展程序」
-4. 选择本项目目录
+| 站点 | 订阅入口 | 取数方式 | 去重键 |
+|------|----------|----------|--------|
+| IMDB | 榜单/搜索页（`/search/title`、`/find`） | 列表 DOM + 详情页补简介/出品公司 | `tt` 编号 |
+| Steam | 内容中心 `/category/<name>`、`/tags/<语言>/<标签名>` | 官方动态查询接口取列表 + `appdetails` 补英文详情 | appId |
+| RoyalRoad | 榜单页 `/fictions/*` | 服务端渲染列表自带全文简介，详情页补作者 | `rr`+数字 id |
+| My Drama | 主站首页板块（`?list=<板块锚点>`）与 fandom 子域文章流/Trending 菜单 | Next.js SSR + hydrate 轮询 / WordPress SSR | `md`+UUID |
+| ReelShort | 主站首页 TOP 板块与 `/fandom/` 文章流 | 页内 `__NEXT_DATA__` SSR 数据直出 / WordPress SSR | `rs`+book_id |
+| DramaShorts | `/top-movies` 榜单与首页板块（`?list=<板块id>`） | 页内 `__NEXT_DATA__` 直出，无需请求详情页 | `ds`+UUID |
 
-## 🚀 使用方法
+站点细节：
 
-1. 修改 `config/tag.json` 配置监控 URL 与 1-3 个标签
-2. 修改 `config/trans.json` 配置翻译模式、模型、提示词、超时时间
-3. 刷新扩展，或打开扩展设置页点击「重新读取配置」
-4. 全量抓取由定时任务自动执行；想立即刷新某个站点时，在弹窗内再点一次已激活的站点标签，完成后状态栏下方会提示「本次刷新新增 N 条内容」
-5. 新卡片会先以英文出现；每次抓取任务开始 10 秒后，翻译线会并行扫描 `待翻译` 卡片并翻译。点击右上角 `🌐` 可手动触发全部翻译：任务在后台执行（弹窗关闭也会继续），按钮悬停提示实时显示「已处理 X/Y」进度，重新打开弹窗会自动恢复进行中状态
+- **Steam**：成人专属/受限作品（接口 `success=false`）自动跳过；官方中文简介与英文不同时直接作为翻译结果。
+- **My Drama / ReelShort 的 fandom 入口**：文章条目通过文中回主站的链接换取主站 id，与主站条目全局去重；换不到 id 时以 `mdf-`/`rsf-`+slug 退化保留。
+- **DramaShorts**：首页板块 id 支持 `top_trending`（默认）/ `popular_now` / `audience_favorite`；板块内容每次请求轮换属站点自身行为，多轮定时抓取会逐步累积。规则目录当前未内置 `audience_favorite`（该板块为大池随机采样、单次重合度低），需要时可手动写入 `config/tag.json`。
 
-## 💾 CSV 同步
+## 📦 安装与快速上手
 
-由于 Chrome 扩展无法直接写入项目目录文件，项目提供本地同步服务将时间线数据写入 `db/timeline.csv`。
+1. 打开 Chrome，进入 `chrome://extensions/`，开启「开发者模式」
+2. 点击「加载已解压的扩展程序」，选择本项目目录（首次安装会自动打开设置页）
+3. 在设置页「网页订阅」勾选想监控的规则，点「保存订阅配置」
+   - 如需把勾选结果持久写回 `config/tag.json`，请先启动本地同步服务（见下文）；未启动时仅扩展本地生效
+4. 之后交给定时任务自动抓取；想立即看某个站点，在弹窗内再点一次该站点图标手动刷新
+5. 新卡片先以英文出现，抓取开始 10 秒后翻译线自动扫描翻译；也可点弹窗右上角 `🌐` 手动触发全部翻译（后台执行，弹窗关闭不中断，重开自动恢复进度显示）
 
-### 启动同步服务
+## 🖥️ 弹窗与设置页
 
-手动前台启动：
+**弹窗**（点击扩展图标）：
 
-```bash
-npm run sync
-# 或
-node server/sync-server.js
-```
+- **站点图标标签**：只显示有订阅的站点；点未激活图标＝切换查看，再点已激活图标＝只抓取该站点（图标转圈，完成后提示新增条数）
+- **`🌐` 全部翻译**：手动触发一轮全量翻译，悬停按钮可见「已处理 X/Y」实时进度
+- **顶部状态栏**：左侧同步服务状态（`📁` 打开服务目录、服务关闭时出现 `▶ 启动`，见「一键启动集成」）；右侧当前版本与远端版本对比（点击重新检查）
+- **底部状态栏**：条目总数、上次抓取时间、翻译进度，以及局域网共享链接 `📡 <IP>:31919`（点击复制，`▦` 弹出二维码）
 
-跨平台命令（Windows / macOS / Linux 通用，需已安装 Node.js）：
+**设置页**（弹窗 ⚙️ 进入，独立页面，五个标签页）：
 
-```bash
-npm run start         # 启动（前台常驻，Ctrl+C 停止）
-npm run stop          # 停止
-npm run restart       # 重启
-npm run fix-encoding  # 修复 CSV 编码
-```
+| 标签页 | 能做什么 |
+|--------|----------|
+| 配置文件 | 「重新读取配置」让三个 JSON 立即生效；快捷查看各配置文件 |
+| 网页订阅 | 勾选式订阅管理：候选规则来自目录 `config/tag.example.json`（按站点分组），保存后写回 `config/tag.json`；不支持在界面自由添加 URL，新增规则＝编辑目录文件后重载扩展 |
+| 定时任务 | **只读摘要**：展示当前调度模式与表达式。修改调度请直接编辑 `config/cron.json`，再回「配置文件」点「重新读取配置」 |
+| 翻译接口 | 完整表单编辑 `config/trans.json` 的全部字段（模式/端点/密钥/模型/提示词/批量/延迟/超时），保存写回文件（需同步服务） |
+| 数据存档 | 检测同步服务并显示 CSV 输出路径；导出/备份/清理/恢复能力规划中 |
 
-Windows 也可用脚本管理。`server/` 根目录只放两个日常入口，其余管理脚本在 `server/tools/`：
+## ⚙️ 配置文件
 
-```bat
-server\start-sync.bat          # 启动服务（日常入口）
-server\setup-launcher.bat      # 一次性注册一键启动集成（见下节）
-server\tools\stop-sync.bat     # 关闭
-server\tools\restart-sync.bat  # 重启（升级后用）
-```
+三个本地配置文件均已加入 `.gitignore`，共享模板为对应的 `config/*.example.json`。修改后在设置页点「重新读取配置」（或重载扩展）生效。
 
-macOS 可双击对应 `.command` 脚本（首次使用前先授予执行权限 `chmod +x server/start-sync.command server/tools/*.command`）：
+### `config/tag.json` — 订阅什么
 
-```bash
-server/start-sync.command              # 启动（根目录，日常入口）
-server/tools/stop-sync.command         # 停止
-server/tools/restart-sync.command      # 重启
-server/tools/fix-csv-encoding.command  # 修复 CSV 编码
-```
-
-`server/start-sync.bat` 会先检查 `http://127.0.0.1:31919/health`，如果服务已经运行就提示后退出，避免重复启动；否则会在当前命令窗口中启动 `server/sync-server.js`。启动后同步服务会常驻该命令窗口，持续监听扩展写入请求；关闭窗口、按 `Ctrl+C`、运行 `npm run stop` 或 `server/tools/stop-sync.bat` 后服务才会停止。`npm run stop`（及 `.command` 停止脚本）通过本机 `POST /shutdown` 接口请服务优雅退出，只会停掉本服务自身；`npm run start` 若端口已被占用会打印提示后退出。
-
-扩展弹窗顶部状态栏分左右两段：左侧显示同步服务状态（`同步服务：已开启/已关闭`，点击重新检测），最前方的 `📁` 可打开同步服务脚本所在文件夹（未注册一键集成时退化为复制路径），服务关闭时还会出现 `▶ 启动` 按钮（见下方「一键启动集成」）；右侧显示当前版本与远端版本状态（读取 GitHub 仓库 master 分支的 `manifest.json`，点击重新检查）。远端有新版本时右侧会以橙色高亮提示 `v当前 → v新版 可更新`，此时 `git pull` 更新代码后在 `chrome://extensions` 重载扩展即可。如果同步服务显示已关闭，点 `▶ 启动` 或运行 `server/start-sync.bat` 后点击状态条重新检测。
-
-服务地址：`http://127.0.0.1:31919`
-
-本地同步服务还提供网页订阅配置写回接口，设置页「网页订阅」保存时会调用 `POST /config/tag` 写入：
-
-```text
-config/tag.json
-```
-
-因此如果需要在设置页中勾选/取消订阅并持久写回文件，请先启动同步服务；未启动时只会更新扩展本地配置。
-
-扩展中时间线数据变化时，会自动同步到：
-
-```text
-db/timeline.csv
-```
-
-> CSV 已移除 `year` 列（发售/上映年份）——该字段在扩展界面从不展示，仅曾存在于 CSV。
-
-CSV 默认写入为带 BOM 的 UTF-8，并使用 Windows 换行，便于 Excel/WPS 直接识别中文。如果已有 CSV 仍乱码，可先关闭 Excel/WPS，然后运行：
-
-```bash
-npm run fix-encoding
-# 或 Windows 双击 server\tools\fix-csv-encoding.bat
-# 或 macOS 双击 server/tools/fix-csv-encoding.command
-```
-
-该命令会把现有 `db/timeline.csv` 重新保存为 UTF-8 with BOM + CRLF。也可以启动同步服务后打开一次扩展弹窗——弹窗检测到服务健康会自动补推当前时间线，让服务重新写出 CSV。
-
-> 如果未启动同步服务，扩展仍可正常使用，只是控制台会提示 CSV 同步失败。
-
-### 一键启动集成（Windows 可选）
-
-浏览器扩展本身无法打开资源管理器或启动本地进程。运行一次 `server/setup-launcher.bat`（双击即可，仅写当前用户注册表 `HKCU\Software\Classes\shortscraping`，无需管理员）注册 `shortscraping://` 协议后，弹窗获得两个能力：
-
-- `📁`：直接在资源管理器中打开 `server/` 文件夹（同时仍会复制路径作为兜底）。
-- `▶ 启动`：服务关闭时一键拉起 `start-sync.bat`（最小化窗口运行，自带防重复启动探测），弹窗随后自动轮询并把状态刷新为「已开启」。
-
-说明与边界：
-
-- Chrome 首次触发协议时会弹「打开外部应用」确认框，勾选「一律允许」后不再询问。
-- 未运行注册脚本时点击这两个按钮无副作用：`📁` 退化为复制路径 + 按系统提示（Windows 提示 Win+E 粘贴，macOS 提示 Finder ⌘⇧G），`▶` 轮询超时后给出手动启动指引。
-- 协议分发器 `server/tools/launcher.vbs` 只做固定动作匹配（打开 server 文件夹 / 运行 start-sync.bat），从不把 URL 参数拼进命令行；网页即使构造 `shortscraping://` 链接也必须经过浏览器确认框，最坏结果只是打开文件夹或启动本地只读服务。
-- 撤销注册：运行 `server/tools/remove-launcher.bat`。
-
-### Windows 登录自启动
-
-1. 按 `Win + R`，输入 `shell:startup`。
-2. 将 `server/start-sync.bat` 的快捷方式放入启动目录。
-3. 下次 Windows 登录后会自动启动本地同步服务。
-
-## 📡 局域网共享
-
-同步服务运行时会同时提供一个**只读**的局域网时间线页面：局域网内的手机、平板、其他电脑打开 `http://<本机IP>:31919/` 即可浏览与弹窗一致的时间线（六站点切换、日期分组、卡片样式），扩展抓取/翻译产生新数据时页面自动刷新（SSE 推送），无需手动刷新。
-
-- **链接位置**：扩展弹窗底部状态栏（与翻译状态、抓取时间同一行）显示 `📡 <IP>:31919`，点击复制完整链接；旁边 `▦` 按钮弹出二维码，手机扫码直达。服务未启动时显示灰色「未启动」。
-- **防火墙**：更新后首次启动同步服务时，系统可能询问是否允许 Node 访问网络（Windows 为 `node.exe`，请勾选**专用网络**并允许；macOS 会弹出「是否接受传入网络连接」，选择允许），拒绝后局域网设备将无法访问。
-- **只读边界**：局域网设备只能浏览页面与时间线数据；写入接口（CSV 同步、订阅/翻译配置写回）仅接受本机调用，翻译 API Key 无任何读取接口。
-- **仅本机模式**：不需要局域网共享时，可用 `node server/sync-server.js --local-only` 启动，退回仅 127.0.0.1 监听（此时弹窗底栏显示「不可用」）。
-- **更新提示**：从旧版本升级后需重启同步服务（`npm run restart`，Windows 可双击 `server/tools/restart-sync.bat`，macOS 可双击 `server/tools/restart-sync.command`），否则弹窗底栏拿不到局域网地址。
-- **共享页没数据？**：打开一次扩展弹窗即可——弹窗检测到服务健康会自动把当前时间线推给共享服务（服务与扩展的启动先后顺序不再影响）。
-
-## ⚙️ 配置说明
-
-### `config/tag.json`
-
-网页订阅完全以 `config/tag.json` 为准；程序不会自动补充任何默认订阅。未配置 URL 时，后台抓取会直接跳过。
-
-设置页「网页订阅」为勾选式：可选规则清单来自规则目录 `config/tag.example.json`（按站点分组、标签随规则固定），勾选保存后写回 `config/tag.json`。目录仅提供候选项，未勾选的规则不会参与抓取；界面暂不支持自由添加 URL，新增规则请编辑 `config/tag.example.json` 后重载扩展。
+程序完全以此文件为准，未配置的 URL 一律不抓。数组元素为 `url` + `tags`（1-3 个标签，首个通常是站点名）：
 
 ```json
 [
@@ -153,18 +80,7 @@ npm run fix-encoding
 ]
 ```
 
-目前支持六个站点（内容脚本按域名自动识别）：
-
-- **IMDB** 榜单/搜索页：列表取条目，进详情页补简介与公司。
-- **Steam** 内容中心页（`/category/<name>` 与 `/tags/<locale>/<标签名>`）：列表来自官方动态查询接口，再用 `appdetails` 接口（`?l=english`）补英文名/简介/开发者；成人专属或受限作品（接口 `success=false`）自动跳过。
-- **RoyalRoad** 榜单页（`/fictions/*`）：服务端渲染，列表自带标题/封面/全文简介，详情页补作者。
-- **My Drama** 主站首页「最流行」板块与 fandom 子域（`fandom.my-drama.com`）文章流 / Trending 菜单：fandom 条目通过文章内回主站链接与主站条目全局去重。
-- **ReelShort** 主站首页「TOP」板块（`www.reelshort.com`，解析页内 `__NEXT_DATA__` SSR 数据）与 `/fandom/` 文章流：fandom 条目通过文章内回主站 `/movie/` 链接与主站条目全局去重。
-- **DramaShorts**（`dramashorts.io`，解析页内 `__NEXT_DATA__` SSR 数据）：`/top-movies` 榜单页与首页板块；首页订阅 URL 用 `?list=<板块id>` 选板块（`top_trending` / `popular_now` / `audience_favorite`），列表自带全文简介，无需请求详情页。
-
-### `config/cron.json`
-
-定时任务单独配置，不与翻译接口配置混放。
+### `config/cron.json` — 什么时候抓
 
 ```json
 {
@@ -174,56 +90,142 @@ npm run fix-encoding
 }
 ```
 
-`scheduleMode` 支持：
+- `scheduleMode: "cron"`：按 5 段 cron 表达式（`分钟 小时 日期 月份 星期`）调度；Chrome Alarms 不原生支持 cron，扩展会计算下一次执行时间创建一次性 alarm，触发后续排，并有每小时看门狗兜底重建
+- `scheduleMode: "interval"`：按 `scrapeInterval` / `translateInterval`（小时）循环执行
+- 此文件**只能手动编辑**（设置页「定时任务」为只读展示），保存后记得「重新读取配置」
 
-- `cron`：按 5 段 cron 表达式调度，格式为 `分钟 小时 日期 月份 星期`；例如 `45 * * * *` 表示每小时第 45 分钟执行。
-- `interval`：兼容旧配置，按 `scrapeInterval` / `translateInterval` 的小时数循环执行。
+### `config/trans.json` — 怎么翻译
 
-Cron 模式下扩展会计算下一次执行时间并创建一次性 Chrome Alarm；任务触发完成后再排下一次，避免 service worker 被唤醒时反复清空并重置定时任务。
-
-### `config/trans.json`
-
-翻译接口单独配置，不包含 Cron 或间隔定时字段。
+完整字段（九项全集，缺省时使用括号内默认值）：
 
 ```json
 {
   "translateMode": "ai",
+  "apiEndpoint": "https://api.mymemory.translated.net/get",
   "aiEndpoint": "https://api.example.com/chat/completions",
-  "aiApiKey": "",
+  "aiApiKey": "sk-xxxx",
   "aiModel": "your-model",
+  "aiPrefixPrompt": "请把片名和内容简介翻译为最有网感的中文表达。",
+  "batchSize": 10,
+  "delayMs": 200,
   "requestTimeoutSec": 10
 }
 ```
 
-> 不要把真实 API Key 提交到公开仓库；本地使用时自行填写。`config/tag.json`、`config/cron.json` 与 `config/trans.json` 已加入 `.gitignore`，可共享模板位于 `config/tag.example.json`、`config/cron.example.json` 与 `config/trans.example.json`。
+- `translateMode`：`api`（免费 API 逐条 GET，默认 MyMemory）或 `ai`（OpenAI 兼容 Chat Completions 接口批量翻译）
+- `aiPrefixPrompt` 只需描述翻译风格/人设；输入输出 JSON 格式与批量对应关系由程序自动处理
+- `batchSize`（1-10）：AI 模式每批条数上限；实际按内容长度动态打包，长简介少装、短简介多装
+- `delayMs` / `requestTimeoutSec`：请求间延迟与单次请求超时
+
+> ⚠️ 不要把真实 API Key 提交到公开仓库；`config/trans.json` 已被 `.gitignore` 排除，本地自行填写。
+
+## 💾 本地同步服务
+
+Chrome 扩展无法直接写项目文件，本地 Node 服务负责三件事：把时间线写入 `db/timeline.csv`、承接设置页的配置写回（`config/tag.json`、`config/trans.json`）、提供局域网只读共享页。
+
+### 启动与管理
+
+跨平台命令（Windows / macOS / Linux，需 Node.js）：
+
+```bash
+npm run sync          # 启动（等价 node server/sync-server.js，前台常驻，Ctrl+C 停止）
+npm run start         # 同上
+npm run stop          # 优雅停止（经本机 POST /shutdown，只停本服务自身）
+npm run restart       # 重启（升级后用）
+npm run fix-encoding  # 修复 CSV 编码
+```
+
+Windows 双击脚本（`server/` 根目录只放日常入口，管理脚本在 `server/tools/`）：
+
+```bat
+server\start-sync.bat          # 启动（已运行则提示后退出，防重复启动）
+server\setup-launcher.bat      # 一次性注册一键启动集成（见下节）
+server\tools\stop-sync.bat     # 停止
+server\tools\restart-sync.bat  # 重启
+```
+
+macOS 双击对应 `.command` 脚本（首次先 `chmod +x server/start-sync.command server/tools/*.command`）：
+
+```bash
+server/start-sync.command              # 启动
+server/tools/stop-sync.command         # 停止
+server/tools/restart-sync.command      # 重启
+server/tools/fix-csv-encoding.command  # 修复 CSV 编码
+```
+
+服务地址：`http://127.0.0.1:31919`；端口被占用时会打印友好提示（先 `npm run stop`）而非报错堆栈。未启动同步服务时扩展一切照常，只是 CSV/配置写回不可用。
+
+### CSV 输出
+
+时间线数据变化时自动同步到 `db/timeline.csv`，带 BOM 的 UTF-8 + Windows 换行，Excel/WPS 直接识别中文。若历史文件乱码：关闭 Excel/WPS 后运行 `npm run fix-encoding`（或双击对应脚本）重新编码；也可以启动服务后打开一次扩展弹窗，弹窗会自动补推当前时间线重写 CSV。
+
+### 一键启动集成（Windows 可选）
+
+运行一次 `server/setup-launcher.bat`（只写当前用户注册表 `HKCU\Software\Classes\shortscraping`，无需管理员）注册 `shortscraping://` 协议后，弹窗获得两个能力：
+
+- `📁`：在资源管理器中直接打开 `server/` 文件夹（同时复制路径作兜底）
+- `▶ 启动`：服务关闭时一键拉起 `start-sync.bat`，弹窗自动轮询刷新状态
+
+边界说明：Chrome 首次触发协议会弹「打开外部应用」确认框；未注册时点击这两个按钮无副作用（`📁` 退化为复制路径，`▶` 超时后给手动指引）；协议分发器 `server/tools/launcher.vbs` 只做固定动作匹配、从不拼接 URL 参数。撤销注册：`server/tools/remove-launcher.bat`。
+
+### Windows 登录自启动
+
+`Win + R` → `shell:startup`，把 `server/start-sync.bat` 的快捷方式放入启动目录即可。
+
+## 📡 局域网共享
+
+同步服务运行时同时提供**只读**时间线页面：局域网设备打开 `http://<本机IP>:31919/`，看到与弹窗一致的时间线（六站点切换、日期分组、同款卡片），新数据经 SSE 推送自动刷新。
+
+- **链接位置**：弹窗底栏 `📡 <IP>:31919`，点击复制；`▦` 弹出二维码供手机扫码
+- **防火墙**：首次启动时若系统询问是否允许 Node 联网（Windows 为 `node.exe`），请允许**专用网络**，否则局域网设备无法访问
+- **只读边界**：局域网设备只能浏览页面与时间线数据；CSV 同步、配置写回、停止服务等写接口仅接受本机调用，翻译 API Key 无任何读取接口
+- **仅本机模式**：`node server/sync-server.js --local-only` 退回仅 127.0.0.1 监听（弹窗底栏显示「不可用」）
+- **升级后**：重启同步服务（`npm run restart`），否则弹窗拿不到局域网地址
+- **共享页没数据**：打开一次扩展弹窗即可，弹窗会自动把当前时间线推给服务
+
+## 🌐 翻译机制
+
+- **两条状态**：卡片入库即 `待翻译`（new），翻译成功变 `已翻译`（trans）；Steam 官方中文、My Drama 平台自带中文的条目入库时直接标记 `已翻译`
+- **API 模式**：逐条 GET 请求（默认 MyMemory，`q=<文本>&langpair=en|zh-CN`）
+- **AI 模式**：按内容长度动态打包成 1-10 条/批（单批约 4000 字符预算），一次请求翻译整批；返回结果按条目 id 回填，缺失的条目保持待翻译、下一轮自动重试
+- **时序**：每次抓取任务开始 10 秒后，翻译线并行扫描待翻译卡片，直到连续 3 次扫描无新内容；定时任务中的 `translateCron` 是独立的兜底轮；弹窗 `🌐` 随时手动触发
+- **失败行为**：接口失败不丢卡，条目保持待翻译等下一轮；批量结果与条目按 id 对应，不依赖返回顺序
+
+## 🔒 数据与隐私
+
+- 所有抓取数据存在本机：`chrome.storage.local`（扩展内）与 `db/`（CSV/JSON，若启用同步服务），无任何远端上报
+- 扩展主动发起的站外请求只有三类：抓取你订阅的站点、调用你配置的翻译接口、检查更新（读 GitHub 仓库 master 的 `manifest.json`）
+- 三个本地配置（含翻译密钥）均被 `.gitignore` 排除，不会随仓库分发
 
 ## 📁 项目结构
 
 ```text
 ShortScraping/
-├── manifest.json                 # Chrome 扩展配置
-├── package.json                  # 本地同步服务脚本
-├── README.md
+├── manifest.json                 # Chrome 扩展配置（版本号唯一源）
+├── package.json                  # 同步服务 npm 脚本（版本与 manifest 同步）
+├── README.md / LICENSE / .gitignore / .gitattributes
 ├── src/
-│   ├── background/background.js  # 后台 service worker
-│   ├── content/                  # 内容脚本
-│   ├── popup/                    # 扩展弹窗页面
-│   ├── settings/                 # 设置中心：配置文件、网页订阅、定时任务、翻译接口、数据存档
+│   ├── background/background.js  # 后台 service worker：调度、抓取/翻译编排、CSV 推送
+│   ├── content/                  # 内容脚本：六站点抓取适配器（content.js + content.css）
+│   ├── popup/                    # 扩展弹窗（popup.html/css/js）
+│   ├── settings/                 # 设置中心：配置文件/网页订阅/定时任务/翻译接口/数据存档
 │   └── shared/                   # 共享模块：translator.js（翻译）、timeline-render.js（时间线渲染，弹窗与共享页共用）、qrcode.js（二维码）
 ├── assets/icons/                 # 扩展图标、站点图标与默认海报
-├── config/                       # 本地配置与示例配置
-├── server/                       # 本地同步服务（CSV + 局域网共享页）；根目录仅日常入口 start-sync.bat/.command、setup-launcher.bat
-│   ├── public/                   # 局域网只读时间线页面（share.html/css/js）
-│   └── tools/                    # 管理脚本：stop-sync/restart-sync/fix-csv-encoding（.bat + macOS .command）+ 跨平台 Node 助手 stop.js/fix-csv-encoding.js、remove-launcher、launcher.vbs（协议分发器）
-├── db/timeline.csv               # 本地 CSV 输出
-└── db/timeline.json              # 时间线快照（局域网页面数据源，服务重启后回读）
+├── config/                       # 本地配置（gitignore）与 example 模板
+├── server/                       # 本地同步服务；根目录仅日常入口 start-sync.bat/.command、setup-launcher.bat
+│   ├── sync-server.js            # CSV 写入 + 配置写回 + 局域网只读共享（SSE）
+│   ├── public/                   # 局域网共享页（share.html/css/js）
+│   └── tools/                    # 管理脚本：stop-sync/restart-sync/fix-csv-encoding（.bat + .command）、Node 助手 stop.js/fix-csv-encoding.js、remove-launcher.bat、launcher.vbs
+├── db/timeline.csv               # CSV 输出（运行时生成）
+└── db/timeline.json              # 时间线快照（共享页数据源，服务重启后回读）
 ```
 
 ## 🔧 技术栈
 
-- Chrome Extension Manifest V3
-- 原生 JavaScript
-- Chrome Storage API
-- Chrome Alarms API
-- Chrome Notifications API
-- Node.js 本地同步服务（CSV 写入 + 局域网只读共享页，SSE 实时推送）
+- Chrome Extension Manifest V3，原生 JavaScript（无框架依赖）
+- Chrome Storage / Alarms / Notifications API
+- Node.js 本地同步服务（无第三方依赖；CSV 写入 + 局域网只读共享页 + SSE 实时推送）
+
+## 📄 License
+
+[MIT](LICENSE)
