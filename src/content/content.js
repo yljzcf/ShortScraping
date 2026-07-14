@@ -438,11 +438,12 @@
     const finalUrlTags = Array.isArray(urlTags) ? urlTags : [];
 
     const currentUrl = window.location.href;
-    const tags = getTagsForUrl(currentUrl, finalUrlTags);
-    if (tags.length === 0) {
+    const subscription = findSubscriptionForUrl(currentUrl, finalUrlTags);
+    if (!subscription) {
       console.log('[ShortScraping] 当前页面不在用户订阅配置中，跳过保存');
       return [];
     }
+    const tags = subscription.tags;
 
     const site = detectSite(window.location.hostname);
     const adapter = site ? ADAPTERS[site] : null;
@@ -481,6 +482,11 @@
           continue;
         }
 
+        // 归属 canonical 化：sourceListUrl 统一写命中的订阅 URL 本身（适配器里
+        // 填的是 location.href，跳转/补斜杠时可能与订阅 URL 有尾部差异），
+        // 保证弹窗/后台/CSV 的精确等值过滤对新卡永远成立。
+        detailed.sourceListUrl = subscription.urlPattern;
+
         const saved = await saveSingleDrama(detailed);
         if (!saved) {
           console.log(`[ShortScraping] 跳过重复内容: ${detailed.title}`);
@@ -502,48 +508,41 @@
   }
 
   /**
-   * 根据 URL 获取标签
+   * 根据当前页面 URL 找到命中的订阅项，返回 { urlPattern, tags }；无匹配返回 null。
+   * urlPattern 会被写进卡片的 sourceListUrl（归属 canonical 化），使弹窗/后台/CSV
+   * 的精确等值过滤天然成立。
    */
-  function getTagsForUrl(url, urlTags) {
-    console.log('[ShortScraping] 查找标签，URL:', url);
+  function findSubscriptionForUrl(url, urlTags) {
+    console.log('[ShortScraping] 查找订阅，URL:', url);
     console.log('[ShortScraping] 标签配置:', JSON.stringify(urlTags));
 
     // 确保 urlTags 是数组
     if (!Array.isArray(urlTags) || urlTags.length === 0) {
       console.log('[ShortScraping] 标签配置为空，跳过当前页面');
-      return [];
+      return null;
     }
 
-    // 查找匹配的配置：先精确等值、再前缀匹配。两轮分开是为了支持互为前缀的
-    // 订阅 URL（如 fandom 首页与 fandom/?list=trending），不受配置顺序影响。
+    // 查找匹配的配置：先精确等值、再前缀匹配（容忍跳转/补斜杠导致的 href 尾部差异）。
+    // 两轮分开是为了支持互为前缀的订阅 URL（如 fandom 首页与 fandom/?list=trending），
+    // 不受配置顺序影响。原第三轮 url.includes() 模糊匹配因匹配面过宽、易误标已移除。
     for (const config of urlTags) {
       if (!config.urlPattern || !config.tags) continue;
       if (url === config.urlPattern) {
         console.log(`[ShortScraping] ✓ 精确匹配! 标签: ${config.tags.join(', ')}`);
-        return config.tags.slice(0, 3);
+        return { urlPattern: config.urlPattern, tags: config.tags.slice(0, 3) };
       }
     }
     for (const config of urlTags) {
       if (!config.urlPattern || !config.tags) continue;
       if (url.startsWith(config.urlPattern)) {
         console.log(`[ShortScraping] ✓ 前缀匹配! 标签: ${config.tags.join(', ')}`);
-        return config.tags.slice(0, 3); // 最多3个标签
-      }
-    }
-
-    // 模糊匹配（URL 包含配置的 pattern）
-    for (const config of urlTags) {
-      if (!config.urlPattern || !config.tags) continue;
-
-      if (url.includes(config.urlPattern)) {
-        console.log(`[ShortScraping] ✓ 模糊匹配! 标签: ${config.tags.join(', ')}`);
-        return config.tags.slice(0, 3);
+        return { urlPattern: config.urlPattern, tags: config.tags.slice(0, 3) }; // 最多3个标签
       }
     }
 
     // 没有匹配，跳过当前页面
     console.log('[ShortScraping] 无匹配订阅配置，跳过当前页面');
-    return [];
+    return null;
   }
 
   /**

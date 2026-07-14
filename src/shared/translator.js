@@ -256,10 +256,14 @@ globalThis.Translator = (() => {
 
   /**
    * 批量翻译（AI 模式，一次请求译多条）。
-   * items: [{title, desc}]；返回「等长、同序」的 [{title, desc}]，失败/缺失填空串。
+   * items: [{title, desc}]；返回「等长、同序」的 [{title, desc}]，缺失填空串。
    * 对应关系靠批内 id：请求带 id、解析按 id 回填，绝不依赖返回顺序。
    * 调用方负责分批（每批条数/字符预算），本函数只把收到的这一批用一次请求译出来。
    * 非 AI 模式退化为逐条 translateTitleAndDesc，保证调用方总能拿到对齐结果。
+   *
+   * 错误语义：传输层失败（未配置端点密钥 / 超时 / HTTP 非 200 / 响应非 JSON）
+   * 抛异常，调用方据此向用户报告失败原因；模型返回内容解析不出（格式跑偏）
+   * 仍返回空串数组，条目保持待翻译下轮重试。
    */
   async function translateBatchAI(items) {
     const list = Array.isArray(items) ? items : [];
@@ -280,44 +284,39 @@ globalThis.Translator = (() => {
     }
 
     if (!config.aiEndpoint || !config.aiApiKey) {
-      console.warn('[ShortScraping] AI 翻译未配置端点或密钥');
-      return list.map(() => ({ title: '', desc: '' }));
+      throw new Error('AI 翻译未配置端点或密钥');
     }
 
-    try {
-      // 批内 id 从 1 开始；调用方按下标 i 取 results[i]，本函数按 id=i+1 回填
-      const payload = list.map((it, i) => ({ id: i + 1, title: it.title || '', desc: it.desc || '' }));
-      const userMessage = `${config.aiPrefixPrompt}${BATCH_CONTRACT}${JSON.stringify(payload)}`;
-      const messages = [{ role: 'user', content: userMessage }];
-      const model = config.aiModel || 'gpt-3.5-turbo';
+    // 批内 id 从 1 开始；调用方按下标 i 取 results[i]，本函数按 id=i+1 回填
+    const payload = list.map((it, i) => ({ id: i + 1, title: it.title || '', desc: it.desc || '' }));
+    const userMessage = `${config.aiPrefixPrompt}${BATCH_CONTRACT}${JSON.stringify(payload)}`;
+    const messages = [{ role: 'user', content: userMessage }];
+    const model = config.aiModel || 'gpt-3.5-turbo';
 
-      console.log(`[ShortScraping] 批量翻译 ${list.length} 条，模型: ${model}`);
-      const startAt = performance.now();
-      const response = await fetchWithTimeout(config.aiEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.aiApiKey}`
-        },
-        body: JSON.stringify({ model, messages, temperature: 0.3 })
-      }, config.requestTimeoutSec);
-      console.log(`[ShortScraping] 批量 AI 请求耗时: ${Math.round(performance.now() - startAt)}ms`);
+    console.log(`[ShortScraping] 批量翻译 ${list.length} 条，模型: ${model}`);
+    const startAt = performance.now();
+    const response = await fetchWithTimeout(config.aiEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.aiApiKey}`
+      },
+      body: JSON.stringify({ model, messages, temperature: 0.3 })
+    }, config.requestTimeoutSec);
+    console.log(`[ShortScraping] 批量 AI 请求耗时: ${Math.round(performance.now() - startAt)}ms`);
 
-      if (!response.ok) {
-        console.warn('[ShortScraping] 批量 AI 请求失败:', response.status);
-        return list.map(() => ({ title: '', desc: '' }));
-      }
-
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content?.trim() || '';
-      const byId = parseAIBatchResponse(content);
-
-      // 按 id 回填；缺失 id 的条目留空串，调用方据此保留 status:'new' 下轮重试
-      return list.map((_, i) => byId.get(i + 1) || { title: '', desc: '' });
-    } catch (e) {
-      console.warn('[ShortScraping] 批量 AI 翻译失败:', e.message);
-      return list.map(() => ({ title: '', desc: '' }));
+    if (!response.ok) {
+      throw new Error(`AI 接口 HTTP ${response.status}`);
     }
+
+    const data = await response.json().catch(() => {
+      throw new Error('AI 接口响应不是合法 JSON');
+    });
+    const content = data.choices?.[0]?.message?.content?.trim() || '';
+    const byId = parseAIBatchResponse(content);
+
+    // 按 id 回填；缺失 id 的条目留空串，调用方据此保留 status:'new' 下轮重试
+    return list.map((_, i) => byId.get(i + 1) || { title: '', desc: '' });
   }
 
   /**

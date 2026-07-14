@@ -918,10 +918,10 @@
     const configuredUrls = getConfiguredScrapeUrls();
     if (configuredUrls.length === 0) return [];
 
-    return (dramas || []).filter(drama => {
-      if (!drama.sourceListUrl) return false;
-      return configuredUrls.some(url => drama.sourceListUrl === url || drama.sourceListUrl.startsWith(url));
-    });
+    // 与后台/同步服务同规则：尾斜杠归一后的精确等值（UrlMatch 三端共用），
+    // 前缀匹配会让互为前缀的订阅串扰（退订带参订阅后历史卡片仍显示）。
+    const configuredSet = UrlMatch.buildConfiguredUrlSet(configuredUrls);
+    return (dramas || []).filter(drama => UrlMatch.isUrlCovered(drama.sourceListUrl, configuredSet));
   }
 
   /**

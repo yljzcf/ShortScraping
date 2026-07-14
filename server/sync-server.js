@@ -16,6 +16,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const UrlMatch = require('../src/shared/url-match.js');
 
 const PORT = Number(process.env.PORT) || 31919;
 const LOCAL_ONLY = process.argv.includes('--local-only');
@@ -197,10 +198,9 @@ function filterDramasByTagConfig(dramas) {
   const configuredUrls = urlTags.map(item => item.url);
   if (configuredUrls.length === 0) return [];
 
-  return (dramas || []).filter(drama => {
-    if (!drama.sourceListUrl) return false;
-    return configuredUrls.some(url => drama.sourceListUrl === url || drama.sourceListUrl.startsWith(url));
-  });
+  // 与扩展端同规则：尾斜杠归一后的精确等值（src/shared/url-match.js 三端共用）
+  const configuredSet = UrlMatch.buildConfiguredUrlSet(configuredUrls);
+  return (dramas || []).filter(drama => UrlMatch.isUrlCovered(drama.sourceListUrl, configuredSet));
 }
 
 // —— 局域网共享：快照持久化、SSE 广播与地址枚举 ——

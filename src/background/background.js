@@ -3,6 +3,7 @@
  * 定时任务调度：抓取线 + 翻译线
  */
 
+importScripts('../shared/url-match.js');
 importScripts('../shared/translator.js');
 
 // 定时任务默认配置。实际配置来自 config/cron.json。
@@ -27,8 +28,12 @@ const DEFAULT_TRANSLATE_CONFIG = {
   requestTimeoutSec: 10
 };
 
-// 运行状态
-let scrapeInProgress = false;
+// 运行状态。抓取走串行队列：手动单站刷新与定时全量并发触发时排队执行，
+// 避免双开同一 URL 的标签页；activeScrapeCount 覆盖「排队+运行中」的整个
+// 区间，抓取后翻译线据此判断抓取是否仍在进行（此前用布尔，两次抓取并行时
+// 先结束的一方会提前放行空扫描计数，导致后结束批次的新卡本轮不被翻译）。
+let scrapeQueue = Promise.resolve();
+let activeScrapeCount = 0;
 let postScrapeTranslateTimer = null;
 let postScrapeTranslateRunning = false;
 let csvSyncTimer = null;
@@ -36,6 +41,10 @@ let csvSyncTimer = null;
 // 翻译轮 in-flight 共享：同一时刻只跑一轮，手动/定时/抓取后翻译线的并发调用
 // join 同一 promise，消灭重复翻译同一批条目。
 let translateRun = null;
+// 手动触发 join 到进行中的自动空扫描轮时的等待者标记：空轮本不写终态
+// （避免自动线收尾期反复触发 onChanged），但有手动等待者时必须写终态，
+// 否则弹窗按钮永远收不到收尾信号，⏳ 卡到重开弹窗。
+let translateManualWaiter = false;
 // 最近写出的 translateRunState 内存镜像：getTranslateState 从这里同步应答，
 // 不读 storage，避免拿到孤儿清理尚未落库前的僵尸 running:true。
 let translateRunStateMirror = null;
@@ -499,12 +508,23 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
 });
 
 /**
- * 执行抓取任务。site 给定时（imdb / steam / royalroad）只抓该站点的订阅 URL。
+ * 执行抓取任务（对外入口）。site 给定时只抓该站点的订阅 URL。
+ * 所有调用（定时全量 / 手动单站）经同一条串行队列执行，每个调用者拿到
+ * 自己那次抓取的结果；排队期间即计入 activeScrapeCount 并预约翻译线。
  */
-async function performScrape({ site = null } = {}) {
-  console.log(site ? `[ShortScraping] 开始站点抓取: ${site}` : '[ShortScraping] 开始全量抓取...');
-  scrapeInProgress = true;
+function performScrape(options = {}) {
+  activeScrapeCount++;
   schedulePostScrapeTranslateLoop();
+
+  const run = scrapeQueue.then(() => performScrapeOnce(options));
+  scrapeQueue = run.then(() => {}, () => {});
+  return run.finally(() => {
+    activeScrapeCount--;
+  });
+}
+
+async function performScrapeOnce({ site = null } = {}) {
+  console.log(site ? `[ShortScraping] 开始站点抓取: ${site}` : '[ShortScraping] 开始全量抓取...');
 
   try {
     const { urlTags = [] } = await chrome.storage.local.get('urlTags');
@@ -550,8 +570,6 @@ async function performScrape({ site = null } = {}) {
   } catch (e) {
     console.error('[ShortScraping] 抓取失败:', e);
     throw e;
-  } finally {
-    scrapeInProgress = false;
   }
 }
 
@@ -588,10 +606,11 @@ function filterDramasByConfiguredUrls(dramas, urlTags) {
   const configuredUrls = getConfiguredScrapeUrls(urlTags);
   if (configuredUrls.length === 0) return [];
 
-  return (dramas || []).filter(drama => {
-    if (!drama.sourceListUrl) return false;
-    return configuredUrls.some(url => drama.sourceListUrl === url || drama.sourceListUrl.startsWith(url));
-  });
+  // 归属判定＝尾斜杠归一后的精确等值（UrlMatch，三端共用）。旧的 startsWith
+  // 前缀匹配会让互为前缀的订阅串扰：退订 my-drama.com/?list=… 后，其历史
+  // 卡片因前缀命中 my-drama.com/ 而清不掉且挂错归属。
+  const configuredSet = UrlMatch.buildConfiguredUrlSet(configuredUrls);
+  return (dramas || []).filter(drama => UrlMatch.isUrlCovered(drama.sourceListUrl, configuredSet));
 }
 
 function pruneDramasOutsideConfiguredUrls(urlTags) {
@@ -710,7 +729,12 @@ function waitForTabComplete(tabId) {
  * 契约：返回的 promise 从不 reject，错误经 summary.error 传递。
  */
 function performTranslate({ source = 'auto' } = {}) {
-  if (translateRun) return translateRun;
+  if (translateRun) {
+    // 手动触发 join 到进行中的轮（可能是不写终态的自动空扫描轮）：
+    // 打上等待者标记，让该轮（或紧随其后的下一轮）finally 补写终态。
+    if (source === 'manual') translateManualWaiter = true;
+    return translateRun;
+  }
 
   // 在第一个 await 之前同步赋值，同 tick 的并发调用不会穿过 null 检查
   translateRun = performTranslateOnce(source).finally(() => {
@@ -759,6 +783,7 @@ async function performTranslateOnce(source) {
   let runStartedAt = null;
   let runError = null;
   let stateWritten = false;
+  let lastError = null;
 
   try {
     const { dramas = [], translateConfig, urlTags = [] } = await chrome.storage.local.get(['dramas', 'translateConfig', 'urlTags']);
@@ -825,6 +850,7 @@ async function performTranslateOnce(source) {
           results = await Translator.translateBatchAI(chunk.map(d => ({ title: d.title, desc: d.description })));
         } catch (e) {
           console.warn('[ShortScraping] 批量翻译异常:', e);
+          lastError = e?.message || String(e);
           results = chunk.map(() => ({ title: '', desc: '' }));
         }
 
@@ -864,14 +890,23 @@ async function performTranslateOnce(source) {
       showNotification(`已翻译 ${translatedCount} 部短剧`);
     }
 
+    // 有待翻译却一条都没翻成＝接口/配置有问题：把错误写进 summary，
+    // 弹窗据此显示 ❌ 而不是误导性的 ✅「成功翻译 0 条」。
+    if (translatedCount === 0 && pendingCount > 0) {
+      runError = lastError || '本轮没有任何条目翻译成功，请检查 config/trans.json 的接口配置';
+      return { pendingCount, translatedCount, error: runError };
+    }
+
     return { pendingCount, translatedCount };
   } catch (e) {
     console.error('[ShortScraping] 翻译任务失败:', e);
     runError = e.message;
     return { pendingCount: pendingCount || null, translatedCount, error: e.message };
   } finally {
-    // 终态写进 finally，封死中途意外 throw 留下孤儿 running:true 的口
-    if (stateWritten || source === 'manual') {
+    // 终态写进 finally，封死中途意外 throw 留下孤儿 running:true 的口。
+    // translateManualWaiter：手动触发 join 到本轮（自动空扫描不写终态）时，
+    // 也必须写终态给弹窗收尾；标记消费后复位。
+    if (stateWritten || source === 'manual' || translateManualWaiter) {
       const now = Date.now();
       writeTranslateRunState({
         running: false,
@@ -889,6 +924,7 @@ async function performTranslateOnce(source) {
         }
       });
     }
+    translateManualWaiter = false;
   }
 }
 
@@ -980,7 +1016,7 @@ async function runPostScrapeTranslateLoop() {
       const result = await performTranslate();
 
       if (result?.pendingCount === 0) {
-        if (scrapeInProgress) {
+        if (activeScrapeCount > 0) {
           console.log('[ShortScraping] 当前无待翻译卡片，但抓取仍在进行，空扫描不计数');
         } else {
           emptyScans++;
