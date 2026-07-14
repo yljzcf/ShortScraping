@@ -153,23 +153,34 @@ async function cleanupOrphanTranslateRunState() {
  * 从扩展 config 目录的 tag.json / cron.json / trans.json 恢复配置。
  */
 async function loadConfigFromJsonFiles() {
-  const [tagConfig, scheduleConfigRaw, translateConfigRaw] = await Promise.all([
-    fetchJsonFile('config/tag.json', []),
+  const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw] = await Promise.all([
+    fetchJsonFile('config/tag.json', null),
     fetchJsonFile('config/cron.json', DEFAULT_SCHEDULE_CONFIG),
     fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG)
   ]);
 
-  const urlTags = normalizeUrlTags(tagConfig);
   const scheduleConfig = { ...DEFAULT_SCHEDULE_CONFIG, ...scheduleConfigRaw };
   const translateConfig = { ...DEFAULT_TRANSLATE_CONFIG, ...translateConfigRaw };
 
-  await chrome.storage.local.set({
-    urlTags,
-    scheduleConfig,
-    translateConfig
-  });
+  // tag.json 读取失败（fetch 异常 / JSON 损坏 / 结构不是数组）≠ 用户清空订阅：
+  // 保留 storage 里上一次的订阅并跳过 prune，避免把全部历史误清成空库。
+  // 只有成功读到数组（含合法的空数组）才允许覆盖订阅并清理界外历史。
+  let urlTags;
+  if (Array.isArray(tagConfigRaw)) {
+    urlTags = normalizeUrlTags(tagConfigRaw);
+    await chrome.storage.local.set({
+      urlTags,
+      scheduleConfig,
+      translateConfig
+    });
+    await pruneDramasOutsideConfiguredUrls(urlTags);
+  } else {
+    const stored = await chrome.storage.local.get('urlTags');
+    urlTags = Array.isArray(stored.urlTags) ? stored.urlTags : [];
+    console.warn('[ShortScraping] tag.json 读取失败，保留上次订阅配置并跳过历史清理');
+    await chrome.storage.local.set({ scheduleConfig, translateConfig });
+  }
 
-  await pruneDramasOutsideConfiguredUrls(urlTags);
   await migrateLegacyTags();
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
@@ -204,13 +215,22 @@ function normalizeUrlTags(rawTags) {
  */
 async function setupAlarms(options = {}) {
   const { force = false } = options;
+
+  // 看门狗最先安装：即使后面的任务配置损坏，自愈通道也必须先就位。
+  await ensureAlarm(WATCHDOG_ALARM_NAME, { periodInMinutes: WATCHDOG_INTERVAL_MINUTES });
+
   const { scheduleConfig } = await chrome.storage.local.get('scheduleConfig');
   const config = { ...DEFAULT_SCHEDULE_CONFIG, ...scheduleConfig };
   const scheduleMode = config.scheduleMode === 'cron' ? 'cron' : 'interval';
 
-  await setupTaskAlarm('scrape-task', config, scheduleMode, force);
-  await setupTaskAlarm('translate-task', config, scheduleMode, force);
-  await ensureAlarm(WATCHDOG_ALARM_NAME, { periodInMinutes: WATCHDOG_INTERVAL_MINUTES });
+  // 逐任务独立安装：单个任务失败不连累其余任务
+  for (const name of Object.keys(SCHEDULE_TASKS)) {
+    try {
+      await setupTaskAlarm(name, config, scheduleMode, force);
+    } catch (e) {
+      console.error(`[ShortScraping] ${name} 定时任务安装失败:`, e?.message || e);
+    }
+  }
 
   await chrome.storage.local.set({
     alarmScheduleSignature: getScheduleSignature(config)
@@ -229,13 +249,18 @@ async function setupTaskAlarm(name, config, scheduleMode, force = false) {
 
   if (scheduleMode === 'cron') {
     const cronExpression = config[task.cronKey];
-    const nextRunAt = getNextCronRun(cronExpression);
-    const nextRunLabel = new Date(nextRunAt).toLocaleString('zh-CN');
+    try {
+      const nextRunAt = getNextCronRun(cronExpression);
+      const nextRunLabel = new Date(nextRunAt).toLocaleString('zh-CN');
 
-    await ensureCronAlarm(name, cronExpression, nextRunAt, force);
+      await ensureCronAlarm(name, cronExpression, nextRunAt, force);
 
-    console.log(`[ShortScraping] ${task.label} Cron 下一次执行: ${nextRunLabel} (${cronExpression})`);
-    return;
+      console.log(`[ShortScraping] ${task.label} Cron 下一次执行: ${nextRunLabel} (${cronExpression})`);
+      return;
+    } catch (e) {
+      // 非法/永不匹配的 cron 不能让任务静默消失：降级为间隔调度兜底
+      console.error(`[ShortScraping] ${task.label} Cron 表达式无效（${cronExpression}），已降级为间隔调度:`, e?.message || e);
+    }
   }
 
   const intervalHours = Number(config[task.intervalKey]) || DEFAULT_SCHEDULE_CONFIG[task.intervalKey];
@@ -333,13 +358,28 @@ function parseSimpleCron(expression) {
   }
 
   const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
-  return {
+  const cron = {
     minute: parseCronField(minute, 0, 59, '分钟'),
     hour: parseCronField(hour, 0, 23, '小时'),
     dayOfMonth: parseCronField(dayOfMonth, 1, 31, '日期'),
     month: parseCronField(month, 1, 12, '月份'),
     dayOfWeek: parseCronField(dayOfWeek, 0, 7, '星期')
   };
+
+  // 日期×月份组合可行性：星期不受限时，纯日期约束必须能落在所选月份里
+  // （如 "0 0 31 2 *" 永不匹配；若不在解析期拦截，getNextCronRun 要空转
+  // 366 天×1440 分钟才报错，且每次 SW 唤醒都重来一遍）。
+  // 2 月按 29 天算：29 号在闰年合法，具体是否可达交给 getNextCronRun 判定。
+  if (!cron.dayOfMonth.any && cron.dayOfWeek.any) {
+    const MAX_DAY_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    const months = cron.month.any ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] : [...cron.month.values];
+    const feasible = months.some(m => [...cron.dayOfMonth.values].some(d => d <= MAX_DAY_IN_MONTH[m - 1]));
+    if (!feasible) {
+      throw new Error(`日期与月份组合永不匹配: ${expression}`);
+    }
+  }
+
+  return cron;
 }
 
 function parseCronField(field, min, max, label) {
@@ -427,7 +467,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   if (alarm.name === WATCHDOG_ALARM_NAME) {
     // 看门狗：SW 被唤醒后强制重建所有 cron alarm，修复 SW 意外退出导致续排丢失的问题。
-    await setupAlarms({ force: true });
+    await setupAlarms({ force: true }).catch(e =>
+      console.error('[ShortScraping] 看门狗重建定时任务失败:', e?.message || e));
     return;
   }
 
@@ -438,7 +479,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       await performTranslate();
     }
   } finally {
-    await rescheduleCronTask(alarm.name);
+    await rescheduleCronTask(alarm.name).catch(e =>
+      console.error(`[ShortScraping] ${alarm.name} 续排失败:`, e?.message || e));
   }
 });
 

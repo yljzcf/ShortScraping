@@ -167,18 +167,28 @@
 
   async function reloadConfig() {
     try {
-      const [tagConfig, scheduleConfigRaw, translateConfigRaw] = await Promise.all([
-        fetchJsonFile('config/tag.json', []),
+      const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw] = await Promise.all([
+        fetchJsonFile('config/tag.json', null),
         fetchJsonFile('config/cron.json', DEFAULT_SCHEDULE_CONFIG),
         fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG)
       ]);
 
-      const urlTags = normalizeUrlTags(tagConfig);
+      // tag.json 读取失败 ≠ 清空订阅：沿用 storage 现有订阅，避免触发后台误清全部历史
+      let urlTags;
+      let tagNote = '';
+      if (Array.isArray(tagConfigRaw)) {
+        urlTags = normalizeUrlTags(tagConfigRaw);
+      } else {
+        const stored = await chrome.storage.local.get('urlTags');
+        urlTags = normalizeUrlTags(stored.urlTags || []);
+        tagNote = '；tag.json 读取失败，订阅沿用当前配置';
+      }
+
       const scheduleConfig = normalizeScheduleConfig(scheduleConfigRaw);
       const translateConfig = normalizeTranslateConfig(translateConfigRaw);
       await applyConfig(urlTags, scheduleConfig, translateConfig);
 
-      showStatus(`已读取配置：${urlTags.length} 个 URL，${getScheduleText(scheduleConfig)}，翻译模式=${translateConfig.translateMode}`, true);
+      showStatus(`已读取配置：${urlTags.length} 个 URL，${getScheduleText(scheduleConfig)}，翻译模式=${translateConfig.translateMode}${tagNote}`, !tagNote);
     } catch (e) {
       console.error('[ShortScraping] 读取配置失败:', e);
       showStatus(`读取配置失败：${e.message}`, false);
@@ -187,8 +197,13 @@
 
   async function reloadSubscriptionsFromFile() {
     try {
-      const tagConfig = await fetchJsonFile('config/tag.json', []);
-      state.urlTags = normalizeUrlTags(tagConfig);
+      const tagConfigRaw = await fetchJsonFile('config/tag.json', null);
+      if (!Array.isArray(tagConfigRaw)) {
+        // 读取失败不写回空订阅，否则后台会按“零订阅”清空全部历史
+        showStatus('读取 config/tag.json 失败，已保留当前订阅（未做修改）', false);
+        return;
+      }
+      state.urlTags = normalizeUrlTags(tagConfigRaw);
       await chrome.storage.local.set({ urlTags: state.urlTags });
       renderSubscriptions();
       renderConfigSummary();
