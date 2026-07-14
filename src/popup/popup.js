@@ -937,7 +937,7 @@
       : '未抓取';
     elements.stats.status.textContent = pending > 0
       ? `${translated} 已翻译, ${pending} 待翻译`
-      : '全部已翻译';
+      : (total > 0 ? '全部已翻译' : '暂无数据');
   }
 
   /**

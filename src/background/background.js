@@ -50,6 +50,10 @@ let translateManualWaiter = false;
 let translateRunStateMirror = null;
 
 const CSV_SYNC_ENDPOINT = 'http://127.0.0.1:31919/sync';
+// 本文件的 setTimeout 延时（本常量与 CSV 500ms 防抖）均远小于 MV3 SW 的
+// ~30s 空闲回收阈值；极端情况下 SW 连同定时器被杀时，SW 下次唤醒的顶层
+// scheduleCsvSync 与 translate-task alarm 会兜底。评估后不迁移 chrome.alarms
+// （其最小粒度 30s，反而更差）。
 const POST_SCRAPE_TRANSLATE_DELAY_MS = 10000;
 
 // dramas 表全局单写者队列：内容脚本/弹窗的写请求经消息转到这里，与后台

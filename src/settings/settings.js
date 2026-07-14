@@ -87,6 +87,8 @@
     elements.status = document.getElementById('statusMsg');
     elements.translateForm = {
       mode: document.getElementById('translateMode'),
+      apiSection: document.getElementById('apiModeSection'),
+      aiSection: document.getElementById('aiModeSection'),
       apiEndpoint: document.getElementById('apiEndpoint'),
       aiEndpoint: document.getElementById('aiEndpoint'),
       aiApiKey: document.getElementById('aiApiKey'),
@@ -121,6 +123,11 @@
     bindClick(elements.buttons.saveTranslate, saveTranslateConfig);
     bindClick(elements.buttons.openTransFromTranslate, () => openConfigFile('config/trans.json'));
     bindClick(elements.buttons.checkSync, checkSyncServiceStatus);
+
+    // 翻译模式切换时只显示当前模式的配置区（隐藏区块的值保留，切回即恢复）
+    if (elements.translateForm?.mode) {
+      elements.translateForm.mode.addEventListener('change', updateTranslateModeVisibility);
+    }
   }
 
   function bindClick(element, handler) {
@@ -314,12 +321,22 @@
     });
   }
 
+  function updateTranslateModeVisibility() {
+    const form = elements.translateForm;
+    if (!form?.mode) return;
+
+    const isAi = form.mode.value === 'ai';
+    if (form.apiSection) form.apiSection.style.display = isAi ? 'none' : '';
+    if (form.aiSection) form.aiSection.style.display = isAi ? '' : 'none';
+  }
+
   function renderTranslateForm() {
     const form = elements.translateForm;
     if (!form?.mode) return;
 
     const config = normalizeTranslateConfig(state.translateConfig);
     form.mode.value = config.translateMode;
+    updateTranslateModeVisibility();
     form.apiEndpoint.value = config.apiEndpoint;
     form.aiEndpoint.value = config.aiEndpoint;
     form.aiApiKey.value = config.aiApiKey;

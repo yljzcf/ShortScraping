@@ -112,7 +112,10 @@ function writeTimelineCsv(dramas) {
   }
 
   const content = serializeTimelineCsv(rows);
-  fs.writeFileSync(CSV_PATH, content, 'utf8');
+  // 与 saveSnapshot 同款 tmp+rename 原子写：进程中断不再留下半截 CSV
+  const tmpPath = `${CSV_PATH}.tmp`;
+  fs.writeFileSync(tmpPath, content, 'utf8');
+  fs.renameSync(tmpPath, CSV_PATH);
   return rows.length;
 }
 
@@ -290,11 +293,10 @@ function serveFile(res, filePath, contentType, cacheSeconds) {
 }
 
 function sendJson(res, statusCode, body) {
+  // 不设置 CORS 头：合法消费方要么同源（局域网共享页），要么是带 host_permissions
+  // 的扩展页面（不受 CORS 限制）；任意网页试图跨源读取时间线数据会被浏览器拦截。
   res.writeHead(statusCode, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
-    'Access-Control-Allow-Headers': 'Content-Type'
+    'Content-Type': 'application/json; charset=utf-8'
   });
   res.end(JSON.stringify(body));
 }
@@ -327,15 +329,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && pathname === '/health') {
-    return sendJson(res, 200, {
+    const body = {
       ok: true,
-      csvPath: CSV_PATH,
-      // 弹窗 📁 依赖：扩展无法感知自己的磁盘路径，从这里学到脚本目录并缓存
-      serverDir: __dirname,
       localOnly: LOCAL_ONLY,
       lanUrls: LOCAL_ONLY ? [] : getLanUrls(),
       version: dataVersion
-    });
+    };
+    // 本机磁盘路径只发给本机调用方（弹窗 📁 与设置页展示依赖），
+    // 不向局域网设备/任意网页暴露本机目录布局
+    if (isLocalRequest(req)) {
+      body.csvPath = CSV_PATH;
+      body.serverDir = __dirname;
+    }
+    return sendJson(res, 200, body);
   }
 
   // 停止服务：仅本机可调用（已受上方 POST 回环护栏保护），供 stop.js / 停止脚本优雅关停

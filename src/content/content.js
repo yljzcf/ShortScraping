@@ -573,7 +573,10 @@
     }
 
     if (!title || title.length < 2) {
-      title = resolvedImdbId || `未知标题 ${index + 1}`;
+      // 标题彻底解析失败＝页面版式已变化：跳过该项，避免把「标题=ID、简介空」的
+      // 残卡写进库并反复喂给翻译线（与 Steam/Next 系站点解析失败安全返回空的行为对齐）
+      console.warn(`[ShortScraping] 第 ${index + 1} 项标题解析失败（${resolvedImdbId}），跳过`);
+      return null;
     }
 
     // 提取封面图片 - 精确匹配海报
@@ -669,6 +672,12 @@
     const title = titleLink ? titleLink.textContent.trim() : '';
     const url = titleLink ? titleLink.href : '';
 
+    if (!title) {
+      // 标题解析失败＝版式已变化，跳过该项避免残卡入库（与 IMDB/Steam 行为对齐）
+      console.warn(`[ShortScraping] RoyalRoad 第 ${index + 1} 项标题解析失败（${rrId}），跳过`);
+      return null;
+    }
+
     const img = item.querySelector('img[data-type="cover"]') || item.querySelector('figure img');
     const poster = img ? (img.src || img.dataset?.src || '') : '';
 
@@ -678,7 +687,7 @@
     return {
       id: `royalroad_${rrId}_${index}`,
       imdbId: rrId,
-      title: title || rrId,
+      title,
       titleZh: '',
       poster,
       tags,
