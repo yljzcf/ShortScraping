@@ -899,7 +899,8 @@
       source: state.activeSource || 'imdb',
       readOnly: false,
       assetsBase: '../../assets/icons',
-      onTranslate: translateSingleCard
+      onTranslate: translateSingleCard,
+      onOpenUrl: (url) => chrome.tabs.create({ url })
     });
     elements.states.empty.classList.toggle('hidden', hasData);
   }

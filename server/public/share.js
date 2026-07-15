@@ -3,7 +3,7 @@
  *
  * 只读浏览：首次拉取 /api/timeline 渲染，之后由 /api/events（SSE）通知刷新；
  * 页面回到前台时补拉一次，兜底断线期间漏掉的更新。渲染复用共享模块
- * TimelineRender（readOnly 模式，无任何操作按钮）。
+ * TimelineRender（readOnly 模式，无任何操作按钮；封面点击在新标签页打开原站）。
  */
 (function () {
   'use strict';
@@ -72,7 +72,8 @@
     const hasData = TimelineRender.renderTimeline(elements.container, visible, {
       source: state.activeSource,
       readOnly: true,
-      assetsBase: '/assets/icons'
+      assetsBase: '/assets/icons',
+      onOpenUrl: (url) => window.open(url, '_blank', 'noopener')
     });
     elements.empty.classList.toggle('hidden', hasData);
     updateStats(visible);

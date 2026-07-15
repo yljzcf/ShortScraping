@@ -2,8 +2,9 @@
  * ShortScraping 时间线渲染共享模块
  *
  * 弹窗（src/popup/popup.js）与局域网共享页（server/public/share.js）共用的
- * 纯 DOM 渲染逻辑。本文件不依赖 chrome.* API：扩展相关行为（翻译按钮回调等）
- * 由调用方通过 opts 注入；共享页由同步服务以 /shared/timeline-render.js 伺服
+ * 纯 DOM 渲染逻辑。本文件不依赖 chrome.* API：扩展相关行为（翻译按钮、封面
+ * 点击打开原站等回调）由调用方通过 opts 注入；共享页由同步服务以
+ * /shared/timeline-render.js 伺服
  * 同一份文件，保证两端渲染永不漂移。
  */
 (function (global) {
@@ -16,11 +17,19 @@
     source: 'imdb',
     readOnly: false,
     onTranslate: null,
+    onOpenUrl: null,
     assetsBase: '../../assets/icons'
   };
 
   function dramaSource(drama) {
     return CATEGORY_SOURCES.includes(drama.source) ? drama.source : 'imdb';
+  }
+
+  // 封面可点性闸门：条目 url 为 http(s) 时即为封面点击目标，否则封面不可点
+  // （拦截缺 url 的历史条目与 javascript: 等异常值）
+  function posterLinkUrl(drama) {
+    const url = drama && drama.url;
+    return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null;
   }
 
   function pickDefaultSource(dramas) {
@@ -229,6 +238,18 @@
       };
       if (posterImg.complete) applyOrientation();
       else posterImg.addEventListener('load', applyOrientation);
+
+      // 封面点击打开原站页面：打开动作由调用方注入（弹窗 chrome.tabs.create、
+      // 共享页 window.open），与 readOnly 无关——只读共享页同样可跳转
+      const linkUrl = posterLinkUrl(drama);
+      if (linkUrl && typeof options.onOpenUrl === 'function') {
+        posterImg.classList.add('poster-link');
+        posterImg.title = '点击打开原站页面';
+        posterImg.addEventListener('click', (e) => {
+          e.stopPropagation();
+          options.onOpenUrl(linkUrl, drama);
+        });
+      }
     }
 
     return card;

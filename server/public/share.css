@@ -231,6 +231,17 @@ body {
   background: var(--bg);
 }
 
+/* 可点封面（绑定了原站链接时由 JS 加 poster-link 类）：悬停提示可跳原站 */
+.card-poster.poster-link {
+  cursor: pointer;
+  transition: filter 0.15s, box-shadow 0.15s;
+}
+
+.card-poster.poster-link:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 0 0 2px var(--primary);
+}
+
 /* 横版封面：置于文字上方、整行铺开 */
 .drama-card.card-landscape .card-top {
   flex-direction: column;
