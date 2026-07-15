@@ -488,6 +488,13 @@
         // 保证弹窗/后台/CSV 的精确等值过滤对新卡永远成立。
         detailed.sourceListUrl = subscription.urlPattern;
 
+        // fandom 条目映射不到主站（imdbId 仍为 mdf-/rsf- 临时键）＝给不了播放页，
+        // 不入库；未保存条目下轮抓取自动重试，文章补了回链即可正常入库
+        if (/^(mdf|rsf)-/.test(String(detailed.imdbId))) {
+          console.log(`[ShortScraping] fandom 未映射条目跳过入库: ${detailed.title}`);
+          continue;
+        }
+
         const saved = await saveSingleDrama(detailed);
         if (!saved) {
           console.log(`[ShortScraping] 跳过重复内容: ${detailed.title}`);
@@ -961,7 +968,8 @@
   /**
    * fandom 剧目文章页（WP SSR）补数据：
    * - 页内回主站的 /video/<UUID> 链接 → 去重键改写为 md+UUID、url 换成主站播放页，
-   *   与主站「最流行」条目全局去重（saveSingleDrama 按 imdbId 兜底）；找不到则保留 mdf+slug 键
+   *   与主站「最流行」条目全局去重（saveSingleDrama 按 imdbId 兜底）；找不到则仍为
+   *   mdf-+slug 临时键，由 scrapePage 的未映射闸门跳过入库（下轮抓取重试）
    * - h1 为权威标题；og:image 兜底封面（菜单项无图）；正文前几个长段落作简介
    *   （og:description 是 SEO 模板文案，不用）。任何失败都保留列表页数据。
    */
@@ -1174,7 +1182,8 @@
    * fandom 文章页（WP SSR）补数据：
    * - 回主站 /movie/<slug>-<book_id> 链接 → 去重键改写为 rs+book_id、url 换成主站
    *   第一集播放页 /full-episodes/，与主站 TOP 条目全局去重（saveSingleDrama 按 imdbId 兜底；同批多篇
-   *   文章指向同一剧时后到者在保存点被拦）；找不到回链保留 rsf-+slug 键照常入库
+   *   文章指向同一剧时后到者在保存点被拦）；找不到回链仍为 rsf-+slug 临时键，
+   *   由 scrapePage 的未映射闸门跳过入库（下轮抓取重试）
    * - h1.entry-title 为权威标题；正文前几个长段落作简介——此站 og:description 是
    *   正文首段真摘要（与 my-drama fandom 的「SEO 模板不可用」相反），可作兜底；
    *   封面列表页 background-image 优先、og:image 兜底。任何失败都保留列表页数据。

@@ -196,6 +196,7 @@ async function loadConfigFromJsonFiles() {
 
   await migrateLegacyTags();
   await migrateReelshortPlayUrls();
+  await pruneUnmappedFandomEntries();
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
 
@@ -653,6 +654,27 @@ function migrateReelshortPlayUrls() {
     if (changedCount > 0) {
       await chrome.storage.local.set({ dramas: migrated });
       console.log(`[ShortScraping] 已迁移 ${changedCount} 条 ReelShort 条目 url -> /full-episodes/ 播放页`);
+    }
+  });
+}
+
+/**
+ * 清理 fandom 未映射条目（imdbId 为 mdf-/rsf- 临时键；带连字符，与 md+UUID、
+ * rs+hex 的正式键无歧义）：v1.4.8 起内容脚本对映射失败的 fandom 条目不再入库
+ * （scrapePage 未映射闸门，下轮抓取自动重试），存量由此处一并清除。
+ * 幂等：无匹配时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
+ */
+function pruneUnmappedFandomEntries() {
+  return enqueueDramaWrite('fandom 未映射清理', async () => {
+    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    const kept = dramas.filter(drama => {
+      const key = String(drama.imdbId || '');
+      return !key.startsWith('mdf-') && !key.startsWith('rsf-');
+    });
+
+    if (kept.length !== dramas.length) {
+      await chrome.storage.local.set({ dramas: kept });
+      console.log(`[ShortScraping] 已清理 ${dramas.length - kept.length} 条 fandom 未映射条目`);
     }
   });
 }
