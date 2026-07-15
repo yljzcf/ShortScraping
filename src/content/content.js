@@ -1055,6 +1055,8 @@
   /**
    * 从「TOP」板块的 book 对象提取基础信息。
    * special_desc 是截断版简介，先入库兜底，完整版由详情页覆盖。
+   * url 存第一集播放页 /full-episodes/<slug>-<book_id>（与 /movie/ 剧目页
+   * 共用 slug+book_id，错 slug 同样按 book_id 301 规范化）。
    */
   function extractReelshortFromBook(book, index, tags, rsId) {
     const title = (book.book_title || '').trim();
@@ -1072,23 +1074,26 @@
       source: 'reelshort',
       sourceListUrl: window.location.href,
       status: 'new',
-      url: `https://www.reelshort.com/movie/${slug}-${book.book_id}`,
+      url: `https://www.reelshort.com/full-episodes/${slug}-${book.book_id}`,
       scrapedAt: new Date().toISOString(),
       translatedAt: null
     };
   }
 
   /**
-   * ReelShort 详情页（/movie/<slug>-<book_id>）补完整简介：详情数据同样在
-   * __NEXT_DATA__ 直出（pageProps.data.special_desc 为全文）。不读 og:description
-   * （带 "Drama also known as X; " 拼接前缀，JSON 更干净）。请求成功后用
-   * response.url 覆盖为 301 后的规范地址。任何失败保留列表页截断版数据，不丢卡。
+   * ReelShort 详情补完整简介：数据源固定为 /movie/<slug>-<book_id> 剧目页
+   * （__NEXT_DATA__ 的 pageProps.data.special_desc 为简介全文；/full-episodes/
+   * 播放页的 special_desc 是「include N episodes」SEO 模板文案，不可用）。
+   * 不读 og:description（带 "Drama also known as X; " 拼接前缀，JSON 更干净）。
+   * 请求成功后把 301 规范化地址转回 /full-episodes/ 形态覆盖 url（条目 url
+   * 恒为第一集播放页）。任何失败保留列表页截断版数据与构造的播放页 url，不丢卡。
    */
   async function fetchReelshortDetail(drama) {
     if (!drama.url) return drama;
 
     try {
-      const response = await fetch(drama.url, {
+      const detailUrl = drama.url.replace('/full-episodes/', '/movie/');
+      const response = await fetch(detailUrl, {
         headers: { 'Accept': 'text/html' }
       });
 
@@ -1106,7 +1111,7 @@
         if (title) drama.title = title;
         if (!drama.poster && detail.book_pic) drama.poster = detail.book_pic;
       }
-      if (response.url) drama.url = response.url.split('?')[0];
+      if (response.url) drama.url = response.url.split('?')[0].replace('/movie/', '/full-episodes/');
 
       console.log(`[ShortScraping] ReelShort 详情: ${drama.title} | 简介: ${drama.description ? '有' : '无'}`);
     } catch (e) {
@@ -1168,7 +1173,7 @@
   /**
    * fandom 文章页（WP SSR）补数据：
    * - 回主站 /movie/<slug>-<book_id> 链接 → 去重键改写为 rs+book_id、url 换成主站
-   *   剧目页，与主站 TOP 条目全局去重（saveSingleDrama 按 imdbId 兜底；同批多篇
+   *   第一集播放页 /full-episodes/，与主站 TOP 条目全局去重（saveSingleDrama 按 imdbId 兜底；同批多篇
    *   文章指向同一剧时后到者在保存点被拦）；找不到回链保留 rsf-+slug 键照常入库
    * - h1.entry-title 为权威标题；正文前几个长段落作简介——此站 og:description 是
    *   正文首段真摘要（与 my-drama fandom 的「SEO 模板不可用」相反），可作兜底；
@@ -1196,7 +1201,7 @@
         const u = new URL(mainHref, 'https://www.reelshort.com');
         u.search = '';
         u.hash = '';
-        drama.url = u.toString();
+        drama.url = u.toString().replace('/movie/', '/full-episodes/');
       }
 
       const h1 = doc.querySelector('h1.entry-title') || doc.querySelector('h1');

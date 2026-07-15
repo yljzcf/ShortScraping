@@ -195,6 +195,7 @@ async function loadConfigFromJsonFiles() {
   }
 
   await migrateLegacyTags();
+  await migrateReelshortPlayUrls();
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
 
@@ -628,6 +629,30 @@ function migrateLegacyTags() {
     if (changedCount > 0) {
       await chrome.storage.local.set({ dramas: migrated });
       console.log(`[ShortScraping] 已迁移 ${changedCount} 条历史记录的显示标签 RR -> RoyalRoad`);
+    }
+  });
+}
+
+/**
+ * 存量 ReelShort 条目 url 迁移：/movie/ 剧目页 → /full-episodes/ 第一集播放页
+ * （两者共用 slug+book_id，错 slug 由站点按 book_id 301 规范化）。fandom 未映射
+ * 条目的 /fandom/ 文章页 url 天然不匹配前缀、不受影响。
+ * 幂等：无变化时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
+ */
+function migrateReelshortPlayUrls() {
+  return enqueueDramaWrite('ReelShort 播放页迁移', async () => {
+    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    let changedCount = 0;
+
+    const migrated = dramas.map(drama => {
+      if (typeof drama.url !== 'string' || !drama.url.startsWith('https://www.reelshort.com/movie/')) return drama;
+      changedCount++;
+      return { ...drama, url: drama.url.replace('/movie/', '/full-episodes/') };
+    });
+
+    if (changedCount > 0) {
+      await chrome.storage.local.set({ dramas: migrated });
+      console.log(`[ShortScraping] 已迁移 ${changedCount} 条 ReelShort 条目 url -> /full-episodes/ 播放页`);
     }
   });
 }
