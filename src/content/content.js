@@ -1063,8 +1063,9 @@
   /**
    * 从「TOP」板块的 book 对象提取基础信息。
    * special_desc 是截断版简介，先入库兜底，完整版由详情页覆盖。
-   * url 存第一集播放页 /full-episodes/<slug>-<book_id>（与 /movie/ 剧目页
-   * 共用 slug+book_id，错 slug 同样按 book_id 301 规范化）。
+   * url 先存 /full-episodes/ 全集页形态兜底（与 /movie/ 剧目页共用
+   * slug+book_id，错 slug 同样按 book_id 301 规范化），详情成功后由
+   * buildReelshortEpisodeUrl 升级为第一集播放页 /episodes/…。
    */
   function extractReelshortFromBook(book, index, tags, rsId) {
     const title = (book.book_title || '').trim();
@@ -1089,12 +1090,27 @@
   }
 
   /**
+   * 由 /movie/ 规范地址与详情 JSON 构造第一集播放页
+   * /episodes/episode-1-<slug>-<book_id>-<chapter_id>：章节尾缀必须带（缺失或
+   * 写错直接 404，slug 错则 301 规范化），无法凭 book_id 构造；chapter_id 取
+   * __NEXT_DATA__ 的 start_play.chapter_id（online_base[0].chapter_id 兜底）。
+   * chapter 实际是预告片时站点会 301 到 trailer-… 规范前缀（同为播放入口，实测）。
+   * 拿不到返回空串（调用方退全集页兜底）。
+   */
+  function buildReelshortEpisodeUrl(movieUrl, detail) {
+    const slugId = (String(movieUrl || '').match(/\/movie\/([^/?#]+)/) || [])[1];
+    const chapterId = String(detail?.start_play?.chapter_id || detail?.online_base?.[0]?.chapter_id || '').trim();
+    return slugId && chapterId ? `https://www.reelshort.com/episodes/episode-1-${slugId}-${chapterId}` : '';
+  }
+
+  /**
    * ReelShort 详情补完整简介：数据源固定为 /movie/<slug>-<book_id> 剧目页
    * （__NEXT_DATA__ 的 pageProps.data.special_desc 为简介全文；/full-episodes/
-   * 播放页的 special_desc 是「include N episodes」SEO 模板文案，不可用）。
+   * 全集页的 special_desc 是「include N episodes」SEO 模板文案，不可用）。
    * 不读 og:description（带 "Drama also known as X; " 拼接前缀，JSON 更干净）。
-   * 请求成功后把 301 规范化地址转回 /full-episodes/ 形态覆盖 url（条目 url
-   * 恒为第一集播放页）。任何失败保留列表页截断版数据与构造的播放页 url，不丢卡。
+   * 请求成功后用同一份 __NEXT_DATA__ 的 chapter_id 把 url 升级为第一集播放页
+   * /episodes/…；拿不到 chapter_id 时退 301 规范化的 /full-episodes/ 全集页。
+   * 任何失败保留列表页截断版数据与构造的全集页 url，不丢卡。
    */
   async function fetchReelshortDetail(drama) {
     if (!drama.url) return drama;
@@ -1119,7 +1135,9 @@
         if (title) drama.title = title;
         if (!drama.poster && detail.book_pic) drama.poster = detail.book_pic;
       }
-      if (response.url) drama.url = response.url.split('?')[0].replace('/movie/', '/full-episodes/');
+      const canonical = (response.url || '').split('?')[0] || drama.url.replace('/full-episodes/', '/movie/');
+      const episodeUrl = buildReelshortEpisodeUrl(canonical, detail);
+      drama.url = episodeUrl || canonical.replace('/movie/', '/full-episodes/');
 
       console.log(`[ShortScraping] ReelShort 详情: ${drama.title} | 简介: ${drama.description ? '有' : '无'}`);
     } catch (e) {
@@ -1181,7 +1199,8 @@
   /**
    * fandom 文章页（WP SSR）补数据：
    * - 回主站 /movie/<slug>-<book_id> 链接 → 去重键改写为 rs+book_id、url 换成主站
-   *   第一集播放页 /full-episodes/，与主站 TOP 条目全局去重（saveSingleDrama 按 imdbId 兜底；同批多篇
+   *   第一集播放页（需再请求 /movie/ 页取 chapter_id 拼 /episodes/…，失败退
+   *   /full-episodes/ 全集页兜底），与主站 TOP 条目全局去重（saveSingleDrama 按 imdbId 兜底；同批多篇
    *   文章指向同一剧时后到者在保存点被拦）；找不到回链仍为 rsf-+slug 临时键，
    *   由 scrapePage 的未映射闸门跳过入库（下轮抓取重试）
    * - h1.entry-title 为权威标题；正文前几个长段落作简介——此站 og:description 是
@@ -1210,7 +1229,20 @@
         const u = new URL(mainHref, 'https://www.reelshort.com');
         u.search = '';
         u.hash = '';
-        drama.url = u.toString().replace('/movie/', '/full-episodes/');
+        const movieUrl = u.toString();
+        drama.url = movieUrl.replace('/movie/', '/full-episodes/');
+        try {
+          const movieResp = await fetch(movieUrl, { headers: { 'Accept': 'text/html' } });
+          if (movieResp.ok) {
+            const movieDoc = parser.parseFromString(await movieResp.text(), 'text/html');
+            const movieDetail = readNextData(movieDoc)?.props?.pageProps?.data;
+            const canonical = (movieResp.url || '').split('?')[0] || movieUrl;
+            const episodeUrl = buildReelshortEpisodeUrl(canonical, movieDetail);
+            if (episodeUrl) drama.url = episodeUrl;
+          }
+        } catch (e2) {
+          console.warn(`[ShortScraping] ReelShort fandom 取播放页失败（保留全集页兜底）: ${drama.title}`, e2.message);
+        }
       }
 
       const h1 = doc.querySelector('h1.entry-title') || doc.querySelector('h1');

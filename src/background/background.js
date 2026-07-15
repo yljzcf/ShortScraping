@@ -195,7 +195,7 @@ async function loadConfigFromJsonFiles() {
   }
 
   await migrateLegacyTags();
-  await migrateReelshortPlayUrls();
+  await migrateReelshortEpisodeUrls();
   await pruneUnmappedFandomEntries();
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
@@ -635,26 +635,57 @@ function migrateLegacyTags() {
 }
 
 /**
- * 存量 ReelShort 条目 url 迁移：/movie/ 剧目页 → /full-episodes/ 第一集播放页
- * （两者共用 slug+book_id，错 slug 由站点按 book_id 301 规范化）。fandom 未映射
- * 条目的 /fandom/ 文章页 url 天然不匹配前缀、不受影响。
- * 幂等：无变化时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
+ * 存量 ReelShort 条目 url 一次性迁移到第一集播放页
+ * /episodes/episode-1-<slug>-<book_id>-<chapter_id>：章节尾缀必须带（缺失/错误
+ * 404），无法凭 book_id 构造，需逐条请求 /movie/ 详情页从 __NEXT_DATA__ 取
+ * start_play.chapter_id（online_base[0] 兜底；SW 无 DOMParser，正则截取 JSON）。
+ * 请求失败的条目退 /full-episodes/ 全集页兜底。完成后写 rsEpisodeUrlMigrated
+ * 标记，此后每次 SW 唤醒零成本跳过——不重试失败条目，避免下架剧每次唤醒都白请求。
+ * 网络阶段在单写队列之外进行，只把最终改写入队（不长时间占锁）。
  */
-function migrateReelshortPlayUrls() {
-  return enqueueDramaWrite('ReelShort 播放页迁移', async () => {
-    const { dramas = [] } = await chrome.storage.local.get('dramas');
-    let changedCount = 0;
+async function migrateReelshortEpisodeUrls() {
+  const { rsEpisodeUrlMigrated, dramas = [] } = await chrome.storage.local.get(['rsEpisodeUrlMigrated', 'dramas']);
+  if (rsEpisodeUrlMigrated) return;
 
-    const migrated = dramas.map(drama => {
-      if (typeof drama.url !== 'string' || !drama.url.startsWith('https://www.reelshort.com/movie/')) return drama;
-      changedCount++;
-      return { ...drama, url: drama.url.replace('/movie/', '/full-episodes/') };
-    });
+  const candidates = dramas.filter(drama =>
+    typeof drama.url === 'string' && /^https:\/\/www\.reelshort\.com\/(movie|full-episodes)\//.test(drama.url));
 
-    if (changedCount > 0) {
-      await chrome.storage.local.set({ dramas: migrated });
-      console.log(`[ShortScraping] 已迁移 ${changedCount} 条 ReelShort 条目 url -> /full-episodes/ 播放页`);
+  const urlById = new Map();
+  for (const drama of candidates) {
+    const movieUrl = drama.url.replace('/full-episodes/', '/movie/');
+    let nextUrl = movieUrl.replace('/movie/', '/full-episodes/');
+    try {
+      const response = await fetch(movieUrl, { headers: { 'Accept': 'text/html' } });
+      if (response.ok) {
+        const html = await response.text();
+        const jsonText = (html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/) || [])[1];
+        const detail = jsonText ? JSON.parse(jsonText)?.props?.pageProps?.data : null;
+        const chapterId = String(detail?.start_play?.chapter_id || detail?.online_base?.[0]?.chapter_id || '').trim();
+        const canonical = (response.url || movieUrl).split('?')[0];
+        const slugId = (canonical.match(/\/movie\/([^/?#]+)/) || [])[1];
+        if (chapterId && slugId) nextUrl = `https://www.reelshort.com/episodes/episode-1-${slugId}-${chapterId}`;
+      }
+    } catch (e) {
+      console.warn(`[ShortScraping] ReelShort 播放页迁移请求失败（退全集页兜底）: ${drama.title}`, e.message);
     }
+    if (nextUrl !== drama.url) urlById.set(drama.imdbId, nextUrl);
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+
+  return enqueueDramaWrite('ReelShort 播放页迁移', async () => {
+    const { dramas: current = [] } = await chrome.storage.local.get('dramas');
+    let changedCount = 0;
+    const migrated = current.map(drama => {
+      const nextUrl = urlById.get(drama.imdbId);
+      if (!nextUrl || drama.url === nextUrl) return drama;
+      changedCount++;
+      return { ...drama, url: nextUrl };
+    });
+    const payload = changedCount > 0
+      ? { dramas: migrated, rsEpisodeUrlMigrated: true }
+      : { rsEpisodeUrlMigrated: true };
+    await chrome.storage.local.set(payload);
+    console.log(`[ShortScraping] ReelShort 播放页迁移完成：改写 ${changedCount} 条（候选 ${candidates.length}）`);
   });
 }
 
