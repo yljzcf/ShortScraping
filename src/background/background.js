@@ -570,6 +570,7 @@ function siteOfUrl(url) {
     if (hostname.endsWith('my-drama.com')) return 'mydrama';
     if (hostname.endsWith('reelshort.com')) return 'reelshort';
     if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
+    if (hostname.endsWith('netshort.com')) return 'netshort';
   } catch (e) {
     // 无效 URL 视为不属于任何站点
   }

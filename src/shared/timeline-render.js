@@ -11,7 +11,7 @@
   'use strict';
 
   // 分类标签：按 source 筛选时间线
-  const CATEGORY_SOURCES = ['imdb', 'steam', 'royalroad', 'mydrama', 'reelshort', 'dramashorts'];
+  const CATEGORY_SOURCES = ['imdb', 'steam', 'royalroad', 'mydrama', 'reelshort', 'dramashorts', 'netshort'];
 
   const DEFAULT_OPTS = {
     source: 'imdb',
@@ -147,7 +147,7 @@
       return drama.tags.slice(0, 3);
     }
 
-    const sourceNames = { imdb: 'IMDB', steam: 'Steam', royalroad: 'RoyalRoad', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts' };
+    const sourceNames = { imdb: 'IMDB', steam: 'Steam', royalroad: 'RoyalRoad', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort' };
     const tags = [sourceNames[drama.source] || 'IMDB'];
 
     if (drama.genre) {

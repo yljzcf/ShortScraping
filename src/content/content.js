@@ -59,6 +59,7 @@
     if (hostname.endsWith('my-drama.com')) return 'mydrama';
     if (hostname.endsWith('reelshort.com')) return 'reelshort';
     if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
+    if (hostname.endsWith('netshort.com')) return 'netshort';
     return null;
   }
 
@@ -371,8 +372,45 @@
     }
   };
 
+  /**
+   * NetShort 适配器（netshort.com，Next.js App Router）：无 __NEXT_DATA__，
+   * 数据在内联 self.__next_f.push RSC flight 流中（SSR 直出，document_end 时
+   * 已就绪，content script 读 script 文本解析、不依赖页面 window）。首页
+   * videoListGroup 约 5 个板块，板块只有 groupName 没有 id，订阅 URL 用约定
+   * 参数 ?list=<板块名归一化> 选板块（Trending Now→trending_now、
+   * Exclusive Originals→exclusive_originals；无参数默认 trending_now；
+   * App Router 忽略未知参数照常渲染）。列表条目自带完整简介（与 /episode/
+   * 观看页 flight 中逐字一致），无需请求详情页。基础域恒英文（zh-CN 请求头
+   * 不改变输出），无平台中文，status 走 new 交给 AI 翻译。
+   */
+  const netshortAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        return u.hostname.endsWith('netshort.com') && u.pathname === '/';
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return getNetshortItems();
+    },
+    extractId(item) {
+      // shortPlayId 是页面 URL 所用的规范数字 id，加 ns 前缀与全局去重键约定一致
+      const id = item && typeof item.shortPlayId === 'string' ? item.shortPlayId : '';
+      return /^\d{5,}$/.test(id) ? `ns${id}` : null;
+    },
+    extractBasic(item, tags, id, index) {
+      return extractNetshortFromItem(item, index, tags, id);
+    },
+    async fetchDetail(drama) {
+      // 列表 shotIntroduce 即简介全文（与观看页逐字一致），无需二次请求
+      return drama;
+    }
+  };
+
   // 站点适配器注册表。
-  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter };
+  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter };
 
   /**
    * 添加抓取按钮
@@ -1053,10 +1091,10 @@
   }
 
   /**
-   * 由标题构造友好 slug。详情页 URL 只认结尾的 book_id（错误 slug 会 301 到规范地址），
-   * slug 只求可读性，不承担准确性。
+   * 由标题构造友好 slug（ReelShort/NetShort 共用）。两站页面 URL 都只认结尾的
+   * id（错误 slug 会 301 到规范地址），slug 只求可读性，不承担准确性。
    */
-  function slugifyReelshortTitle(title) {
+  function slugifyTitle(title) {
     return String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   }
 
@@ -1069,7 +1107,7 @@
    */
   function extractReelshortFromBook(book, index, tags, rsId) {
     const title = (book.book_title || '').trim();
-    const slug = slugifyReelshortTitle(title) || 'x';
+    const slug = slugifyTitle(title) || 'x';
     return {
       id: `reelshort_${rsId}_${index}`,
       imdbId: rsId,
@@ -1332,6 +1370,113 @@
       sourceListUrl: window.location.href,
       status: 'new',
       url: `https://dramashorts.io/shorts/${dsId.slice(2)}`,
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
+  }
+
+  /**
+   * 读取 Next.js App Router 的 RSC flight 数据：SSR 把数据拆进多个内联
+   * <script>self.__next_f.push([1,"…"])</script>，按文档顺序取 payload 拼接。
+   * 每段 script 文本的首 [ 到末 ] 即 push 参数的 JSON 字面量（Next 序列化时
+   * 已做 JSON 兼容转义），只收 [1,"…"] 形态的文本分段。无数据返回 ''。
+   */
+  function readNextFlight(doc = document) {
+    const parts = [];
+    for (const script of doc.querySelectorAll('script')) {
+      const text = script.textContent || '';
+      if (!text.includes('self.__next_f.push(')) continue;
+      const start = text.indexOf('[');
+      const end = text.lastIndexOf(']');
+      if (start < 0 || end <= start) continue;
+      try {
+        const arr = JSON.parse(text.slice(start, end + 1));
+        if (Array.isArray(arr) && arr[0] === 1 && typeof arr[1] === 'string') parts.push(arr[1]);
+      } catch (e) {
+        // 单段坏数据跳过，不影响其余分段
+      }
+    }
+    return parts.join('');
+  }
+
+  /**
+   * 从 flight 文本截取 "<key>": 后的 JSON 数组并解析。数组终点用字符串感知的
+   * 括号匹配定位（标题等字符串值里可能出现 [ ]，纯计数会截错）。失败返回 null。
+   */
+  function parseFlightArray(flight, key) {
+    const anchor = flight.indexOf(`"${key}":`);
+    if (anchor < 0) return null;
+    const start = flight.indexOf('[', anchor);
+    if (start < 0) return null;
+    let depth = 0;
+    let inString = false;
+    for (let i = start; i < flight.length; i++) {
+      const c = flight[i];
+      if (inString) {
+        if (c === '\\') i++;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') inString = true;
+      else if (c === '[') depth++;
+      else if (c === ']' && --depth === 0) {
+        try {
+          return JSON.parse(flight.slice(start, i + 1));
+        } catch (e) {
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * NetShort 列表数据：flight 里的 videoListGroup 板块按名字归一化后与 ?list=
+   * 参数比对（板块无 id 可用），无参数或非法值默认 trending_now。
+   * 定位失败返回空数组（scrapePage 安全跳过）。
+   */
+  function getNetshortItems() {
+    const flight = readNextFlight();
+    const groups = flight ? parseFlightArray(flight, 'videoListGroup') : null;
+    if (!Array.isArray(groups)) {
+      console.log('[ShortScraping] NetShort flight 板块数据未找到');
+      return [];
+    }
+    const list = new URLSearchParams(window.location.search).get('list') || '';
+    const wanted = /^[a-z0-9_-]+$/.test(list) ? list : 'trending_now';
+    const normalize = name => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const group = groups.find(g => g && normalize(g.groupName) === wanted);
+    if (!group || !Array.isArray(group.data)) {
+      console.log(`[ShortScraping] NetShort 首页板块未找到: ${wanted}`);
+      return [];
+    }
+    return group.data;
+  }
+
+  /**
+   * 从 flight 条目提取基础信息。shotIntroduce 即简介全文；观看页相对路径
+   * shortPlayNameUrl（/episode/<slug>-<id>）站点数据自带，缺失时用标题 slug
+   * 构造兜底（错 slug 会被站点 301 到规范地址）。封面 CDN 直链约 42KB/张
+   * （站内卡片同款直链，无需图片优化端点）。
+   */
+  function extractNetshortFromItem(item, index, tags, nsId) {
+    const path = typeof item.shortPlayNameUrl === 'string' && item.shortPlayNameUrl.startsWith('/')
+      ? item.shortPlayNameUrl
+      : `/episode/${slugifyTitle(item.shortPlayName) || 'x'}-${nsId.slice(2)}`;
+    return {
+      id: `netshort_${nsId}_${index}`,
+      imdbId: nsId,
+      title: (item.shortPlayName || '').trim() || nsId,
+      titleZh: '',
+      poster: (item.shortPlayCover || '').trim(),
+      tags,
+      description: (item.shotIntroduce || '').trim(),
+      descriptionZh: '',
+      company: '',               // 平台自制剧，无独立制作公司信息
+      source: 'netshort',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      url: `https://netshort.com${path}`,
       scrapedAt: new Date().toISOString(),
       translatedAt: null
     };

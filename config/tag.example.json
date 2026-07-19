@@ -70,5 +70,13 @@
   {
     "url": "https://dramashorts.io/?list=popular_now",
     "tags": ["DramaShorts", "Popular"]
+  },
+  {
+    "url": "https://netshort.com/?list=trending_now",
+    "tags": ["NetShort", "Trending"]
+  },
+  {
+    "url": "https://netshort.com/?list=exclusive_originals",
+    "tags": ["NetShort", "Exclusive"]
   }
 ]

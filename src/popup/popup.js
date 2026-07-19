@@ -156,7 +156,7 @@
 
     elements.buttons.goScrape.addEventListener('click', () => {
       const urls = getConfiguredScrapeUrls();
-      const hostBySource = { imdb: 'imdb.com', steam: 'store.steampowered.com', royalroad: 'royalroad.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io' };
+      const hostBySource = { imdb: 'imdb.com', steam: 'store.steampowered.com', royalroad: 'royalroad.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com' };
       const host = hostBySource[state.activeSource] || 'imdb.com';
       const target = urls.find(u => u.includes(host)) || urls[0];
       if (target) {
@@ -837,6 +837,7 @@
       if (hostname.endsWith('my-drama.com')) return 'mydrama';
       if (hostname.endsWith('reelshort.com')) return 'reelshort';
       if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
+      if (hostname.endsWith('netshort.com')) return 'netshort';
     } catch (e) {
       // 无效 URL 忽略
     }

@@ -18,7 +18,8 @@
     { site: 'royalroad', label: 'RoyalRoad', tag: 'RoyalRoad', icon: 'assets/icons/site-royalroad.png' },
     { site: 'mydrama', label: 'My Drama', tag: 'MyDrama', icon: 'assets/icons/site-mydrama.png' },
     { site: 'reelshort', label: 'ReelShort', tag: 'ReelShort', icon: 'assets/icons/site-reelshort.png' },
-    { site: 'dramashorts', label: 'DramaShorts', tag: 'DramaShorts', icon: 'assets/icons/site-dramashorts.png' }
+    { site: 'dramashorts', label: 'DramaShorts', tag: 'DramaShorts', icon: 'assets/icons/site-dramashorts.png' },
+    { site: 'netshort', label: 'NetShort', tag: 'NetShort', icon: 'assets/icons/site-netshort.png' }
   ];
 
   const DEFAULT_SCHEDULE_CONFIG = {
@@ -492,6 +493,7 @@
       if (hostname.endsWith('my-drama.com')) return 'mydrama';
       if (hostname.endsWith('reelshort.com')) return 'reelshort';
       if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
+      if (hostname.endsWith('netshort.com')) return 'netshort';
     } catch (e) {
       // 无效 URL 归入「其他」分组
     }
