@@ -65,6 +65,9 @@
     const tags = (Array.isArray(d.tags) ? d.tags : []).map(asText).filter(Boolean);
 
     return {
+      // 全站点统一条目 ID（去重键，与 CSV 的 imdbId 列一致）：IMDB=tt…、
+      // Steam=appId、RoyalRoad=rr…、MyDrama=md…、ReelShort=rs…、DramaShorts=ds…、NetShort=ns…
+      imdb_id: asText(d.imdbId),
       title,
       title_zh: titleZh,
       title_display: titleZh ? `${titleZh}（${title}）` : title,
