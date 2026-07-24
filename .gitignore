@@ -31,6 +31,7 @@ temp/
 config/trans.json
 config/tag.json
 config/cron.json
+config/lark.json
 
 # Local-only dev docs (kept on disk, not published)
 CLAUDE.md

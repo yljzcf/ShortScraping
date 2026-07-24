@@ -5,6 +5,7 @@
 
 importScripts('../shared/url-match.js');
 importScripts('../shared/translator.js');
+importScripts('../shared/lark.js');
 
 // 定时任务默认配置。实际配置来自 config/cron.json。
 const DEFAULT_SCHEDULE_CONFIG = {
@@ -163,17 +164,19 @@ async function cleanupOrphanTranslateRunState() {
 }
 
 /**
- * 从扩展 config 目录的 tag.json / cron.json / trans.json 恢复配置。
+ * 从扩展 config 目录的 tag.json / cron.json / trans.json / lark.json 恢复配置。
  */
 async function loadConfigFromJsonFiles() {
-  const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw] = await Promise.all([
+  const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw, larkConfigRaw] = await Promise.all([
     fetchJsonFile('config/tag.json', null),
     fetchJsonFile('config/cron.json', DEFAULT_SCHEDULE_CONFIG),
-    fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG)
+    fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG),
+    fetchJsonFile('config/lark.json', Lark.DEFAULT_CONFIG)
   ]);
 
   const scheduleConfig = { ...DEFAULT_SCHEDULE_CONFIG, ...scheduleConfigRaw };
   const translateConfig = { ...DEFAULT_TRANSLATE_CONFIG, ...translateConfigRaw };
+  const larkConfig = Lark.normalizeConfig(larkConfigRaw);
 
   // tag.json 读取失败（fetch 异常 / JSON 损坏 / 结构不是数组）≠ 用户清空订阅：
   // 保留 storage 里上一次的订阅并跳过 prune，避免把全部历史误清成空库。
@@ -184,14 +187,15 @@ async function loadConfigFromJsonFiles() {
     await chrome.storage.local.set({
       urlTags,
       scheduleConfig,
-      translateConfig
+      translateConfig,
+      larkConfig
     });
     await pruneDramasOutsideConfiguredUrls(urlTags);
   } else {
     const stored = await chrome.storage.local.get('urlTags');
     urlTags = Array.isArray(stored.urlTags) ? stored.urlTags : [];
     console.warn('[ShortScraping] tag.json 读取失败，保留上次订阅配置并跳过历史清理');
-    await chrome.storage.local.set({ scheduleConfig, translateConfig });
+    await chrome.storage.local.set({ scheduleConfig, translateConfig, larkConfig });
   }
 
   await migrateLegacyTags();
@@ -1147,6 +1151,79 @@ async function syncTimelineToCsv() {
   console.log(`[ShortScraping] CSV 同步完成：${result.count} 条 -> ${result.csvPath}`);
 }
 
+// —— Lark 推送：多维表格工作流 webhook 触发器（实现见 src/shared/lark.js） ——
+
+// 时间线为空时「发送测试」用的内置样例（无封面/链接，顺带验证空值降级路径）
+const SAMPLE_LARK_DRAMA = {
+  id: 'lark-test-sample',
+  title: 'Lark Push Test',
+  titleZh: 'Lark 推送测试',
+  description: 'This is a test message sent from the ShortScraping extension.',
+  descriptionZh: '这是一条来自 ShortScraping 扩展的测试消息，用于让飞书工作流捕获参数结构。',
+  source: 'reelshort',
+  tags: ['测试'],
+  url: '',
+  poster: '',
+  scrapedAt: ''
+};
+
+/**
+ * 弹窗卡片按钮：按 id 从 storage 取卡再推送（对齐 applyTranslation 只传 id
+ * 的惯例，不信任调用方传对象）。配置永远读 storage，是唯一事实源。
+ */
+async function handleLarkPush(dramaId) {
+  const { larkConfig } = await chrome.storage.local.get('larkConfig');
+  const config = Lark.normalizeConfig(larkConfig);
+  if (!Lark.configReadiness(config).ok) {
+    return { success: false, notConfigured: true, error: 'Lark 推送未配置 webhook 地址' };
+  }
+
+  const { dramas = [] } = await chrome.storage.local.get('dramas');
+  const drama = dramas.find(d => d.id === dramaId);
+  if (!drama) {
+    return { success: false, error: '未找到该卡片数据' };
+  }
+
+  try {
+    await Lark.pushDrama(config, drama);
+    console.log(`[ShortScraping] Lark 推送成功: ${drama.title}`);
+    return { success: true };
+  } catch (e) {
+    console.warn('[ShortScraping] Lark 推送失败:', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * 设置页「发送测试」：可带表单草稿 config（normalize 后使用、不落库），
+ * 让用户保存前即可验证。样例数据取时间线最新一条，为空用内置样例。
+ */
+async function handleLarkTestSend(draftConfig) {
+  let config;
+  if (draftConfig && typeof draftConfig === 'object') {
+    config = Lark.normalizeConfig(draftConfig);
+  } else {
+    const { larkConfig } = await chrome.storage.local.get('larkConfig');
+    config = Lark.normalizeConfig(larkConfig);
+  }
+
+  if (!Lark.configReadiness(config).ok) {
+    return { success: false, notConfigured: true, error: '请先填写 webhook 地址' };
+  }
+
+  const { dramas = [] } = await chrome.storage.local.get('dramas');
+  const drama = dramas[0] || SAMPLE_LARK_DRAMA;
+
+  try {
+    await Lark.pushDrama(config, drama);
+    console.log(`[ShortScraping] Lark 测试发送成功: ${drama.title}`);
+    return { success: true, sampleTitle: drama.title };
+  } catch (e) {
+    console.warn('[ShortScraping] Lark 测试发送失败:', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
 /**
  * 显示通知
  */
@@ -1222,6 +1299,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     updateSingleDramaTranslation(request.dramaId, request.result).then((updated) => {
       sendResponse({ success: true, updated });
     }).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'larkPush') {
+    handleLarkPush(request.dramaId).then(sendResponse).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'larkTestSend') {
+    handleLarkTestSend(request.config).then(sendResponse).catch((error) => {
       sendResponse({ success: false, error: error.message });
     });
     return true;

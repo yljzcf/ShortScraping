@@ -1,0 +1,4 @@
+{
+  "webhookUrl": "https://www.feishu.cn/flow/api/trigger-webhook/xxxxxxxxxxxxxxxxxxxx",
+  "requestTimeoutSec": 15
+}

@@ -9,7 +9,8 @@
  *   --local-only 退回仅本机 127.0.0.1。测试可用环境变量 PORT 覆盖端口。
  *
  * 安全边界：写入接口（POST /sync、POST /config/*）仅接受本机回环地址调用，
- * 局域网设备只能访问只读页面与只读数据接口；trans.json（含 API Key）无读取接口。
+ * 局域网设备只能访问只读页面与只读数据接口；trans.json（含 API Key）与
+ * lark.json（webhook 地址即写权限凭据）均无任何读取接口。
  */
 
 const http = require('http');
@@ -17,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const UrlMatch = require('../src/shared/url-match.js');
+const Lark = require('../src/shared/lark.js');
 
 const PORT = Number(process.env.PORT) || 31919;
 const LOCAL_ONLY = process.argv.includes('--local-only');
@@ -30,6 +32,7 @@ const CSV_PATH = path.join(DB_DIR, 'timeline.csv');
 const TIMELINE_JSON_PATH = path.join(DB_DIR, 'timeline.json');
 const TAG_CONFIG_PATH = path.join(CONFIG_DIR, 'tag.json');
 const TRANS_CONFIG_PATH = path.join(CONFIG_DIR, 'trans.json');
+const LARK_CONFIG_PATH = path.join(CONFIG_DIR, 'lark.json');
 const CSV_BOM = '﻿';
 const CSV_NEWLINE = '\r\n';
 
@@ -181,6 +184,14 @@ function writeTransConfig(rawConfig) {
 
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
   fs.writeFileSync(TRANS_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  return config;
+}
+
+function writeLarkConfig(rawConfig) {
+  const config = Lark.normalizeConfig(rawConfig);
+
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  fs.writeFileSync(LARK_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
   return config;
 }
 
@@ -438,6 +449,18 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, config, configPath: TRANS_CONFIG_PATH });
     } catch (error) {
       console.error('[ShortScraping Sync] 写入翻译接口配置失败:', error);
+      return sendJson(res, 500, { ok: false, error: error.message });
+    }
+  }
+
+  if (req.method === 'POST' && pathname === '/config/lark') {
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const config = writeLarkConfig(payload.larkConfig || {});
+      return sendJson(res, 200, { ok: true, config, configPath: LARK_CONFIG_PATH });
+    } catch (error) {
+      console.error('[ShortScraping Sync] 写入 Lark 推送配置失败:', error);
       return sendJson(res, 500, { ok: false, error: error.message });
     }
   }
