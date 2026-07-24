@@ -369,11 +369,11 @@ body {
   transition: all 0.2s;
 }
 
-/* 状态标签 - 固定右上角 */
+/* 状态标签 - 固定右上角（三槽位：翻译按钮@8px、Lark 按钮@40px、badge@72px） */
 .status-badge {
   position: absolute;
   top: 8px;
-  right: 40px;
+  right: 72px;
   padding: 3px 8px;
   background: var(--success);
   color: white;
@@ -383,8 +383,9 @@ body {
   z-index: 1;
 }
 
-/* 翻译按钮 - 固定右上角 */
-.btn-translate {
+/* 翻译 / Lark 推送按钮 - 固定右上角，同款样式 */
+.btn-translate,
+.btn-lark {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -402,15 +403,29 @@ body {
   transition: all 0.2s;
 }
 
-.btn-translate:hover {
+.btn-translate:hover,
+.btn-lark:hover {
   background: rgba(255, 255, 255, 0.2);
   transform: scale(1.1);
 }
 
-.btn-translate:disabled {
+.btn-translate:disabled,
+.btn-lark:disabled {
   opacity: 0.5;
   cursor: not-allowed;
   transform: none;
+}
+
+.btn-lark {
+  right: 40px;
+}
+
+.btn-lark img {
+  width: 16px;
+  height: 16px;
+  display: block;
+  border-radius: 3px;
+  pointer-events: none;
 }
 
 .drama-card:hover {

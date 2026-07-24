@@ -766,6 +766,65 @@
   }
 
   /**
+   * 推送单张卡片到飞书（后台经多维表格工作流 webhook 投递）。
+   * storage.onChanged 的全量重渲染会把按钮重建成未禁用态，仅 btn.disabled
+   * 挡不住重复点击，larkInFlight 按 dramaId 兜底；终态回写按 data-id 重新
+   * 查找节点，避免写到重渲染后已脱离 DOM 的旧节点。
+   */
+  const larkInFlight = new Set();
+  const LARK_BUTTON_ICON = '<img src="../../assets/icons/lark.png" alt="Lark">';
+
+  function setLarkButtonState(dramaId, fallbackBtn, html, disabled) {
+    const btn = Array.from(elements.containers.timeline.querySelectorAll('.btn-lark'))
+      .find(node => node.dataset.id === dramaId) || fallbackBtn;
+    if (!btn) return;
+    btn.innerHTML = html;
+    btn.disabled = disabled;
+  }
+
+  async function pushCardToLark(dramaId, btn) {
+    if (larkInFlight.has(dramaId)) {
+      showToast('该卡片正在推送中', { type: 'info' });
+      return;
+    }
+
+    larkInFlight.add(dramaId);
+    btn.disabled = true;
+    btn.innerHTML = '⏳';
+
+    try {
+      const response = await chrome.runtime.sendMessage({ action: 'larkPush', dramaId });
+
+      if (response?.notConfigured) {
+        showToast('Lark 推送未配置，已打开设置页', { type: 'info' });
+        setLarkButtonState(dramaId, btn, LARK_BUTTON_ICON, false);
+        openSettings();
+        return;
+      }
+
+      if (!response?.success) {
+        throw new Error(response?.error || '后台推送失败');
+      }
+
+      showToast('已推送到飞书工作流', { type: 'success' });
+      setLarkButtonState(dramaId, btn, '✅', true);
+    } catch (e) {
+      console.error('[ShortScraping] Lark 推送失败:', e);
+      showToast(`Lark 推送失败：${e.message}`, { type: 'error', duration: 5000 });
+      setLarkButtonState(dramaId, btn, '❌', true);
+    } finally {
+      larkInFlight.delete(dramaId);
+    }
+
+    // ✅/❌ 展示 2 秒后复原图标；期间若同卡又发起新推送，交给新流程接管
+    setTimeout(() => {
+      if (!larkInFlight.has(dramaId)) {
+        setLarkButtonState(dramaId, btn, LARK_BUTTON_ICON, false);
+      }
+    }, 2000);
+  }
+
+  /**
    * 翻译单张卡片
    */
   async function translateSingleCard(dramaId, btn) {
@@ -901,6 +960,7 @@
       readOnly: false,
       assetsBase: '../../assets/icons',
       onTranslate: translateSingleCard,
+      onLarkPush: pushCardToLark,
       onOpenUrl: (url) => chrome.tabs.create({ url })
     });
     elements.states.empty.classList.toggle('hidden', hasData);

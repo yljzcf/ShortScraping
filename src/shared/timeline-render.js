@@ -17,6 +17,7 @@
     source: 'imdb',
     readOnly: false,
     onTranslate: null,
+    onLarkPush: null,
     onOpenUrl: null,
     assetsBase: '../../assets/icons'
   };
@@ -183,9 +184,13 @@
     const descZh = (drama.descriptionZh || '').trim();
     const descEn = (drama.description || '').trim();
 
+    // Lark 按钮双闸门：readOnly（共享页）不渲染，未注入回调（调用方未接入）也不渲染
+    const showLarkButton = !options.readOnly && typeof options.onLarkPush === 'function';
+
     card.innerHTML = `
       ${drama.status === 'new' ? '<div class="status-badge">待翻译</div>' : ''}
       ${options.readOnly ? '' : `<button class="btn-translate" title="翻译此卡片" data-id="${escapeAttribute(drama.id)}">🌍</button>`}
+      ${showLarkButton ? `<button class="btn-lark" title="推送到飞书（写入多维表格/发送群消息）" data-id="${escapeAttribute(drama.id)}"><img src="${options.assetsBase}/lark.png" alt="Lark"></button>` : ''}
       <div class="card-content">
         <div class="card-top">
           <img class="card-poster" src="${escapeAttribute(drama.poster || defaultPoster)}" alt="${escapeAttribute(drama.title)}">
@@ -209,13 +214,21 @@
       </div>
     `;
 
-    // 绑定翻译按钮事件（只读模式不渲染按钮）
+    // 绑定翻译/Lark 按钮事件（只读模式不渲染按钮）
     if (!options.readOnly) {
       const translateBtn = card.querySelector('.btn-translate');
       if (translateBtn && typeof options.onTranslate === 'function') {
         translateBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           options.onTranslate(drama.id, translateBtn);
+        });
+      }
+
+      const larkBtn = card.querySelector('.btn-lark');
+      if (larkBtn && typeof options.onLarkPush === 'function') {
+        larkBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          options.onLarkPush(drama.id, larkBtn);
         });
       }
     }

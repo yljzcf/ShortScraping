@@ -1,6 +1,6 @@
 /**
  * ShortScraping Settings Script
- * 配置源：config/tag.json / config/cron.json / config/trans.json
+ * 配置源：config/tag.json / config/cron.json / config/trans.json / config/lark.json
  */
 
 (function() {
@@ -9,6 +9,7 @@
   const SYNC_HEALTH_URL = 'http://127.0.0.1:31919/health';
   const TAG_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/tag';
   const TRANS_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/trans';
+  const LARK_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/lark';
   const SUBSCRIPTION_CATALOG_FILE = 'config/tag.example.json';
 
   // tag = 该站点在订阅 tags 里的站点自身标签，页面上隐藏不显示（仅展示层，保存数据不变）
@@ -48,6 +49,7 @@
     legacyUrlTags: [],
     scheduleConfig: { ...DEFAULT_SCHEDULE_CONFIG },
     translateConfig: { ...DEFAULT_TRANSLATE_CONFIG },
+    larkConfig: { ...Lark.DEFAULT_CONFIG },
     activeTab: 'config'
   };
 
@@ -77,6 +79,11 @@
       reloadTranslate: document.getElementById('btnReloadTranslate'),
       saveTranslate: document.getElementById('btnSaveTranslate'),
       openTransFromTranslate: document.getElementById('btnOpenTransFromTranslate'),
+      openLark: document.getElementById('btnOpenLark'),
+      reloadLark: document.getElementById('btnReloadLark'),
+      saveLark: document.getElementById('btnSaveLark'),
+      openLarkFromLark: document.getElementById('btnOpenLarkFromLark'),
+      larkTestSend: document.getElementById('btnLarkTestSend'),
       checkSync: document.getElementById('btnCheckSync')
     };
 
@@ -98,6 +105,10 @@
       batchSize: document.getElementById('batchSize'),
       delayMs: document.getElementById('delayMs'),
       requestTimeoutSec: document.getElementById('requestTimeoutSec')
+    };
+    elements.larkForm = {
+      webhookUrl: document.getElementById('larkWebhookUrl'),
+      requestTimeoutSec: document.getElementById('larkRequestTimeoutSec')
     };
     elements.syncService = {
       container: document.getElementById('syncServiceStatus'),
@@ -123,6 +134,11 @@
     bindClick(elements.buttons.reloadTranslate, reloadTranslateFromFile);
     bindClick(elements.buttons.saveTranslate, saveTranslateConfig);
     bindClick(elements.buttons.openTransFromTranslate, () => openConfigFile('config/trans.json'));
+    bindClick(elements.buttons.openLark, () => openConfigFile('config/lark.json'));
+    bindClick(elements.buttons.reloadLark, reloadLarkFromFile);
+    bindClick(elements.buttons.saveLark, saveLarkConfig);
+    bindClick(elements.buttons.openLarkFromLark, () => openConfigFile('config/lark.json'));
+    bindClick(elements.buttons.larkTestSend, handleLarkTestSend);
     bindClick(elements.buttons.checkSync, checkSyncServiceStatus);
 
     // 翻译模式切换时只显示当前模式的配置区（隐藏区块的值保留，切回即恢复）
@@ -139,32 +155,37 @@
     try {
       const [subscriptionCatalog, result] = await Promise.all([
         loadSubscriptionCatalog(),
-        chrome.storage.local.get(['urlTags', 'scheduleConfig', 'translateConfig'])
+        chrome.storage.local.get(['urlTags', 'scheduleConfig', 'translateConfig', 'larkConfig'])
       ]);
       state.subscriptionCatalog = subscriptionCatalog;
       let urlTags = normalizeUrlTags(result.urlTags || []);
       let scheduleConfig = normalizeScheduleConfig(result.scheduleConfig || {});
       let translateConfig = normalizeTranslateConfig(result.translateConfig || {});
+      let larkConfig = Lark.normalizeConfig(result.larkConfig || {});
 
       const shouldReadTags = urlTags.length === 0;
       const shouldReadSchedule = Object.keys(result.scheduleConfig || {}).length === 0;
       const shouldReadTranslate = Object.keys(result.translateConfig || {}).length === 0;
+      const shouldReadLark = Object.keys(result.larkConfig || {}).length === 0;
 
-      if (shouldReadTags || shouldReadSchedule || shouldReadTranslate) {
-        const [tagConfig, scheduleConfigRaw, translateConfigRaw] = await Promise.all([
+      if (shouldReadTags || shouldReadSchedule || shouldReadTranslate || shouldReadLark) {
+        const [tagConfig, scheduleConfigRaw, translateConfigRaw, larkConfigRaw] = await Promise.all([
           shouldReadTags ? fetchJsonFile('config/tag.json', []) : Promise.resolve(urlTags),
           shouldReadSchedule ? fetchJsonFile('config/cron.json', DEFAULT_SCHEDULE_CONFIG) : Promise.resolve(scheduleConfig),
-          shouldReadTranslate ? fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG) : Promise.resolve(translateConfig)
+          shouldReadTranslate ? fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG) : Promise.resolve(translateConfig),
+          shouldReadLark ? fetchJsonFile('config/lark.json', Lark.DEFAULT_CONFIG) : Promise.resolve(larkConfig)
         ]);
 
         urlTags = normalizeUrlTags(tagConfig);
         scheduleConfig = normalizeScheduleConfig(scheduleConfigRaw);
         translateConfig = normalizeTranslateConfig(translateConfigRaw);
+        larkConfig = Lark.normalizeConfig(larkConfigRaw);
       }
 
       state.urlTags = urlTags;
       state.scheduleConfig = scheduleConfig;
       state.translateConfig = translateConfig;
+      state.larkConfig = larkConfig;
       renderAll();
     } catch (e) {
       console.error('[ShortScraping] 加载当前配置失败:', e);
@@ -175,10 +196,11 @@
 
   async function reloadConfig() {
     try {
-      const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw] = await Promise.all([
+      const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw, larkConfigRaw] = await Promise.all([
         fetchJsonFile('config/tag.json', null),
         fetchJsonFile('config/cron.json', DEFAULT_SCHEDULE_CONFIG),
-        fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG)
+        fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG),
+        fetchJsonFile('config/lark.json', Lark.DEFAULT_CONFIG)
       ]);
 
       // tag.json 读取失败 ≠ 清空订阅：沿用 storage 现有订阅，避免触发后台误清全部历史
@@ -194,9 +216,10 @@
 
       const scheduleConfig = normalizeScheduleConfig(scheduleConfigRaw);
       const translateConfig = normalizeTranslateConfig(translateConfigRaw);
-      await applyConfig(urlTags, scheduleConfig, translateConfig);
+      const larkConfig = Lark.normalizeConfig(larkConfigRaw);
+      await applyConfig(urlTags, scheduleConfig, translateConfig, larkConfig);
 
-      showStatus(`已读取配置：${urlTags.length} 个 URL，${getScheduleText(scheduleConfig)}，翻译模式=${translateConfig.translateMode}${tagNote}`, !tagNote);
+      showStatus(`已读取配置：${urlTags.length} 个 URL，${getScheduleText(scheduleConfig)}，翻译模式=${translateConfig.translateMode}，Lark=${getLarkText(larkConfig)}${tagNote}`, !tagNote);
     } catch (e) {
       console.error('[ShortScraping] 读取配置失败:', e);
       showStatus(`读取配置失败：${e.message}`, false);
@@ -236,15 +259,31 @@
     }
   }
 
-  async function applyConfig(urlTags, scheduleConfig, translateConfig) {
+  async function reloadLarkFromFile() {
+    try {
+      const larkConfig = Lark.normalizeConfig(await fetchJsonFile('config/lark.json', Lark.DEFAULT_CONFIG));
+      state.larkConfig = larkConfig;
+      await chrome.storage.local.set({ larkConfig });
+      renderLarkForm();
+      renderConfigSummary();
+      showStatus(`已从 config/lark.json 读取 Lark 推送配置：${getLarkText(larkConfig)}`, true);
+    } catch (e) {
+      console.error('[ShortScraping] 读取 Lark 推送配置失败:', e);
+      showStatus(`读取 Lark 推送配置失败：${e.message}`, false);
+    }
+  }
+
+  async function applyConfig(urlTags, scheduleConfig, translateConfig, larkConfig) {
     state.urlTags = normalizeUrlTags(urlTags);
     state.scheduleConfig = normalizeScheduleConfig(scheduleConfig);
     state.translateConfig = normalizeTranslateConfig(translateConfig);
+    state.larkConfig = Lark.normalizeConfig(larkConfig);
 
     await chrome.storage.local.set({
       urlTags: state.urlTags,
       scheduleConfig: state.scheduleConfig,
-      translateConfig: state.translateConfig
+      translateConfig: state.translateConfig,
+      larkConfig: state.larkConfig
     });
 
     const response = await chrome.runtime.sendMessage({ action: 'updateAlarms', force: true });
@@ -290,6 +329,7 @@
     renderScheduleSummary();
     renderSubscriptions();
     renderTranslateForm();
+    renderLarkForm();
   }
 
   function renderConfigSummary() {
@@ -298,7 +338,8 @@
     const cards = [
       { label: '网页订阅', value: `${state.urlTags.length} 个 URL` },
       { label: '定时任务', value: getScheduleText(state.scheduleConfig) },
-      { label: '翻译接口', value: getTranslateText(state.translateConfig) }
+      { label: '翻译接口', value: getTranslateText(state.translateConfig) },
+      { label: 'Lark 推送', value: getLarkText(state.larkConfig) }
     ];
 
     cards.forEach(card => {
@@ -346,6 +387,23 @@
     form.batchSize.value = String(config.batchSize);
     form.delayMs.value = String(config.delayMs);
     form.requestTimeoutSec.value = String(config.requestTimeoutSec);
+  }
+
+  function renderLarkForm() {
+    const form = elements.larkForm;
+    if (!form?.webhookUrl) return;
+
+    const config = Lark.normalizeConfig(state.larkConfig);
+    form.webhookUrl.value = config.webhookUrl;
+    form.requestTimeoutSec.value = String(config.requestTimeoutSec);
+  }
+
+  function readLarkConfigFromForm() {
+    const form = elements.larkForm;
+    return {
+      webhookUrl: form.webhookUrl.value.trim(),
+      requestTimeoutSec: Number(form.requestTimeoutSec.value)
+    };
   }
 
   function createSummaryCard(label, value) {
@@ -575,6 +633,57 @@
     };
   }
 
+  async function saveLarkConfig() {
+    try {
+      const larkConfig = Lark.normalizeConfig(readLarkConfigFromForm());
+      state.larkConfig = larkConfig;
+      await chrome.storage.local.set({ larkConfig });
+      renderLarkForm();
+      renderConfigSummary();
+
+      const syncResult = await trySyncLarkConfig(larkConfig);
+      if (syncResult.ok) {
+        showStatus('已保存 Lark 推送配置，并写回 config/lark.json', true);
+      } else {
+        showStatus(`已保存到扩展本地配置；写回 config/lark.json 失败：${syncResult.error}`, false);
+      }
+    } catch (e) {
+      console.error('[ShortScraping] 保存 Lark 推送配置失败:', e);
+      showStatus(`保存 Lark 推送配置失败：${e.message}`, false);
+    }
+  }
+
+  /**
+   * 发送测试：用当前表单草稿（不落库）经后台真实推送一条样例数据，
+   * 让飞书触发器捕获参数结构。测试路径与卡片按钮共用后台同一实现。
+   */
+  async function handleLarkTestSend() {
+    const draft = Lark.normalizeConfig(readLarkConfigFromForm());
+    if (!Lark.configReadiness(draft).ok) {
+      showStatus('请先填写 Webhook 地址（http/https）', false);
+      return;
+    }
+
+    const btn = elements.buttons.larkTestSend;
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = '发送中…';
+
+    try {
+      const response = await chrome.runtime.sendMessage({ action: 'larkTestSend', config: draft });
+      if (!response?.success) {
+        throw new Error(response?.error || '后台推送失败');
+      }
+      showStatus(`测试数据已发送（${response.sampleTitle || '内置样例'}）：请到飞书工作流的触发器里确认参数已捕获`, true);
+    } catch (e) {
+      console.error('[ShortScraping] Lark 发送测试失败:', e);
+      showStatus(`发送测试失败：${e.message}`, false);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  }
+
   async function trySyncTagConfig(urlTags) {
     try {
       const response = await fetch(TAG_CONFIG_SYNC_URL, {
@@ -604,6 +713,29 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ translateConfig })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
+      if (!result?.ok) {
+        throw new Error(result?.error || '同步服务返回失败');
+      }
+
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  async function trySyncLarkConfig(larkConfig) {
+    try {
+      const response = await fetch(LARK_CONFIG_SYNC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ larkConfig })
       });
 
       if (!response.ok) {
@@ -758,6 +890,10 @@
     }
 
     return 'API：MyMemory/兼容接口';
+  }
+
+  function getLarkText(config) {
+    return Lark.configReadiness(config).ok ? '已配置 Webhook' : '未配置';
   }
 
   function openConfigFile(fileName) {

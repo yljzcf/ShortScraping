@@ -450,6 +450,7 @@
       <button class="tab-btn" data-tab="subscriptions">🌐 网页订阅</button>
       <button class="tab-btn" data-tab="schedule">⏰ 定时任务</button>
       <button class="tab-btn" data-tab="translate">🌍 翻译接口</button>
+      <button class="tab-btn" data-tab="lark">🕊️ Lark 推送</button>
       <button class="tab-btn" data-tab="archive">💾 数据存档</button>
     </nav>
 
@@ -464,11 +465,13 @@
             <li><strong>网页订阅：</strong><code>config/tag.json</code></li>
             <li><strong>定时任务：</strong><code>config/cron.json</code></li>
             <li><strong>翻译接口：</strong><code>config/trans.json</code></li>
+            <li><strong>Lark 推送：</strong><code>config/lark.json</code></li>
           </ul>
           <div class="actions">
             <button class="btn btn-secondary" id="btnOpenTag">查看 config/tag.json</button>
             <button class="btn btn-secondary" id="btnOpenSchedule">查看 config/cron.json</button>
             <button class="btn btn-secondary" id="btnOpenTrans">查看 config/trans.json</button>
+            <button class="btn btn-secondary" id="btnOpenLark">查看 config/lark.json</button>
             <button class="btn btn-primary" id="btnReload">重新读取配置</button>
           </div>
         </div>
@@ -595,6 +598,48 @@
         </div>
       </section>
 
+      <section class="tab-panel" id="tab-lark">
+        <div class="section">
+          <div class="section-header">
+            <div>
+              <div class="section-title"><span>🕊️</span> Lark 推送</div>
+              <p class="help-text">对应 <code>config/lark.json</code>。时间线卡片上的 Lark 按钮会把卡片数据（中英文标题、简介、来源+标签、原站链接、封面链接）POST 到下方 Webhook 地址，「新增记录到多维表格」与「发送消息到话题群」由你的飞书工作流完成，消息模板随时可在飞书侧调整。</p>
+            </div>
+            <div class="actions">
+              <button class="btn btn-secondary" id="btnReloadLark">从配置文件重载</button>
+              <button class="btn btn-secondary" id="btnOpenLarkFromLark">查看 config/lark.json</button>
+            </div>
+          </div>
+
+          <div class="form-field">
+            <label>Webhook 地址</label>
+            <input type="url" id="larkWebhookUrl" placeholder="多维表格工作流 →「接收到 webhook 时」触发器提供的地址">
+          </div>
+          <div class="grid" style="margin-top: 12px;">
+            <div class="form-field">
+              <label>请求超时（秒）</label>
+              <input type="number" id="larkRequestTimeoutSec" min="1" step="1" placeholder="15">
+            </div>
+          </div>
+
+          <div class="section" style="margin-top: 14px; margin-bottom: 0;">
+            <div class="section-title"><span>🛠️</span> 飞书侧配置指引</div>
+            <ul class="config-list" style="margin-top: 10px;">
+              <li><strong>① 建工作流：</strong>打开目标多维表格 → 左下角「工作流」→ 新建 → 触发器选「接收到 webhook 时」（增值功能，可用性与额度以界面提示为准；工作流与自动化共用每月运行次数），复制它提供的 Webhook 地址填到上方。</li>
+              <li><strong>② 捕获参数：</strong>点击下方「发送测试」发一条样例数据，让触发器识别参数结构。参数键固定为 <code>title</code> / <code>title_zh</code> / <code>title_display</code> / <code>description</code> / <code>description_zh</code> / <code>summary</code> / <code>source</code> / <code>source_name</code> / <code>tags</code> / <code>url</code> / <code>poster</code> / <code>scraped_at</code> / <code>pushed_at</code>，全部为字符串，空值为空字符串。</li>
+              <li><strong>③ 配动作：</strong>动作一选「新增记录」，把参数映射到表格字段（<code>url</code> / <code>poster</code> 建议用超链接字段）；动作二选「发送飞书消息」到目标话题群，消息内容可引用同批参数。</li>
+              <li><strong>④ 封面说明：</strong>此路径下封面在表格与群消息中均以链接形式出现——外链图片变飞书内真图需开放平台应用凭据上传（平台限制），如需真图展示可后续升级自建应用方案。</li>
+            </ul>
+          </div>
+
+          <div class="actions">
+            <button class="btn btn-primary" id="btnSaveLark">保存 Lark 配置</button>
+            <button class="btn btn-secondary" id="btnLarkTestSend">发送测试</button>
+          </div>
+          <p class="help-text">说明：保存时会先更新扩展本地配置，并尝试通过本地同步服务写回 <code>config/lark.json</code>；若同步服务未启动，会提示仅本地临时生效。「发送测试」使用当前表单草稿（无需先保存），发送时间线最新一条卡片数据，时间线为空时发送内置样例。</p>
+        </div>
+      </section>
+
       <section class="tab-panel" id="tab-archive">
         <div class="section">
           <div class="section-header">
@@ -616,6 +661,7 @@
     <div class="status" id="statusMsg"></div>
   </div>
 
+  <script src="../shared/lark.js"></script>
   <script src="settings.js"></script>
 </body>
 </html>
