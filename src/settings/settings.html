@@ -628,7 +628,7 @@
               <li><strong>① 建工作流：</strong>打开目标多维表格 → 左下角「工作流」→ 新建 → 触发器选「接收到 webhook 时」（增值功能，可用性与额度以界面提示为准；工作流与自动化共用每月运行次数），复制它提供的 Webhook 地址填到上方。</li>
               <li><strong>② 捕获参数：</strong>点击下方「发送测试」发一条样例数据，让触发器识别参数结构。参数键固定为 <code>item_id</code>（全站点统一条目 ID，供核查对账：IMDB=tt…、Steam=appId、RoyalRoad=rr…、MyDrama=md…、ReelShort=rs…、DramaShorts=ds…、NetShort=ns…，值与本地 CSV 的 itemId 列一致） / <code>title</code> / <code>title_zh</code> / <code>title_display</code> / <code>description</code> / <code>description_zh</code> / <code>summary</code> / <code>source</code> / <code>source_name</code> / <code>tags</code> / <code>url</code> / <code>poster</code> / <code>scraped_at</code> / <code>pushed_at</code>，全部为字符串，空值为空字符串；<code>tags</code> 为英文逗号分隔，站点显示名（source_name）不含空格。</li>
               <li><strong>③ 配动作：</strong>动作一选「新增记录」，把参数映射到表格字段（<code>url</code> / <code>poster</code> 建议用超链接字段）；动作二选「发送飞书消息」到目标话题群，消息内容可引用同批参数。</li>
-              <li><strong>④ 封面说明：</strong>webhook 推送本身只能传封面链接（外链图变飞书内真图需上传，平台限制）。<strong>表格内要真图附件——推荐用官方字段捷径「链接转附件」</strong>：表格中新建字段 → 「捷径」分类搜「链接转附件」→ 输入参数选「封面链接」列，添加后每条新记录自动转换，零开发、无需开任何面板。已知限制：该捷径解析不了含 @ 或百分号编码的 URL——dramashorts 封面推送时已自动解包为原始 CDN 直链（可转）；<strong>IMDB 封面（media-amazon 链接含 @）无法被捷径转换</strong>，IMDB 行无附件属预期，封面链接列仍可点击查看。群消息中的封面仍为链接，要卡片内真图需升级自建应用方案。</li>
+              <li><strong>④ 封面说明：</strong>webhook 推送本身只能传封面链接（外链图变飞书内真图需上传，平台限制）。<strong>表格内要真图附件——推荐用官方字段捷径「链接转附件」</strong>：表格中新建字段 → 「捷径」分类搜「链接转附件」→ 输入参数选「封面链接」列，添加后每条新记录自动转换，零开发、无需开任何面板。已知限制：该捷径解析不了含<strong>英文逗号或百分号编码</strong>的 URL——推送时已按站点自动规避：dramashorts 解包为原始 CDN 直链、IMDB 改写为无逗号的原图形态，均可正常转换；若个别行仍失败，多为链接含其他特殊字符（如 NetShort 文件名中的全角冒号），属捷径解析限制。群消息中的封面仍为链接，要卡片内真图需升级自建应用方案。</li>
             </ul>
           </div>
 
