@@ -76,7 +76,7 @@
       summary: descriptionZh || description,
       source: asText(d.source),
       source_name: SOURCE_NAMES[d.source] || asText(d.source),
-      tags: tags.join(' / '),
+      tags: tags.join(','),
       url: asText(d.url),
       poster: asText(d.poster),
       scraped_at: asText(d.scrapedAt),
