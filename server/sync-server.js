@@ -283,7 +283,8 @@ const STATIC_ROUTES = {
   '/public/share.css': { file: path.join(PUBLIC_DIR, 'share.css'), type: 'text/css; charset=utf-8' },
   '/public/share.js': { file: path.join(PUBLIC_DIR, 'share.js'), type: 'text/javascript; charset=utf-8' },
   '/shared/timeline-render.js': { file: path.join(SHARED_DIR, 'timeline-render.js'), type: 'text/javascript; charset=utf-8' },
-  '/lark/url2attach': { file: path.join(PUBLIC_DIR, 'lark-url2attach.html'), type: 'text/html; charset=utf-8' }
+  '/lark/url2attach': { file: path.join(PUBLIC_DIR, 'lark-url2attach.html'), type: 'text/html; charset=utf-8' },
+  '/lark/lark-base-sdk.mjs': { file: path.join(PUBLIC_DIR, 'lark-base-sdk.mjs'), type: 'text/javascript; charset=utf-8' }
 };
 
 // —— Base 插件配套：本机图片代理（封面链接→附件） ——

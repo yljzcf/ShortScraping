@@ -9,8 +9,9 @@
 
   运行环境：必须在飞书/Lark 多维表格的插件面板内打开（Base → 插件 → 添加自定义插件，
   填 http://127.0.0.1:31919/lark/url2attach）。上传走 @lark-base-open/js-sdk 的附件字段
-  setValue（用户本人会话，零应用凭据）；图片下载优先走同源 /lark/fetch-image 本机代理
-  （绕开封面 CDN 的 CORS 限制），代理不可用时退回浏览器直接 fetch。
+  setValue（用户本人会话，零应用凭据）；SDK 本地 vendor（同源 lark-base-sdk.mjs，
+  jsdelivr +esm 自包含 bundle）优先、esm.run CDN 兜底；图片下载优先走同源
+  /lark/fetch-image 本机代理（绕开封面 CDN 的 CORS 限制），代理不可用时退回浏览器直接 fetch。
 
   自动模式=面板打开期间每 10 秒扫描一次（插件只在面板打开时运行，非服务端常驻）；
   幂等：默认跳过附件字段已有内容的记录，可勾选覆盖。
@@ -253,14 +254,28 @@ async function runScan(trigger) {
   }
 }
 
+// 故障可见性：任何未捕获错误都落到引导面板，不允许白屏
+window.__initState = 'boot';
+window.addEventListener('error', (e) => showGuide('页面脚本错误：' + e.message + '（阶段 ' + window.__initState + '）'));
+window.addEventListener('unhandledrejection', (e) => showGuide('未处理异常：' + ((e.reason && e.reason.message) || e.reason) + '（阶段 ' + window.__initState + '）'));
+
 async function init() {
+  window.__initState = 'sdk-loading';
   try {
-    const sdk = await import('https://esm.run/@lark-base-open/js-sdk@0.5.0');
+    let sdk;
+    try {
+      // 本地 vendor 优先（同源 /lark/lark-base-sdk.mjs，秒开、不依赖公网 CDN）
+      sdk = await import('./lark-base-sdk.mjs');
+    } catch (e) {
+      // CDN 兜底（首次冷加载可能较慢，国内网络对 jsdelivr 尤甚）
+      sdk = await import('https://esm.run/@lark-base-open/js-sdk@0.5.0');
+    }
     bitable = sdk.bitable;
     FieldType = sdk.FieldType;
   } catch (e) {
-    return showGuide('SDK 加载失败（插件面板需可联网）：' + e.message);
+    return showGuide('SDK 加载失败：' + e.message);
   }
+  window.__initState = 'table-detect';
   try {
     table = await Promise.race([
       bitable.base.getActiveTable(),
@@ -269,6 +284,7 @@ async function init() {
   } catch (e) {
     return showGuide();
   }
+  window.__initState = 'ready';
 
   $('app').style.display = 'block';
   await loadFields();
