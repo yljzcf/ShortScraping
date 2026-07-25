@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>封面链接 → 附件</title>
+<!--
+  ShortScraping 配套多维表格自定义插件：把「封面链接」列的图片 URL 下载后写入附件字段。
+
+  运行环境：必须在飞书/Lark 多维表格的插件面板内打开（Base → 插件 → 添加自定义插件，
+  填 http://127.0.0.1:31919/lark/url2attach）。上传走 @lark-base-open/js-sdk 的附件字段
+  setValue（用户本人会话，零应用凭据）；图片下载优先走同源 /lark/fetch-image 本机代理
+  （绕开封面 CDN 的 CORS 限制），代理不可用时退回浏览器直接 fetch。
+
+  自动模式=面板打开期间每 10 秒扫描一次（插件只在面板打开时运行，非服务端常驻）；
+  幂等：默认跳过附件字段已有内容的记录，可勾选覆盖。
+-->
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --border:#334155; --text:#f8fafc; --muted:#94a3b8; --primary:#6366f1; --ok:#10b981; --err:#ef4444; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; font-size:13px; padding:14px; }
+  h1 { font-size:15px; margin-bottom:4px; }
+  .sub { color:var(--muted); font-size:12px; line-height:1.6; margin-bottom:12px; }
+  .panel { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px; }
+  .field { display:grid; gap:4px; margin-bottom:10px; }
+  .field label { color:var(--muted); font-size:12px; }
+  select, button { font:inherit; border-radius:8px; border:1px solid var(--border); background:#0b1220; color:var(--text); padding:7px 10px; width:100%; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .check { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:12px; margin-bottom:8px; cursor:pointer; }
+  .check input { accent-color:var(--primary); }
+  .btn-primary { background:var(--primary); border-color:var(--primary); color:#fff; cursor:pointer; }
+  .btn-primary:disabled { opacity:.55; cursor:not-allowed; }
+  #status { color:var(--muted); font-size:12px; margin-top:8px; min-height:16px; }
+  #log { margin-top:8px; max-height:260px; overflow:auto; font-size:12px; line-height:1.7; }
+  #log .ok { color:var(--ok); }
+  #log .err { color:var(--err); }
+  #guide { display:none; }
+  #guide code { background:#0b1220; border:1px solid var(--border); border-radius:5px; padding:1px 5px; word-break:break-all; }
+  #guide ol { margin:8px 0 0 18px; display:grid; gap:6px; color:var(--muted); }
+</style>
+</head>
+<body>
+  <h1>封面链接 → 附件</h1>
+  <p class="sub">把表格里的封面图 URL 下载后存入附件字段（用你本人的会话上传，无需应用凭据）。默认跳过已有附件的记录，可重复执行。</p>
+
+  <div class="panel" id="guide">
+    <strong>请在多维表格的插件面板中打开本页</strong>
+    <ol>
+      <li>打开目标多维表格 → 右上角「插件」→「添加自定义插件」</li>
+      <li>插件地址填：<code id="selfUrl"></code>（需本机同步服务运行中）</li>
+      <li>添加后在插件面板里打开即可使用</li>
+    </ol>
+    <div id="guideErr" style="margin-top:8px;color:var(--err);"></div>
+  </div>
+
+  <div class="panel" id="app" style="display:none;">
+    <div class="field">
+      <label>源字段（封面图 URL 所在列）</label>
+      <select id="srcField"></select>
+    </div>
+    <div class="field">
+      <label>目标附件字段</label>
+      <select id="dstField"></select>
+    </div>
+    <label class="check"><input type="checkbox" id="overwrite"> 覆盖已有附件（默认跳过已填记录）</label>
+    <label class="check"><input type="checkbox" id="autoMode"> 自动模式：面板打开期间每 10 秒扫描新记录</label>
+    <div class="row">
+      <button class="btn-primary" id="runBtn">扫描并转换</button>
+    </div>
+    <div id="status"></div>
+    <div id="log"></div>
+  </div>
+
+<script type="module">
+const $ = id => document.getElementById(id);
+const CREATE_OPT = '__create__';
+const MIME_EXT = { 'image/jpeg':'.jpg', 'image/png':'.png', 'image/webp':'.webp', 'image/gif':'.gif', 'image/avif':'.avif', 'image/svg+xml':'.svg' };
+
+let bitable, FieldType, table, primaryFieldId = null;
+let running = false, autoTimer = null;
+
+function showGuide(err) {
+  $('selfUrl').textContent = location.origin + location.pathname;
+  $('guideErr').textContent = err || '';
+  $('guide').style.display = 'block';
+  $('app').style.display = 'none';
+}
+
+function logLine(text, cls) {
+  const div = document.createElement('div');
+  if (cls) div.className = cls;
+  div.textContent = text;
+  $('log').prepend(div);
+  while ($('log').childNodes.length > 200) $('log').removeChild($('log').lastChild);
+}
+
+function setStatus(text) { $('status').textContent = text; }
+
+// —— 单元格取值助手：URL/文本字段的值可能是字符串、{link,text} 或分段数组 ——
+function cellToUrl(value) {
+  const pick = (v) => {
+    const s = String(v || '').trim();
+    return /^https?:\/\//i.test(s) ? s : '';
+  };
+  if (!value) return '';
+  if (typeof value === 'string') return pick(value);
+  if (Array.isArray(value)) {
+    for (const seg of value) {
+      const hit = pick(seg && (seg.link || seg.text));
+      if (hit) return hit;
+    }
+    return '';
+  }
+  if (typeof value === 'object') return pick(value.link || value.text);
+  return '';
+}
+
+function cellToText(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(seg => (seg && seg.text) || '').join('');
+  if (typeof value === 'object') return String(value.text || '');
+  return String(value);
+}
+
+function fileNameFromUrl(url, mime) {
+  let name = '';
+  try {
+    name = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).pop() || '');
+  } catch (e) { /* 保底走默认名 */ }
+  name = name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80);
+  if (!/\.[a-z0-9]{2,5}$/i.test(name)) name = (name || 'cover') + (MIME_EXT[mime] || '.jpg');
+  return name;
+}
+
+// —— 图片下载：优先同源本机代理（绕 CORS），失败退回直接 fetch ——
+async function fetchImageBlob(url) {
+  const tryFetch = async (target) => {
+    const resp = await fetch(target, { signal: AbortSignal.timeout(20000) });
+    if (!resp.ok) {
+      let detail = `HTTP ${resp.status}`;
+      try { detail = (await resp.json()).error || detail; } catch (e) { /* 非 JSON 响应保留状态码 */ }
+      throw new Error(detail);
+    }
+    return resp.blob();
+  };
+  try {
+    return await tryFetch(location.origin + '/lark/fetch-image?url=' + encodeURIComponent(url));
+  } catch (proxyErr) {
+    try {
+      return await tryFetch(url);
+    } catch (directErr) {
+      throw new Error(`代理下载失败（${proxyErr.message}）且直连失败（${directErr.message}）`);
+    }
+  }
+}
+
+async function loadFields() {
+  const metas = await table.getFieldMetaList();
+  const primary = metas.find(m => m.isPrimary);
+  primaryFieldId = primary ? primary.id : null;
+
+  const srcCandidates = metas.filter(m => m.type === FieldType.Url || m.type === FieldType.Text);
+  const dstCandidates = metas.filter(m => m.type === FieldType.Attachment);
+
+  const fill = (sel, items, extra) => {
+    sel.innerHTML = '';
+    for (const m of items) {
+      const opt = document.createElement('option');
+      opt.value = m.id; opt.textContent = m.name;
+      sel.appendChild(opt);
+    }
+    if (extra) {
+      const opt = document.createElement('option');
+      opt.value = extra.value; opt.textContent = extra.label;
+      sel.appendChild(opt);
+    }
+  };
+  fill($('srcField'), srcCandidates);
+  fill($('dstField'), dstCandidates, { value: CREATE_OPT, label: '＋ 新建「封面」附件字段' });
+
+  const preferSrc = srcCandidates.find(m => /封面链接|封面|poster|cover/i.test(m.name));
+  if (preferSrc) $('srcField').value = preferSrc.id;
+  const preferDst = dstCandidates.find(m => /封面|poster|cover/i.test(m.name));
+  if (preferDst) $('dstField').value = preferDst.id;
+  else $('dstField').value = dstCandidates.length ? dstCandidates[0].id : CREATE_OPT;
+}
+
+async function resolveDstField() {
+  if ($('dstField').value !== CREATE_OPT) return $('dstField').value;
+  const fieldId = await table.addField({ type: FieldType.Attachment, name: '封面' });
+  logLine('已新建附件字段「封面」', 'ok');
+  await loadFields();
+  $('dstField').value = fieldId;
+  return fieldId;
+}
+
+async function convertRecord(recordId, srcId, dstId, attachmentField, overwrite) {
+  const url = cellToUrl(await table.getCellValue(srcId, recordId));
+  if (!url) return 'skip';
+
+  const existing = await table.getCellValue(dstId, recordId);
+  if (!overwrite && Array.isArray(existing) && existing.length > 0) return 'skip';
+
+  let label = '';
+  if (primaryFieldId) label = cellToText(await table.getCellValue(primaryFieldId, recordId)).slice(0, 24);
+  if (!label) label = recordId.slice(-6);
+
+  try {
+    const blob = await fetchImageBlob(url);
+    const mime = blob.type && blob.type !== 'application/octet-stream' ? blob.type : 'image/jpeg';
+    const file = new File([blob], fileNameFromUrl(url, mime), { type: mime });
+    await attachmentField.setValue(recordId, [file]);
+    logLine(`✅ ${label}（${Math.round(blob.size / 1024)}KB）`, 'ok');
+    return 'ok';
+  } catch (e) {
+    logLine(`❌ ${label}：${e.message}`, 'err');
+    return 'fail';
+  }
+}
+
+async function runScan(trigger) {
+  if (running) return;
+  running = true;
+  $('runBtn').disabled = true;
+  try {
+    const srcId = $('srcField').value;
+    if (!srcId) { setStatus('没有可用的 URL/文本字段作为源字段'); return; }
+    const dstId = await resolveDstField();
+    const attachmentField = await table.getField(dstId);
+    const overwrite = $('overwrite').checked;
+
+    const recordIds = await table.getRecordIdList();
+    setStatus(`${trigger}：共 ${recordIds.length} 条记录，转换中…`);
+
+    const counts = { ok: 0, skip: 0, fail: 0 };
+    const queue = recordIds.slice();
+    const worker = async () => {
+      while (queue.length) {
+        const rid = queue.shift();
+        counts[await convertRecord(rid, srcId, dstId, attachmentField, overwrite)]++;
+        setStatus(`${trigger}：成功 ${counts.ok} / 跳过 ${counts.skip} / 失败 ${counts.fail}（共 ${recordIds.length} 条）`);
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    setStatus(`${trigger}完成：成功 ${counts.ok} / 跳过 ${counts.skip} / 失败 ${counts.fail}（共 ${recordIds.length} 条）`);
+  } catch (e) {
+    setStatus('执行出错：' + e.message);
+    logLine('❌ ' + e.message, 'err');
+  } finally {
+    running = false;
+    $('runBtn').disabled = false;
+  }
+}
+
+async function init() {
+  try {
+    const sdk = await import('https://esm.run/@lark-base-open/js-sdk@0.5.0');
+    bitable = sdk.bitable;
+    FieldType = sdk.FieldType;
+  } catch (e) {
+    return showGuide('SDK 加载失败（插件面板需可联网）：' + e.message);
+  }
+  try {
+    table = await Promise.race([
+      bitable.base.getActiveTable(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 4000))
+    ]);
+  } catch (e) {
+    return showGuide();
+  }
+
+  $('app').style.display = 'block';
+  await loadFields();
+  $('runBtn').addEventListener('click', () => runScan('手动扫描'));
+  $('autoMode').addEventListener('change', () => {
+    if ($('autoMode').checked) {
+      autoTimer = setInterval(() => runScan('自动扫描'), 10000);
+      runScan('自动扫描');
+      setStatus('自动模式已开启（面板打开期间每 10 秒扫描一次）');
+    } else {
+      clearInterval(autoTimer);
+      autoTimer = null;
+      setStatus('自动模式已关闭');
+    }
+  });
+}
+
+init();
+</script>
+</body>
+</html>

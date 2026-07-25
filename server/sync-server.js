@@ -282,8 +282,69 @@ const STATIC_ROUTES = {
   '/': { file: path.join(PUBLIC_DIR, 'share.html'), type: 'text/html; charset=utf-8' },
   '/public/share.css': { file: path.join(PUBLIC_DIR, 'share.css'), type: 'text/css; charset=utf-8' },
   '/public/share.js': { file: path.join(PUBLIC_DIR, 'share.js'), type: 'text/javascript; charset=utf-8' },
-  '/shared/timeline-render.js': { file: path.join(SHARED_DIR, 'timeline-render.js'), type: 'text/javascript; charset=utf-8' }
+  '/shared/timeline-render.js': { file: path.join(SHARED_DIR, 'timeline-render.js'), type: 'text/javascript; charset=utf-8' },
+  '/lark/url2attach': { file: path.join(PUBLIC_DIR, 'lark-url2attach.html'), type: 'text/html; charset=utf-8' }
 };
+
+// —— Base 插件配套：本机图片代理（封面链接→附件） ——
+// 插件页与本服务同源，代理下载绕开封面 CDN 的 CORS 限制。仅限本机调用；
+// 目标仅允许公网 http(s)（含重定向落点复检），防 SSRF 探测内网。
+const PRIVATE_HOST_RE = /^(localhost$|.*\.local$|127\.|0\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?$|\[?f[cd])/i;
+
+function isPublicHttpUrl(raw) {
+  try {
+    const parsed = new URL(raw);
+    return /^https?:$/.test(parsed.protocol) && !PRIVATE_HOST_RE.test(parsed.hostname);
+  } catch (e) {
+    return false;
+  }
+}
+
+async function handleLarkFetchImage(req, res, requestUrl) {
+  if (!isLocalRequest(req)) {
+    return sendJson(res, 403, { ok: false, error: '图片代理仅限本机调用' });
+  }
+  if (typeof fetch !== 'function') {
+    return sendJson(res, 501, { ok: false, error: '需要 Node 18+（缺少全局 fetch）' });
+  }
+  const target = requestUrl.searchParams.get('url') || '';
+  if (!isPublicHttpUrl(target)) {
+    return sendJson(res, 400, { ok: false, error: '仅支持公网 http(s) 图片地址' });
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const upstream = await fetch(target, {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: { 'User-Agent': 'Mozilla/5.0 (ShortScraping cover proxy)' }
+    });
+    if (!isPublicHttpUrl(upstream.url)) {
+      return sendJson(res, 400, { ok: false, error: '重定向落点非公网地址' });
+    }
+    if (!upstream.ok) {
+      return sendJson(res, 502, { ok: false, error: `上游响应 HTTP ${upstream.status}` });
+    }
+    const type = upstream.headers.get('content-type') || '';
+    if (!/^image\//i.test(type) && !/octet-stream/i.test(type)) {
+      return sendJson(res, 415, { ok: false, error: `非图片响应（${type || '无 content-type'}）` });
+    }
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    if (buffer.length > 15 * 1024 * 1024) {
+      return sendJson(res, 413, { ok: false, error: '图片超过 15MB' });
+    }
+    res.writeHead(200, {
+      'Content-Type': type || 'application/octet-stream',
+      'Cache-Control': 'no-cache'
+    });
+    res.end(buffer);
+  } catch (e) {
+    sendJson(res, 502, { ok: false, error: e.name === 'AbortError' ? '下载超时（15秒）' : `下载失败：${e.message}` });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const ICON_TYPES = {
   '.png': 'image/png',
@@ -329,7 +390,12 @@ function readBody(req) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const pathname = new URL(req.url, 'http://localhost').pathname;
+  const requestUrl = new URL(req.url, 'http://localhost');
+  const pathname = requestUrl.pathname;
+
+  if (req.method === 'GET' && pathname === '/lark/fetch-image') {
+    return handleLarkFetchImage(req, res, requestUrl);
+  }
 
   if (req.method === 'OPTIONS') {
     return sendJson(res, 200, { ok: true });
