@@ -53,11 +53,17 @@
 
   /**
    * payload 专用封面形态适配（不改扩展内部数据/CSV/弹窗展示）：
-   * 飞书官方字段捷径「链接转附件」解析不了带百分号编码查询串的 URL——
-   * dramashorts 的 _next/image 优化端点（?url=https%3A%2F%2F…）整列转换失败，
-   * 解包回原始 CDN 直链（实测可转，原图约 1.5MB vs 优化图 72KB，附件可接受）。
-   * IMDB 封面因 media-amazon URL 含 @（图片 ID 组成部分：%40 编码同样被拒、
-   * 去 @ 则 404）无法适配，官方捷径转不了 IMDB 封面属已知限制（2026-07-25 实测）。
+   * 采集存的是榜单页自用的缩略图 URL（弹窗小卡片够用且省流量），推送时按站点
+   * 改写成原图形态（2026-07-25 逐站实测）：
+   * - dramashorts：_next/image 优化端点（?url=https%3A%2F%2F…）→ 原始 CDN 直链
+   *   （官方捷径也解析不了其百分号编码查询串；原图约 1.5MB vs 优化图 72KB）；
+   * - IMDB：去掉 _V1_ 变换链（90×133 缩略 ~4KB → 原图 ~290KB）。注意 IMDB 封面
+   *   因 URL 含 @（图片 ID 组成部分：%40 被拒、去 @ 则 404）仍无法被官方捷径
+   *   转附件，改写只提升「封面链接」点开的画质；
+   * - MyDrama：convert 端点去掉 width/height 尺寸参数（189×283 ~7KB → 原尺寸 ~64KB）。
+   * 保持现状的站点：Steam（新游仅有带哈希路径，无哈希大图候选 404 不可安全改写；
+   * header 460×215 为标准图）、RoyalRoad（covers-large 已比 covers-full 大）、
+   * ReelShort（现状已是原图级 ~116KB）、NetShort（651×868 中等尺寸，tplv 模板不可去）。
    */
   function posterForPayload(poster) {
     const raw = asText(poster);
@@ -65,6 +71,20 @@
       try {
         const inner = new URL(raw).searchParams.get('url') || '';
         if (/^https?:\/\//i.test(inner)) return inner;
+      } catch (e) {
+        // 解析失败原样透传
+      }
+      return raw;
+    }
+    if (/^https:\/\/m\.media-amazon\.com\//i.test(raw)) {
+      return raw.replace(/\._V1_[^.]*\./, '._V1_.');
+    }
+    if (/^https:\/\/static\.my-drama\.com\/convert\//i.test(raw)) {
+      try {
+        const u = new URL(raw);
+        u.searchParams.delete('width');
+        u.searchParams.delete('height');
+        return u.toString();
       } catch (e) {
         // 解析失败原样透传
       }
