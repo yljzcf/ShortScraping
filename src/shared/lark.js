@@ -52,6 +52,27 @@
   }
 
   /**
+   * payload 专用封面形态适配（不改扩展内部数据/CSV/弹窗展示）：
+   * 飞书官方字段捷径「链接转附件」解析不了带百分号编码查询串的 URL——
+   * dramashorts 的 _next/image 优化端点（?url=https%3A%2F%2F…）整列转换失败，
+   * 解包回原始 CDN 直链（实测可转，原图约 1.5MB vs 优化图 72KB，附件可接受）。
+   * IMDB 封面因 media-amazon URL 含 @（图片 ID 组成部分：%40 编码同样被拒、
+   * 去 @ 则 404）无法适配，官方捷径转不了 IMDB 封面属已知限制（2026-07-25 实测）。
+   */
+  function posterForPayload(poster) {
+    const raw = asText(poster);
+    if (/^https:\/\/dramashorts\.io\/_next\/image\?/i.test(raw)) {
+      try {
+        const inner = new URL(raw).searchParams.get('url') || '';
+        if (/^https?:\/\//i.test(inner)) return inner;
+      } catch (e) {
+        // 解析失败原样透传
+      }
+    }
+    return raw;
+  }
+
+  /**
    * 组装 webhook payload：扁平 JSON、全字符串值（工作流参数映射最稳）。
    * title_display / summary 是刻意的冗余列——工作流字段映射只能整参数引用，
    * 预拼好让用户免配公式。
@@ -78,7 +99,7 @@
       source_name: SOURCE_NAMES[d.source] || asText(d.source),
       tags: tags.join(','),
       url: asText(d.url),
-      poster: asText(d.poster),
+      poster: posterForPayload(d.poster),
       scraped_at: asText(d.scrapedAt),
       pushed_at: new Date().toISOString()
     };
