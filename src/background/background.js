@@ -198,6 +198,7 @@ async function loadConfigFromJsonFiles() {
     await chrome.storage.local.set({ scheduleConfig, translateConfig, larkConfig });
   }
 
+  await migrateItemIdField();
   await migrateLegacyTags();
   await migrateReelshortEpisodeUrls();
   await pruneUnmappedFandomEntries();
@@ -616,8 +617,32 @@ function pruneDramasOutsideConfiguredUrls(urlTags) {
 }
 
 /**
+ * 去重键字段更名迁移（2026-07-25）：历史条目 imdbId → itemId，值不变。
+ * imdbId 这个名字今后仅指 IMDB 站点条目的 tt 值本身，不再指代全站点去重键。
+ * 幂等：无旧字段时零写入；必须先于其它按 itemId 读数的迁移/清理执行。
+ */
+function migrateItemIdField() {
+  return enqueueDramaWrite('去重键字段更名', async () => {
+    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    let changedCount = 0;
+
+    const migrated = dramas.map(drama => {
+      if (!drama || !('imdbId' in drama)) return drama;
+      changedCount++;
+      const { imdbId, ...rest } = drama;
+      return { ...rest, itemId: rest.itemId || imdbId };
+    });
+
+    if (changedCount > 0) {
+      await chrome.storage.local.set({ dramas: migrated });
+      console.log(`[ShortScraping] 已迁移 ${changedCount} 条历史记录的去重键字段 imdbId -> itemId`);
+    }
+  });
+}
+
+/**
  * 存量数据显示标签迁移：历史条目 tags 中的 "RR" 统一改为 "RoyalRoad"。
- * 只碰 tags 显示标签，不碰去重键 imdbId 的 rr 前缀。
+ * 只碰 tags 显示标签，不碰去重键 itemId 的 rr 前缀。
  * 幂等：无变化时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
  */
 function migrateLegacyTags() {
@@ -673,7 +698,7 @@ async function migrateReelshortEpisodeUrls() {
     } catch (e) {
       console.warn(`[ShortScraping] ReelShort 播放页迁移请求失败（退全集页兜底）: ${drama.title}`, e.message);
     }
-    if (nextUrl !== drama.url) urlById.set(drama.imdbId, nextUrl);
+    if (nextUrl !== drama.url) urlById.set(drama.itemId, nextUrl);
     await new Promise(resolve => setTimeout(resolve, 250));
   }
 
@@ -681,7 +706,7 @@ async function migrateReelshortEpisodeUrls() {
     const { dramas: current = [] } = await chrome.storage.local.get('dramas');
     let changedCount = 0;
     const migrated = current.map(drama => {
-      const nextUrl = urlById.get(drama.imdbId);
+      const nextUrl = urlById.get(drama.itemId);
       if (!nextUrl || drama.url === nextUrl) return drama;
       changedCount++;
       return { ...drama, url: nextUrl };
@@ -695,7 +720,7 @@ async function migrateReelshortEpisodeUrls() {
 }
 
 /**
- * 清理 fandom 未映射条目（imdbId 为 mdf-/rsf- 临时键；带连字符，与 md+UUID、
+ * 清理 fandom 未映射条目（itemId 为 mdf-/rsf- 临时键；带连字符，与 md+UUID、
  * rs+hex 的正式键无歧义）：v1.4.8 起内容脚本对映射失败的 fandom 条目不再入库
  * （scrapePage 未映射闸门，下轮抓取自动重试），存量由此处一并清除。
  * 幂等：无匹配时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
@@ -704,7 +729,7 @@ function pruneUnmappedFandomEntries() {
   return enqueueDramaWrite('fandom 未映射清理', async () => {
     const { dramas = [] } = await chrome.storage.local.get('dramas');
     const kept = dramas.filter(drama => {
-      const key = String(drama.imdbId || '');
+      const key = String(drama.itemId || '');
       return !key.startsWith('mdf-') && !key.startsWith('rsf-');
     });
 
@@ -1015,14 +1040,14 @@ function updateSingleDramaTranslation(dramaId, result) {
 }
 
 /**
- * 保存一张新卡（内容脚本经 saveDrama 消息提交）。去重键 imdbId 的权威判定
+ * 保存一张新卡（内容脚本经 saveDrama 消息提交）。去重键 itemId 的权威判定
  * 在队列内完成，两个标签页并发抓到同一条也只会入库一次。
  */
 function saveDramaRecord(drama) {
   return enqueueDramaWrite('保存新卡', async () => {
     const { dramas: existing = [] } = await chrome.storage.local.get('dramas');
 
-    if (existing.some(d => d.imdbId === drama.imdbId)) {
+    if (existing.some(d => d.itemId === drama.itemId)) {
       return false;
     }
 

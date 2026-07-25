@@ -38,7 +38,7 @@ const CSV_NEWLINE = '\r\n';
 
 const CSV_COLUMNS = [
   'id',
-  'imdbId',
+  'itemId',
   'title',
   'titleZh',
   'tags',
@@ -82,7 +82,8 @@ function csvEscape(value) {
 function normalizeDrama(drama) {
   return {
     id: drama.id || '',
-    imdbId: drama.imdbId || '',
+    // 旧字段名兼容读取：更名前的 timeline.json 快照/旧版扩展推送仍带 imdbId
+    itemId: drama.itemId || drama.imdbId || '',
     title: drama.title || '',
     titleZh: drama.titleZh || '',
     tags: Array.isArray(drama.tags) ? drama.tags : [],
@@ -107,7 +108,7 @@ function writeTimelineCsv(dramas) {
 
   for (const drama of dramas || []) {
     const normalized = normalizeDrama(drama);
-    const key = normalized.imdbId || normalized.id;
+    const key = normalized.itemId || normalized.id;
     if (!key || seen.has(key)) continue;
     seen.add(key);
 

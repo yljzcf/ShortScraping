@@ -117,7 +117,7 @@
    * 有官方中文则直接采用并标记已翻译；完全无中文则保持 new，交给翻译线 AI 兜底。
    */
   async function fetchSteamDetail(drama) {
-    const appId = drama.imdbId; // Steam 项的 appId 存在 imdbId 字段
+    const appId = drama.itemId; // Steam 项的 appId 存在 itemId 字段
     try {
       const en = await fetchSteamAppDetails(appId, 'english');
       if (!en) {
@@ -492,8 +492,8 @@
     }
     console.log(`[ShortScraping] 站点=${site}，标签: ${tags.join(', ')}`);
 
-    // 去重键统一用 imdbId 字段（IMDB=ttId，Steam=appId，RoyalRoad=rr+数字）；过滤空值避免塌缩。
-    const existingIds = new Set(existing.map(d => d.imdbId).filter(Boolean));
+    // 去重键统一用 itemId 字段（IMDB=ttId，Steam=appId，RoyalRoad=rr+数字）；过滤空值避免塌缩。
+    const existingIds = new Set(existing.map(d => d.itemId).filter(Boolean));
     const allNewDramas = [];
 
     const listItems = await adapter.getListItems();
@@ -526,9 +526,9 @@
         // 保证弹窗/后台/CSV 的精确等值过滤对新卡永远成立。
         detailed.sourceListUrl = subscription.urlPattern;
 
-        // fandom 条目映射不到主站（imdbId 仍为 mdf-/rsf- 临时键）＝给不了播放页，
+        // fandom 条目映射不到主站（itemId 仍为 mdf-/rsf- 临时键）＝给不了播放页，
         // 不入库；未保存条目下轮抓取自动重试，文章补了回链即可正常入库
-        if (/^(mdf|rsf)-/.test(String(detailed.imdbId))) {
+        if (/^(mdf|rsf)-/.test(String(detailed.itemId))) {
           console.log(`[ShortScraping] fandom 未映射条目跳过入库: ${detailed.title}`);
           continue;
         }
@@ -539,7 +539,7 @@
           continue;
         }
 
-        existingIds.add(detailed.imdbId);
+        existingIds.add(detailed.itemId);
         allNewDramas.push(detailed);
         console.log(`[ShortScraping] ✅ 已保存: ${detailed.title} (${index + 1}/${listItems.length})`);
 
@@ -594,13 +594,13 @@
   /**
    * 从列表项提取
    */
-  function extractFromListItem(item, index, tags = ['IMDB'], imdbId = '') {
-    const resolvedImdbId = imdbId || extractImdbIdFromListItem(item);
-    if (!resolvedImdbId) return null;
+  function extractFromListItem(item, index, tags = ['IMDB'], itemId = '') {
+    const resolvedItemId = itemId || extractImdbIdFromListItem(item);
+    if (!resolvedItemId) return null;
 
     const links = item.querySelectorAll('a[href*="/title/tt"]');
 
-    const url = `https://www.imdb.com/title/${resolvedImdbId}/`;
+    const url = `https://www.imdb.com/title/${resolvedItemId}/`;
     let title = '';
     for (const link of links) {
       const text = link.textContent.trim();
@@ -620,7 +620,7 @@
     if (!title || title.length < 2) {
       // 标题彻底解析失败＝页面版式已变化：跳过该项，避免把「标题=ID、简介空」的
       // 残卡写进库并反复喂给翻译线（与 Steam/Next 系站点解析失败安全返回空的行为对齐）
-      console.warn(`[ShortScraping] 第 ${index + 1} 项标题解析失败（${resolvedImdbId}），跳过`);
+      console.warn(`[ShortScraping] 第 ${index + 1} 项标题解析失败（${resolvedItemId}），跳过`);
       return null;
     }
 
@@ -655,8 +655,8 @@
     }
 
     return {
-      id: `imdb_${resolvedImdbId}_${index}`,
-      imdbId: resolvedImdbId,
+      id: `imdb_${resolvedItemId}_${index}`,
+      itemId: resolvedItemId,
       title,
       titleZh: '',
       poster,
@@ -680,7 +680,7 @@
     if (!appId) return null;
     return {
       id: `steam_${appId}_${index}`,
-      imdbId: appId,
+      itemId: appId,
       title: appId,            // 占位，fetchSteamDetail 用英文名覆盖
       titleZh: '',
       poster: '',              // 占位，fetchSteamDetail 用 header_image 覆盖
@@ -731,7 +731,7 @@
 
     return {
       id: `royalroad_${rrId}_${index}`,
-      imdbId: rrId,
+      itemId: rrId,
       title,
       titleZh: '',
       poster,
@@ -873,7 +873,7 @@
 
     const drama = {
       id: `mydrama_${mdId}_${index}`,
-      imdbId: mdId,
+      itemId: mdId,
       title: title || mdId,
       titleZh,
       poster,
@@ -986,7 +986,7 @@
 
     return {
       id: `mydrama_${mdfId}_${index}`,
-      imdbId: mdfId,
+      itemId: mdfId,
       title: title || mdfId,
       titleZh: '',
       poster,
@@ -1006,7 +1006,7 @@
   /**
    * fandom 剧目文章页（WP SSR）补数据：
    * - 页内回主站的 /video/<UUID> 链接 → 去重键改写为 md+UUID、url 换成主站播放页，
-   *   与主站「最流行」条目全局去重（saveSingleDrama 按 imdbId 兜底）；找不到则仍为
+   *   与主站「最流行」条目全局去重（saveSingleDrama 按 itemId 兜底）；找不到则仍为
    *   mdf-+slug 临时键，由 scrapePage 的未映射闸门跳过入库（下轮抓取重试）
    * - h1 为权威标题；og:image 兜底封面（菜单项无图）；正文前几个长段落作简介
    *   （og:description 是 SEO 模板文案，不用）。任何失败都保留列表页数据。
@@ -1028,7 +1028,7 @@
       const mainLink = doc.querySelector('a[href*="my-drama.com/video/"]');
       const vid = mainLink ? (mainLink.getAttribute('href') || '').match(/\/video\/([0-9a-f-]{36})/) : null;
       if (vid) {
-        drama.imdbId = `md${vid[1]}`;
+        drama.itemId = `md${vid[1]}`;
         drama.url = `https://my-drama.com/video/${vid[1]}`;
       }
 
@@ -1049,7 +1049,7 @@
         .slice(0, 3);
       if (paras.length) drama.description = paras.join('\n');
 
-      console.log(`[ShortScraping] fandom 详情: ${drama.title} | 主站映射: ${vid ? drama.imdbId : '无'} | 简介: ${drama.description ? '有' : '无'}`);
+      console.log(`[ShortScraping] fandom 详情: ${drama.title} | 主站映射: ${vid ? drama.itemId : '无'} | 简介: ${drama.description ? '有' : '无'}`);
     } catch (e) {
       console.warn(`[ShortScraping] fandom 详情获取失败: ${drama.title}`, e.message);
     }
@@ -1110,7 +1110,7 @@
     const slug = slugifyTitle(title) || 'x';
     return {
       id: `reelshort_${rsId}_${index}`,
-      imdbId: rsId,
+      itemId: rsId,
       title: title || rsId,
       titleZh: '',
       poster: book.book_pic || book.default_pic || '',
@@ -1217,7 +1217,7 @@
 
     return {
       id: `reelshort_${rsfId}_${index}`,
-      imdbId: rsfId,
+      itemId: rsfId,
       title: title || rsfId,
       titleZh: '',
       poster,
@@ -1238,7 +1238,7 @@
    * fandom 文章页（WP SSR）补数据：
    * - 回主站 /movie/<slug>-<book_id> 链接 → 去重键改写为 rs+book_id、url 换成主站
    *   第一集播放页（需再请求 /movie/ 页取 chapter_id 拼 /episodes/…，失败退
-   *   /full-episodes/ 全集页兜底），与主站 TOP 条目全局去重（saveSingleDrama 按 imdbId 兜底；同批多篇
+   *   /full-episodes/ 全集页兜底），与主站 TOP 条目全局去重（saveSingleDrama 按 itemId 兜底；同批多篇
    *   文章指向同一剧时后到者在保存点被拦）；找不到回链仍为 rsf-+slug 临时键，
    *   由 scrapePage 的未映射闸门跳过入库（下轮抓取重试）
    * - h1.entry-title 为权威标题；正文前几个长段落作简介——此站 og:description 是
@@ -1263,7 +1263,7 @@
       const mainHref = mainLink ? (mainLink.getAttribute('href') || '') : '';
       const bid = mainHref.match(/-([0-9a-f]{24})(?:[/?#]|$)/);
       if (bid) {
-        drama.imdbId = `rs${bid[1]}`;
+        drama.itemId = `rs${bid[1]}`;
         const u = new URL(mainHref, 'https://www.reelshort.com');
         u.search = '';
         u.hash = '';
@@ -1306,7 +1306,7 @@
         if (ogText) drama.description = ogText;
       }
 
-      console.log(`[ShortScraping] ReelShort fandom 详情: ${drama.title} | 主站映射: ${bid ? drama.imdbId : '无'} | 简介: ${drama.description ? '有' : '无'}`);
+      console.log(`[ShortScraping] ReelShort fandom 详情: ${drama.title} | 主站映射: ${bid ? drama.itemId : '无'} | 简介: ${drama.description ? '有' : '无'}`);
     } catch (e) {
       console.warn(`[ShortScraping] ReelShort fandom 详情获取失败: ${drama.title}`, e.message);
     }
@@ -1358,7 +1358,7 @@
     const images = movie.images || {};
     return {
       id: `dramashorts_${dsId}_${index}`,
-      imdbId: dsId,
+      itemId: dsId,
       title: (movie.title || '').trim() || dsId,
       titleZh: '',
       poster: buildDramashortsPosterUrl(images.coverWithTitle || images.cover),
@@ -1465,7 +1465,7 @@
       : `/episode/${slugifyTitle(item.shortPlayName) || 'x'}-${nsId.slice(2)}`;
     return {
       id: `netshort_${nsId}_${index}`,
-      imdbId: nsId,
+      itemId: nsId,
       title: (item.shortPlayName || '').trim() || nsId,
       titleZh: '',
       poster: (item.shortPlayCover || '').trim(),
