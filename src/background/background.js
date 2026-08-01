@@ -199,10 +199,8 @@ async function loadConfigFromJsonFiles() {
     await chrome.storage.local.set({ scheduleConfig, translateConfig, larkConfig });
   }
 
-  await migrateItemIdField();
-  await migrateLegacyTags();
+  await runLegacyDramaMigrations();
   await migrateReelshortEpisodeUrls();
-  await pruneUnmappedFandomEntries();
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
 
@@ -663,8 +661,10 @@ function migrateLegacyTags() {
  * 网络阶段在单写队列之外进行，只把最终改写入队（不长时间占锁）。
  */
 async function migrateReelshortEpisodeUrls() {
-  const { rsEpisodeUrlMigrated, dramas = [] } = await chrome.storage.local.get(['rsEpisodeUrlMigrated', 'dramas']);
+  // 标记单独先读：置位后直接返回，不再连带反序列化整张 dramas 表（SW 每次唤醒都走这里）
+  const { rsEpisodeUrlMigrated } = await chrome.storage.local.get('rsEpisodeUrlMigrated');
   if (rsEpisodeUrlMigrated) return;
+  const { dramas = [] } = await chrome.storage.local.get('dramas');
 
   const candidates = dramas.filter(drama =>
     typeof drama.url === 'string' && /^https:\/\/www\.reelshort\.com\/(movie|full-episodes)\//.test(drama.url));
@@ -727,6 +727,27 @@ function pruneUnmappedFandomEntries() {
       console.log(`[ShortScraping] 已清理 ${dramas.length - kept.length} 条 fandom 未映射条目`);
     }
   });
+}
+
+/**
+ * 一次性存量迁移统一入口：完成标记 legacyDramaMigrated 置位后，SW 每次唤醒
+ * 零全表读（此前三个函数各自 get 整张 dramas 表、幂等零写但反序列化成本每次都付）。
+ * 三个迁移全部成功才置标记，任一失败留待下次唤醒重试。
+ * 顺序约束：itemId 更名必须最先（后两者按 itemId 读数）；fandom 清理与 rs 播放页
+ * 迁移互不相交（rs 候选按 /movie|full-episodes/ url 过滤，rsf- 临时键条目的 url
+ * 是 fandom 文章页），本入口排在 rs 迁移之前属安全重排。
+ * 已知行为差（接受）：标记置位后，未来手写 'RR' 标签的新卡不再被改名——
+ * migrateLegacyTags 本义即存量迁移，现有抓取路径不会再产生旧形态。
+ */
+async function runLegacyDramaMigrations() {
+  const { legacyDramaMigrated } = await chrome.storage.local.get('legacyDramaMigrated');
+  if (legacyDramaMigrated) return;
+
+  await migrateItemIdField();
+  await migrateLegacyTags();
+  await pruneUnmappedFandomEntries();
+  await chrome.storage.local.set({ legacyDramaMigrated: true });
+  console.log('[ShortScraping] 一次性存量迁移全部完成，已置完成标记');
 }
 
 /**
