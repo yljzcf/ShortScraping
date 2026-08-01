@@ -73,6 +73,46 @@ function enqueueDramaWrite(label, operation) {
   return run;
 }
 
+// SW 生命周期内的 dramas 表内存缓存：首个队列操作 get 一次后回填，后续队列内
+// 读写零 get（抓 N 条从 N 次约 1.5MB 的全表反序列化降为 1 次）。一致性前提：
+// dramas 的全部写路径都收口在 enqueueDramaWrite 队列内（全仓已核实八处），且
+// 缓存数组视为只读——写一律 copy-on-write 构造新数组。SW 回收即缓存消失。
+let dramasCache = null;
+
+/** 仅队列内调用：读当前 dramas 表，缓存命中零 get。 */
+async function getDramasInQueue() {
+  if (dramasCache === null) {
+    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    dramasCache = dramas;
+  }
+  return dramasCache;
+}
+
+/**
+ * 仅队列内调用：写 dramas 表（连带键经 extra 同次 set）。set 成功后缓存指向
+ * 新数组；失败则缓存失效重读并向上抛——防「缓存已新、storage 仍旧」的分歧驻留。
+ */
+async function writeDramasInQueue(next, extra = {}) {
+  try {
+    await chrome.storage.local.set({ dramas: next, ...extra });
+    dramasCache = next;
+  } catch (e) {
+    dramasCache = null;
+    throw e;
+  }
+}
+
+/**
+ * 队列外只读快照（翻译线扫描/CSV 同步/Lark 推送用）：缓存非 null 直接返回引用，
+ * 调用方不得改动；缓存为空时直读 storage 且不回填——await 期间队列可能已提交
+ * 新值，旧读回填会把缓存拽回过去。
+ */
+async function getDramasSnapshot() {
+  if (dramasCache !== null) return dramasCache;
+  const { dramas = [] } = await chrome.storage.local.get('dramas');
+  return dramas;
+}
+
 const SCHEDULE_TASKS = {
   'scrape-task': {
     intervalKey: 'scrapeInterval',
@@ -593,11 +633,11 @@ function filterDramasByConfiguredUrls(dramas, urlTags) {
 
 function pruneDramasOutsideConfiguredUrls(urlTags) {
   return enqueueDramaWrite('清理非订阅来源', async () => {
-    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    const dramas = await getDramasInQueue();
     const filtered = filterDramasByConfiguredUrls(dramas, urlTags);
 
     if (filtered.length !== dramas.length) {
-      await chrome.storage.local.set({ dramas: filtered });
+      await writeDramasInQueue(filtered);
       console.log(`[ShortScraping] 已清理 ${dramas.length - filtered.length} 条非订阅来源历史记录`);
     }
   });
@@ -610,7 +650,7 @@ function pruneDramasOutsideConfiguredUrls(urlTags) {
  */
 function migrateItemIdField() {
   return enqueueDramaWrite('去重键字段更名', async () => {
-    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    const dramas = await getDramasInQueue();
     let changedCount = 0;
 
     const migrated = dramas.map(drama => {
@@ -621,7 +661,7 @@ function migrateItemIdField() {
     });
 
     if (changedCount > 0) {
-      await chrome.storage.local.set({ dramas: migrated });
+      await writeDramasInQueue(migrated);
       console.log(`[ShortScraping] 已迁移 ${changedCount} 条历史记录的去重键字段 imdbId -> itemId`);
     }
   });
@@ -634,7 +674,7 @@ function migrateItemIdField() {
  */
 function migrateLegacyTags() {
   return enqueueDramaWrite('标签迁移', async () => {
-    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    const dramas = await getDramasInQueue();
     let changedCount = 0;
 
     const migrated = dramas.map(drama => {
@@ -645,7 +685,7 @@ function migrateLegacyTags() {
     });
 
     if (changedCount > 0) {
-      await chrome.storage.local.set({ dramas: migrated });
+      await writeDramasInQueue(migrated);
       console.log(`[ShortScraping] 已迁移 ${changedCount} 条历史记录的显示标签 RR -> RoyalRoad`);
     }
   });
@@ -692,7 +732,7 @@ async function migrateReelshortEpisodeUrls() {
   }
 
   return enqueueDramaWrite('ReelShort 播放页迁移', async () => {
-    const { dramas: current = [] } = await chrome.storage.local.get('dramas');
+    const current = await getDramasInQueue();
     let changedCount = 0;
     const migrated = current.map(drama => {
       const nextUrl = urlById.get(drama.itemId);
@@ -700,10 +740,12 @@ async function migrateReelshortEpisodeUrls() {
       changedCount++;
       return { ...drama, url: nextUrl };
     });
-    const payload = changedCount > 0
-      ? { dramas: migrated, rsEpisodeUrlMigrated: true }
-      : { rsEpisodeUrlMigrated: true };
-    await chrome.storage.local.set(payload);
+    if (changedCount > 0) {
+      await writeDramasInQueue(migrated, { rsEpisodeUrlMigrated: true });
+    } else {
+      // flag-only 写不碰 dramas，保持直写、不动缓存
+      await chrome.storage.local.set({ rsEpisodeUrlMigrated: true });
+    }
     console.log(`[ShortScraping] ReelShort 播放页迁移完成：改写 ${changedCount} 条（候选 ${candidates.length}）`);
   });
 }
@@ -716,14 +758,14 @@ async function migrateReelshortEpisodeUrls() {
  */
 function pruneUnmappedFandomEntries() {
   return enqueueDramaWrite('fandom 未映射清理', async () => {
-    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    const dramas = await getDramasInQueue();
     const kept = dramas.filter(drama => {
       const key = String(drama.itemId || '');
       return !key.startsWith('mdf-') && !key.startsWith('rsf-');
     });
 
     if (kept.length !== dramas.length) {
-      await chrome.storage.local.set({ dramas: kept });
+      await writeDramasInQueue(kept);
       console.log(`[ShortScraping] 已清理 ${dramas.length - kept.length} 条 fandom 未映射条目`);
     }
   });
@@ -885,7 +927,8 @@ async function performTranslateOnce(source) {
   let lastError = null;
 
   try {
-    const { dramas = [], translateConfig, urlTags = [] } = await chrome.storage.local.get(['dramas', 'translateConfig', 'urlTags']);
+    const { translateConfig, urlTags = [] } = await chrome.storage.local.get(['translateConfig', 'urlTags']);
+    const dramas = await getDramasSnapshot(); // 翻译线每轮扫描，缓存命中零全表读
     const config = { ...DEFAULT_TRANSLATE_CONFIG, ...translateConfig };
     const configuredDramas = filterDramasByConfiguredUrls(dramas, urlTags);
     const newDramas = configuredDramas.filter(d => d.status === 'new');
@@ -1032,12 +1075,14 @@ async function performTranslateOnce(source) {
  */
 function updateSingleDramaTranslation(dramaId, result) {
   return enqueueDramaWrite('翻译更新', async () => {
-    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    const dramas = await getDramasInQueue();
     const index = dramas.findIndex(d => d.id === dramaId);
 
     if (index === -1) return false;
 
-    dramas[index] = {
+    // copy-on-write：缓存数组只读，不就地突变（快照读者可能正持有旧引用）
+    const next = dramas.slice();
+    next[index] = {
       ...dramas[index],
       titleZh: result.title || dramas[index].titleZh,
       descriptionZh: result.desc || dramas[index].descriptionZh,
@@ -1045,7 +1090,7 @@ function updateSingleDramaTranslation(dramaId, result) {
       translatedAt: new Date().toISOString()
     };
 
-    await chrome.storage.local.set({ dramas });
+    await writeDramasInQueue(next);
     return true;
   });
 }
@@ -1056,17 +1101,13 @@ function updateSingleDramaTranslation(dramaId, result) {
  */
 function saveDramaRecord(drama) {
   return enqueueDramaWrite('保存新卡', async () => {
-    const { dramas: existing = [] } = await chrome.storage.local.get('dramas');
+    const existing = await getDramasInQueue();
 
     if (existing.some(d => d.itemId === drama.itemId)) {
       return false;
     }
 
-    await chrome.storage.local.set({
-      dramas: [drama, ...existing],
-      lastScrape: new Date().toISOString()
-    });
-
+    await writeDramasInQueue([drama, ...existing], { lastScrape: new Date().toISOString() });
     return true;
   });
 }
@@ -1075,8 +1116,7 @@ function saveDramaRecord(drama) {
  * 清空 dramas 表（仅安装初始化使用；弹窗「清除数据」入口已移除）。
  */
 function clearAllDramas() {
-  return enqueueDramaWrite('清空数据', () => chrome.storage.local.set({
-    dramas: [],
+  return enqueueDramaWrite('清空数据', () => writeDramasInQueue([], {
     lastScrape: null,
     lastTranslate: null
   }));
@@ -1170,7 +1210,8 @@ function scheduleCsvSync() {
 }
 
 async function syncTimelineToCsv() {
-  const { dramas = [], urlTags = [] } = await chrome.storage.local.get(['dramas', 'urlTags']);
+  const { urlTags = [] } = await chrome.storage.local.get('urlTags');
+  const dramas = await getDramasSnapshot();
   const configuredDramas = filterDramasByConfiguredUrls(dramas, urlTags);
 
   const response = await fetch(CSV_SYNC_ENDPOINT, {
@@ -1214,7 +1255,7 @@ async function handleLarkPush(dramaId) {
     return { success: false, notConfigured: true, error: 'Lark 推送未配置 webhook 地址' };
   }
 
-  const { dramas = [] } = await chrome.storage.local.get('dramas');
+  const dramas = await getDramasSnapshot();
   const drama = dramas.find(d => d.id === dramaId);
   if (!drama) {
     return { success: false, error: '未找到该卡片数据' };
@@ -1247,7 +1288,7 @@ async function handleLarkTestSend(draftConfig) {
     return { success: false, notConfigured: true, error: '请先填写 webhook 地址' };
   }
 
-  const { dramas = [] } = await chrome.storage.local.get('dramas');
+  const dramas = await getDramasSnapshot();
   const drama = dramas[0] || SAMPLE_LARK_DRAMA;
 
   try {
