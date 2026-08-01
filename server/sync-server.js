@@ -416,11 +416,18 @@ const server = http.createServer(async (req, res) => {
           `现有快照 ${latestDramas.length} 条即将被清空——若非主动清空订阅，请检查扩展数据与 config/tag.json`
         );
       }
-      const count = writeTimelineCsv(configured);
+      // 同内容跳过 CSV 重写：扩展 SW 每次唤醒都预热推送，绝大多数与上次内容一致，
+      // 无谓的磁盘重写全部拦在这里；existsSync 守卫保住「CSV 被手删后下次推送自愈」的行为
+      const serialized = JSON.stringify(configured);
+      let count;
+      if (serialized === latestSerialized && fs.existsSync(CSV_PATH)) {
+        count = new Set(latestDramas.map(d => d.itemId || d.id)).size;
+      } else {
+        count = writeTimelineCsv(configured);
+      }
 
       // 更新局域网共享快照并广播给已连接页面；内容未变化时不 bump 版本
       // 不广播——扩展 SW 每次唤醒都会预热推送，避免共享页无谓重渲染
-      const serialized = JSON.stringify(configured);
       if (serialized !== latestSerialized) {
         latestSerialized = serialized;
         latestDramas = configured;
