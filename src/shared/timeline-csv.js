@@ -1,7 +1,7 @@
 /**
  * 时间线 CSV 序列化（单一真源，2026-08-01 自 sync-server.js 抽出）：
  * 列序、转义规则（双引号翻倍/换行折空格/数组竖线连接）、BOM+CRLF、
- * itemId||id 去重与 normalizeDrama 15 字段白名单在此收敛——
+ * itemId||id 去重与 normalizeDrama 16 字段白名单在此收敛——
  * 同步服务写 db/timeline.csv 与设置页「导出 CSV」共用，两端产物必然一致。
  *
  * 加载方式：设置页 <script> 标签 / 后台 importScripts（挂 globalThis.TimelineCsv），
@@ -28,7 +28,8 @@
     'sourceListUrl',
     'poster',
     'scrapedAt',
-    'translatedAt'
+    'translatedAt',
+    'genres'
   ];
 
   function csvEscape(value) {
@@ -54,7 +55,8 @@
       sourceListUrl: drama.sourceListUrl || '',
       poster: drama.poster || '',
       scrapedAt: drama.scrapedAt || '',
-      translatedAt: drama.translatedAt || ''
+      translatedAt: drama.translatedAt || '',
+      genres: Array.isArray(drama.genres) ? drama.genres : []
     };
   }
 
