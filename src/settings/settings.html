@@ -645,7 +645,7 @@
           <div class="section-header">
             <div>
               <div class="section-title"><span>💾</span> 数据存档</div>
-              <p class="help-text">当前项目已支持把时间线同步到 <code>db/timeline.csv</code>。后续会在这里补充导出、备份、清理和恢复等能力。</p>
+              <p class="help-text">时间线数据保存在扩展本地存储中，同步服务运行时自动写入 <code>db/timeline.csv</code>；下方提供导出备份、导入恢复与按条件清理。</p>
             </div>
             <button class="btn btn-secondary" id="btnCheckSync">检测同步服务</button>
           </div>
@@ -655,6 +655,40 @@
           </div>
           <div class="placeholder-box" id="archiveInfo">CSV 输出路径将在检测到同步服务后显示。</div>
         </div>
+
+        <div class="section">
+          <div class="section-header">
+            <div>
+              <div class="section-title"><span>📦</span> 导出与恢复</div>
+              <p class="help-text">JSON 备份包含全部条目、可导入恢复；CSV 仅供表格软件查看，不支持回导。导入按条目 ID 去重——已存在的条目跳过不覆盖，订阅范围之外的条目不会导入。</p>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" id="btnExportJson">导出 JSON 备份</button>
+            <button class="btn btn-secondary" id="btnExportCsv">导出 CSV</button>
+            <button class="btn btn-secondary" id="btnImportJson">导入 JSON 恢复</button>
+            <input type="file" id="importFileInput" accept=".json,application/json" hidden>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <div>
+              <div class="section-title"><span>🧹</span> 按条件清理</div>
+              <p class="help-text">勾选站点后先「预览命中数」，确认无误再删除；删除会同步反映到时间线与 CSV，<strong>不可撤销</strong>——建议清理前先导出 JSON 备份（误删可导回）。</p>
+            </div>
+          </div>
+          <div id="pruneSiteList" class="grid" style="margin-top: 12px;"></div>
+          <div class="form-field" style="margin-top: 12px; max-width: 320px;">
+            <label for="pruneBeforeDate">仅清理早于此日期的条目（留空＝所选站点全部）</label>
+            <input type="date" id="pruneBeforeDate">
+          </div>
+          <div class="actions">
+            <button class="btn btn-secondary" id="btnPrunePreview">预览命中数</button>
+            <button class="btn btn-danger" id="btnPruneConfirm" disabled>确认删除</button>
+          </div>
+          <p class="help-text" id="pruneResult" style="margin-top: 10px;"></p>
+        </div>
       </section>
     </main>
 
@@ -662,6 +696,7 @@
   </div>
 
   <script src="../shared/site-registry.js"></script>
+  <script src="../shared/timeline-csv.js"></script>
   <script src="../shared/lark.js"></script>
   <script src="settings.js"></script>
 </body>

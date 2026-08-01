@@ -56,6 +56,7 @@
   function init() {
     cacheElements();
     bindEvents();
+    renderPruneSites();
     loadCurrentConfig();
     checkSyncServiceStatus();
   }
@@ -113,6 +114,17 @@
       text: document.getElementById('syncServiceText'),
       archiveInfo: document.getElementById('archiveInfo')
     };
+    elements.archive = {
+      exportJson: document.getElementById('btnExportJson'),
+      exportCsv: document.getElementById('btnExportCsv'),
+      importJson: document.getElementById('btnImportJson'),
+      importFile: document.getElementById('importFileInput'),
+      pruneSiteList: document.getElementById('pruneSiteList'),
+      pruneBeforeDate: document.getElementById('pruneBeforeDate'),
+      prunePreview: document.getElementById('btnPrunePreview'),
+      pruneConfirm: document.getElementById('btnPruneConfirm'),
+      pruneResult: document.getElementById('pruneResult')
+    };
   }
 
   function bindEvents() {
@@ -138,6 +150,23 @@
     bindClick(elements.buttons.openLarkFromLark, () => openConfigFile('config/lark.json'));
     bindClick(elements.buttons.larkTestSend, handleLarkTestSend);
     bindClick(elements.buttons.checkSync, checkSyncServiceStatus);
+
+    // 数据存档：导出/导入/两段式清理
+    bindClick(elements.archive.exportJson, handleExportJson);
+    bindClick(elements.archive.exportCsv, handleExportCsv);
+    bindClick(elements.archive.importJson, () => elements.archive.importFile.click());
+    if (elements.archive.importFile) {
+      elements.archive.importFile.addEventListener('change', handleImportFile);
+    }
+    bindClick(elements.archive.prunePreview, handlePrunePreview);
+    bindClick(elements.archive.pruneConfirm, handlePruneConfirm);
+    // 清理条件任何变更即作废已确认的预览（防「预览 A 条件、删除 B 条件」）
+    if (elements.archive.pruneSiteList) {
+      elements.archive.pruneSiteList.addEventListener('change', resetPruneConfirm);
+    }
+    if (elements.archive.pruneBeforeDate) {
+      elements.archive.pruneBeforeDate.addEventListener('input', resetPruneConfirm);
+    }
 
     // 翻译模式切换时只显示当前模式的配置区（隐藏区块的值保留，切回即恢复）
     if (elements.translateForm?.mode) {
@@ -738,6 +767,149 @@
     } catch (e) {
       return { ok: false, error: e.message };
     }
+  }
+
+  // —— 数据存档：导出 / 导入恢复 / 按条件清理（B-7） ——
+
+  function formatStamp() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+  }
+
+  function triggerDownload(filename, blob) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // 导出直读 storage（单次快照读无并发风险，弹窗同款姿势），不经后台
+  async function handleExportJson() {
+    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    if (dramas.length === 0) {
+      showStatus('时间线为空，没有可导出的条目', false);
+      return;
+    }
+    const payload = {
+      format: 'shortscraping-backup',
+      backupVersion: 1,
+      extensionVersion: chrome.runtime.getManifest().version,
+      exportedAt: new Date().toISOString(),
+      count: dramas.length,
+      dramas
+    };
+    triggerDownload(`shortscraping-backup-${formatStamp()}.json`,
+      new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+    showStatus(`已导出 ${dramas.length} 条到 JSON 备份`, true);
+  }
+
+  async function handleExportCsv() {
+    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    if (dramas.length === 0) {
+      showStatus('时间线为空，没有可导出的条目', false);
+      return;
+    }
+    const { content, count } = TimelineCsv.buildTimelineCsv(dramas);
+    triggerDownload(`shortscraping-timeline-${formatStamp()}.csv`,
+      new Blob([content], { type: 'text/csv;charset=utf-8' }));
+    showStatus(`已导出 ${count} 条到 CSV（仅供查看，恢复请用 JSON 备份）`, true);
+  }
+
+  async function handleImportFile(event) {
+    const file = event.target.files?.[0];
+    event.target.value = ''; // 允许连续选择同名文件
+    if (!file) return;
+
+    if (file.size > 50 * 1024 * 1024) {
+      showStatus('备份文件超过 50MB 上限', false);
+      return;
+    }
+
+    let dramas;
+    try {
+      const payload = JSON.parse(await file.text());
+      dramas = Array.isArray(payload) ? payload : payload?.dramas; // 兼容手工剥壳的裸数组
+      if (!Array.isArray(dramas)) throw new Error('缺少 dramas 数组');
+    } catch (e) {
+      showStatus(`文件不是 ShortScraping 备份：${e.message}`, false);
+      return;
+    }
+
+    const resp = await chrome.runtime.sendMessage({ action: 'importDramas', dramas });
+    if (!resp?.success) {
+      showStatus(`导入失败：${resp?.error || '后台无响应'}`, false);
+      return;
+    }
+    showStatus(`导入完成：新增 ${resp.added} 条；跳过重复 ${resp.duplicates} 条、订阅范围外 ${resp.outOfScope} 条、无效 ${resp.invalid} 条`, true);
+  }
+
+  function renderPruneSites() {
+    const container = elements.archive.pruneSiteList;
+    if (!container) return;
+    container.innerHTML = '';
+    for (const site of SiteRegistry.CATEGORY_SOURCES) {
+      const label = document.createElement('label');
+      label.className = 'subscription-option';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = site;
+      checkbox.dataset.pruneSite = site;
+      const text = document.createElement('span');
+      text.textContent = SiteRegistry.SOURCE_NAMES[site];
+      label.appendChild(checkbox);
+      label.appendChild(text);
+      container.appendChild(label);
+    }
+  }
+
+  function readPruneCriteria() {
+    const sites = Array.from(elements.archive.pruneSiteList.querySelectorAll('input:checked'))
+      .map(input => input.value);
+    const dateValue = elements.archive.pruneBeforeDate.value; // yyyy-mm-dd
+    // 语义＝早于该日本地 0 点
+    const beforeIso = dateValue ? new Date(`${dateValue}T00:00:00`).toISOString() : undefined;
+    return { sites, beforeIso };
+  }
+
+  function resetPruneConfirm() {
+    elements.archive.pruneConfirm.disabled = true;
+    elements.archive.pruneConfirm.textContent = '确认删除';
+    elements.archive.pruneResult.textContent = '';
+  }
+
+  async function handlePrunePreview() {
+    const { sites, beforeIso } = readPruneCriteria();
+    if (sites.length === 0) {
+      showStatus('请先勾选要清理的站点', false);
+      return;
+    }
+    const resp = await chrome.runtime.sendMessage({ action: 'pruneDramas', sites, beforeIso, dryRun: true });
+    if (!resp?.success) {
+      showStatus(`预览失败：${resp?.error || '后台无响应'}`, false);
+      return;
+    }
+    const perSite = Object.entries(resp.perSite || {})
+      .map(([site, n]) => `${SiteRegistry.SOURCE_NAMES[site] || site} ${n}`)
+      .join('、');
+    elements.archive.pruneResult.textContent =
+      `命中 ${resp.matched} 条（库内共 ${resp.total} 条）${perSite ? `：${perSite}` : ''}`;
+    elements.archive.pruneConfirm.disabled = resp.matched === 0;
+    elements.archive.pruneConfirm.textContent = resp.matched > 0 ? `确认删除 ${resp.matched} 条` : '确认删除';
+  }
+
+  async function handlePruneConfirm() {
+    const { sites, beforeIso } = readPruneCriteria();
+    if (sites.length === 0) return;
+    const resp = await chrome.runtime.sendMessage({ action: 'pruneDramas', sites, beforeIso });
+    if (!resp?.success) {
+      showStatus(`清理失败：${resp?.error || '后台无响应'}`, false);
+      return;
+    }
+    resetPruneConfirm();
+    showStatus(`已清理 ${resp.removed} 条，时间线与 CSV 将自动同步`, true);
   }
 
   async function checkSyncServiceStatus() {
