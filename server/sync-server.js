@@ -19,6 +19,7 @@ const path = require('path');
 const os = require('os');
 const UrlMatch = require('../src/shared/url-match.js');
 const Lark = require('../src/shared/lark.js');
+const TimelineCsv = require('../src/shared/timeline-csv.js');
 
 const PORT = Number(process.env.PORT) || 31919;
 const LOCAL_ONLY = process.argv.includes('--local-only');
@@ -33,27 +34,6 @@ const TIMELINE_JSON_PATH = path.join(DB_DIR, 'timeline.json');
 const TAG_CONFIG_PATH = path.join(CONFIG_DIR, 'tag.json');
 const TRANS_CONFIG_PATH = path.join(CONFIG_DIR, 'trans.json');
 const LARK_CONFIG_PATH = path.join(CONFIG_DIR, 'lark.json');
-const CSV_BOM = '﻿';
-const CSV_NEWLINE = '\r\n';
-
-const CSV_COLUMNS = [
-  'id',
-  'itemId',
-  'title',
-  'titleZh',
-  'tags',
-  'description',
-  'descriptionZh',
-  'company',
-  'source',
-  'status',
-  'url',
-  'sourceListUrl',
-  'poster',
-  'scrapedAt',
-  'translatedAt'
-];
-
 // —— 局域网共享状态：最新时间线快照（内存 + db/timeline.json 持久化） ——
 let latestDramas = [];
 let latestSerialized = '[]';
@@ -61,66 +41,24 @@ let dataVersion = 0;
 let updatedAt = null;
 const sseClients = new Set();
 
-function serializeTimelineCsv(rows) {
-  const body = [CSV_COLUMNS.join(','), ...rows].join(CSV_NEWLINE);
-  return CSV_BOM + body + CSV_NEWLINE;
-}
-
 function ensureDb() {
   fs.mkdirSync(DB_DIR, { recursive: true });
   if (!fs.existsSync(CSV_PATH)) {
-    fs.writeFileSync(CSV_PATH, serializeTimelineCsv([]), 'utf8');
+    fs.writeFileSync(CSV_PATH, TimelineCsv.buildTimelineCsv([]).content, 'utf8');
   }
 }
 
-function csvEscape(value) {
-  if (value === null || value === undefined) return '';
-  const text = Array.isArray(value) ? value.join('|') : String(value);
-  return `"${text.replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
-}
-
-function normalizeDrama(drama) {
-  return {
-    id: drama.id || '',
-    // 旧字段名兼容读取：更名前的 timeline.json 快照/旧版扩展推送仍带 imdbId
-    itemId: drama.itemId || drama.imdbId || '',
-    title: drama.title || '',
-    titleZh: drama.titleZh || '',
-    tags: Array.isArray(drama.tags) ? drama.tags : [],
-    description: drama.description || '',
-    descriptionZh: drama.descriptionZh || '',
-    company: drama.company || '',
-    source: drama.source || '',
-    status: drama.status || '',
-    url: drama.url || '',
-    sourceListUrl: drama.sourceListUrl || '',
-    poster: drama.poster || '',
-    scrapedAt: drama.scrapedAt || '',
-    translatedAt: drama.translatedAt || ''
-  };
-}
-
+// CSV 列序/转义/去重/normalizeDrama 单一真源在 src/shared/timeline-csv.js
+// （与设置页「导出 CSV」共用）；本函数只负责落盘
 function writeTimelineCsv(dramas) {
   ensureDb();
 
-  const seen = new Set();
-  const rows = [];
-
-  for (const drama of dramas || []) {
-    const normalized = normalizeDrama(drama);
-    const key = normalized.itemId || normalized.id;
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-
-    rows.push(CSV_COLUMNS.map(column => csvEscape(normalized[column])).join(','));
-  }
-
-  const content = serializeTimelineCsv(rows);
+  const { content, count } = TimelineCsv.buildTimelineCsv(dramas);
   // 与 saveSnapshot 同款 tmp+rename 原子写：进程中断不再留下半截 CSV
   const tmpPath = `${CSV_PATH}.tmp`;
   fs.writeFileSync(tmpPath, content, 'utf8');
   fs.renameSync(tmpPath, CSV_PATH);
-  return rows.length;
+  return count;
 }
 
 function normalizeTagConfig(rawTags) {
