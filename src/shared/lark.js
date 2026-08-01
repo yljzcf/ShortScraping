@@ -107,6 +107,7 @@
     const description = asText(d.description);
     const descriptionZh = asText(d.descriptionZh);
     const tags = (Array.isArray(d.tags) ? d.tags : []).map(asText).filter(Boolean);
+    const genres = (Array.isArray(d.genres) ? d.genres : []).map(asText).filter(Boolean);
 
     return {
       // 全站点统一条目 ID（值＝内部去重字段 itemId，与 CSV 的 itemId 列一致）：IMDB=tt…、
@@ -121,6 +122,9 @@
       source: asText(d.source),
       source_name: SOURCE_NAMES[d.source] || asText(d.source),
       tags: tags.join(','),
+      // 站点原生内容类型标签（英文原值，v1.5.3 第 15 键；已在用的工作流需重发
+      // 测试样例让触发器重新捕获才能引用，不重捕获则照常运行只是用不了此参数）
+      genres: genres.join(','),
       url: asText(d.url),
       poster: posterForPayload(d.poster),
       scraped_at: asText(d.scrapedAt),

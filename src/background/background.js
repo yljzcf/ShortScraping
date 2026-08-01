@@ -1249,6 +1249,7 @@ const SAMPLE_LARK_DRAMA = {
   descriptionZh: '这是一条来自 ShortScraping 扩展的测试消息，用于让飞书工作流捕获参数结构。',
   source: 'reelshort',
   tags: ['测试'],
+  genres: ['Romance', 'Revenge'],   // 非空样例：让飞书触发器捕获时看得见该参数
   url: '',
   poster: '',
   scrapedAt: ''
