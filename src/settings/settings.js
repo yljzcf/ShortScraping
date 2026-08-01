@@ -10,6 +10,7 @@
   const TAG_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/tag';
   const TRANS_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/trans';
   const LARK_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/lark';
+  const CRON_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/cron';
   const SUBSCRIPTION_CATALOG_FILE = 'config/tag.example.json';
 
   // tag = 该站点在订阅 tags 里的站点自身标签，页面上隐藏不显示（仅展示层，保存数据不变）。
@@ -20,14 +21,6 @@
     tag: SiteRegistry.SOURCE_NAMES[site],
     icon: `assets/icons/site-${site}.png`
   }));
-
-  const DEFAULT_SCHEDULE_CONFIG = {
-    scheduleMode: 'interval',
-    scrapeInterval: 6,
-    translateInterval: 1,
-    scrapeCron: '45 * * * *',
-    translateCron: '50 * * * *'
-  };
 
   const DEFAULT_TRANSLATE_CONFIG = {
     translateMode: 'api',
@@ -45,7 +38,7 @@
     urlTags: [],
     subscriptionCatalog: [],
     legacyUrlTags: [],
-    scheduleConfig: { ...DEFAULT_SCHEDULE_CONFIG },
+    scheduleConfig: { ...ScheduleConfig.DEFAULT_CONFIG },
     translateConfig: { ...DEFAULT_TRANSLATE_CONFIG },
     larkConfig: { ...Lark.DEFAULT_CONFIG },
     activeTab: 'config'
@@ -87,7 +80,6 @@
     };
 
     elements.configSummary = document.getElementById('configSummary');
-    elements.scheduleSummary = document.getElementById('scheduleSummary');
     elements.subscriptionList = document.getElementById('subscriptionList');
     elements.subscriptionEmpty = document.getElementById('subscriptionEmpty');
     elements.subscriptionCount = document.getElementById('subscriptionCount');
@@ -108,6 +100,20 @@
     elements.larkForm = {
       webhookUrl: document.getElementById('larkWebhookUrl'),
       requestTimeoutSec: document.getElementById('larkRequestTimeoutSec')
+    };
+    elements.scheduleForm = {
+      mode: document.getElementById('scheduleModeSelect'),
+      intervalSection: document.getElementById('intervalModeSection'),
+      cronSection: document.getElementById('cronModeSection'),
+      scrapeInterval: document.getElementById('scrapeIntervalInput'),
+      translateInterval: document.getElementById('translateIntervalInput'),
+      intervalPreview: document.getElementById('intervalPreview'),
+      scrapeCron: document.getElementById('scrapeCronInput'),
+      translateCron: document.getElementById('translateCronInput'),
+      scrapeCronPreview: document.getElementById('scrapeCronPreview'),
+      translateCronPreview: document.getElementById('translateCronPreview'),
+      save: document.getElementById('btnSaveSchedule'),
+      reload: document.getElementById('btnReloadSchedule')
     };
     elements.syncService = {
       container: document.getElementById('syncServiceStatus'),
@@ -172,6 +178,20 @@
     if (elements.translateForm?.mode) {
       elements.translateForm.mode.addEventListener('change', updateTranslateModeVisibility);
     }
+
+    // 定时任务编辑器：模式显隐 + 实时预览（250ms 去抖）+ 保存/重载
+    bindClick(elements.scheduleForm.save, saveScheduleConfig);
+    bindClick(elements.scheduleForm.reload, reloadScheduleFromFile);
+    if (elements.scheduleForm.mode) {
+      elements.scheduleForm.mode.addEventListener('change', () => {
+        updateScheduleModeVisibility();
+        updateSchedulePreviews();
+      });
+    }
+    for (const key of ['scrapeCron', 'translateCron', 'scrapeInterval', 'translateInterval']) {
+      const input = elements.scheduleForm[key];
+      if (input) input.addEventListener('input', scheduleCronPreviewUpdate);
+    }
   }
 
   function bindClick(element, handler) {
@@ -186,7 +206,7 @@
       ]);
       state.subscriptionCatalog = subscriptionCatalog;
       let urlTags = normalizeUrlTags(result.urlTags || []);
-      let scheduleConfig = normalizeScheduleConfig(result.scheduleConfig || {});
+      let scheduleConfig = ScheduleConfig.normalizeConfig(result.scheduleConfig || {});
       let translateConfig = normalizeTranslateConfig(result.translateConfig || {});
       let larkConfig = Lark.normalizeConfig(result.larkConfig || {});
 
@@ -198,13 +218,13 @@
       if (shouldReadTags || shouldReadSchedule || shouldReadTranslate || shouldReadLark) {
         const [tagConfig, scheduleConfigRaw, translateConfigRaw, larkConfigRaw] = await Promise.all([
           shouldReadTags ? fetchJsonFile('config/tag.json', []) : Promise.resolve(urlTags),
-          shouldReadSchedule ? fetchJsonFile('config/cron.json', DEFAULT_SCHEDULE_CONFIG) : Promise.resolve(scheduleConfig),
+          shouldReadSchedule ? fetchJsonFile('config/cron.json', ScheduleConfig.DEFAULT_CONFIG) : Promise.resolve(scheduleConfig),
           shouldReadTranslate ? fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG) : Promise.resolve(translateConfig),
           shouldReadLark ? fetchJsonFile('config/lark.json', Lark.DEFAULT_CONFIG) : Promise.resolve(larkConfig)
         ]);
 
         urlTags = normalizeUrlTags(tagConfig);
-        scheduleConfig = normalizeScheduleConfig(scheduleConfigRaw);
+        scheduleConfig = ScheduleConfig.normalizeConfig(scheduleConfigRaw);
         translateConfig = normalizeTranslateConfig(translateConfigRaw);
         larkConfig = Lark.normalizeConfig(larkConfigRaw);
       }
@@ -225,7 +245,7 @@
     try {
       const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw, larkConfigRaw] = await Promise.all([
         fetchJsonFile('config/tag.json', null),
-        fetchJsonFile('config/cron.json', DEFAULT_SCHEDULE_CONFIG),
+        fetchJsonFile('config/cron.json', ScheduleConfig.DEFAULT_CONFIG),
         fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG),
         fetchJsonFile('config/lark.json', Lark.DEFAULT_CONFIG)
       ]);
@@ -241,7 +261,7 @@
         tagNote = '；tag.json 读取失败，订阅沿用当前配置';
       }
 
-      const scheduleConfig = normalizeScheduleConfig(scheduleConfigRaw);
+      const scheduleConfig = ScheduleConfig.normalizeConfig(scheduleConfigRaw);
       const translateConfig = normalizeTranslateConfig(translateConfigRaw);
       const larkConfig = Lark.normalizeConfig(larkConfigRaw);
       await applyConfig(urlTags, scheduleConfig, translateConfig, larkConfig);
@@ -302,7 +322,7 @@
 
   async function applyConfig(urlTags, scheduleConfig, translateConfig, larkConfig) {
     state.urlTags = normalizeUrlTags(urlTags);
-    state.scheduleConfig = normalizeScheduleConfig(scheduleConfig);
+    state.scheduleConfig = ScheduleConfig.normalizeConfig(scheduleConfig);
     state.translateConfig = normalizeTranslateConfig(translateConfig);
     state.larkConfig = Lark.normalizeConfig(larkConfig);
 
@@ -353,10 +373,155 @@
 
   function renderAll() {
     renderConfigSummary();
-    renderScheduleSummary();
+    renderScheduleForm();
     renderSubscriptions();
     renderTranslateForm();
     renderLarkForm();
+  }
+
+  // —— 定时任务编辑器（B-8）：校验与预览全部本地完成（schedule-config.js 已进设置页） ——
+
+  function renderScheduleForm() {
+    const form = elements.scheduleForm;
+    if (!form?.mode) return;
+    const config = state.scheduleConfig || ScheduleConfig.DEFAULT_CONFIG;
+    form.mode.value = config.scheduleMode;
+    form.scrapeInterval.value = config.scrapeInterval;
+    form.translateInterval.value = config.translateInterval;
+    form.scrapeCron.value = config.scrapeCron;
+    form.translateCron.value = config.translateCron;
+    updateScheduleModeVisibility();
+    updateSchedulePreviews();
+  }
+
+  function updateScheduleModeVisibility() {
+    const form = elements.scheduleForm;
+    if (!form?.mode) return;
+    const isCron = form.mode.value === 'cron';
+    if (form.intervalSection) form.intervalSection.style.display = isCron ? 'none' : '';
+    if (form.cronSection) form.cronSection.style.display = isCron ? '' : 'none';
+  }
+
+  let cronPreviewTimer = null;
+  function scheduleCronPreviewUpdate() {
+    if (cronPreviewTimer) clearTimeout(cronPreviewTimer);
+    cronPreviewTimer = setTimeout(() => {
+      cronPreviewTimer = null;
+      updateSchedulePreviews();
+    }, 250);
+  }
+
+  function updateSchedulePreviews() {
+    const form = elements.scheduleForm;
+    if (!form?.mode) return;
+
+    if (form.mode.value === 'cron') {
+      for (const key of ['scrapeCron', 'translateCron']) {
+        const preview = form[`${key}Preview`];
+        if (!preview) continue;
+        const expression = form[key].value.trim();
+        try {
+          const nextAt = ScheduleConfig.getNextCronRun(expression);
+          preview.textContent = `下一次执行：${new Date(nextAt).toLocaleString('zh-CN')}`;
+          preview.classList.remove('is-invalid');
+        } catch (e) {
+          preview.textContent = `表达式无效：${e.message}`;
+          preview.classList.add('is-invalid');
+        }
+      }
+    } else if (form.intervalPreview) {
+      const scrape = Number(form.scrapeInterval.value);
+      const translate = Number(form.translateInterval.value);
+      form.intervalPreview.textContent = (scrape > 0 && translate > 0)
+        ? `保存后约 ${scrape} 小时后首次抓取、${translate} 小时后首次翻译，此后按各自间隔循环`
+        : '间隔必须大于 0';
+      form.intervalPreview.classList.toggle('is-invalid', !(scrape > 0 && translate > 0));
+    }
+  }
+
+  function readScheduleConfigFromForm() {
+    const form = elements.scheduleForm;
+    return {
+      scheduleMode: form.mode.value,
+      scrapeInterval: Number(form.scrapeInterval.value),
+      translateInterval: Number(form.translateInterval.value),
+      scrapeCron: form.scrapeCron.value.trim(),
+      translateCron: form.translateCron.value.trim()
+    };
+  }
+
+  async function saveScheduleConfig() {
+    // 强校验：非法配置拒绝保存（不写 storage 不 POST），与 /config/tag 的拒绝范式一致
+    const raw = readScheduleConfigFromForm();
+    const { ok, errors, config } = ScheduleConfig.validateConfig(raw);
+    if (!ok) {
+      const first = Object.values(errors)[0];
+      showStatus(`保存失败：${first}`, false);
+      updateSchedulePreviews();
+      return;
+    }
+
+    state.scheduleConfig = config;
+    await chrome.storage.local.set({ scheduleConfig: config });
+    renderScheduleForm();
+    renderConfigSummary();
+
+    // trans/lark 没有的一步：让后台立即按新配置重排 alarm。失败不回滚 storage——
+    // 新配置已落库，下次 SW 唤醒的顶层 setupAlarms 会自愈
+    let alarmNote = '';
+    try {
+      const response = await chrome.runtime.sendMessage({ action: 'updateAlarms', force: true });
+      if (!response?.success) throw new Error(response?.error || '后台无响应');
+    } catch (e) {
+      alarmNote = `（定时任务即时重排失败：${e.message}，扩展下次唤醒会自动生效）`;
+    }
+
+    const sync = await trySyncCronConfig(config);
+    if (sync.ok) {
+      showStatus(`已保存定时任务配置并写回 config/cron.json${alarmNote}`, true);
+    } else {
+      // 必须点名回滚风险：SW 每次唤醒用 cron.json 无条件覆盖 storage（JSON 是配置源）
+      showStatus(`已保存到扩展本地配置并更新定时任务${alarmNote}；写回 config/cron.json 失败：${sync.error}——注意：同步服务未启动时，扩展下次重启会回读文件中的旧配置`, false);
+    }
+  }
+
+  async function trySyncCronConfig(scheduleConfig) {
+    try {
+      const response = await fetch(CRON_CONFIG_SYNC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scheduleConfig })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
+      if (!result?.ok) {
+        throw new Error(result?.error || '同步服务返回失败');
+      }
+
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  async function reloadScheduleFromFile() {
+    try {
+      const scheduleConfig = ScheduleConfig.normalizeConfig(await fetchJsonFile('config/cron.json', ScheduleConfig.DEFAULT_CONFIG));
+      state.scheduleConfig = scheduleConfig;
+      await chrome.storage.local.set({ scheduleConfig });
+      renderScheduleForm();
+      renderConfigSummary();
+      // 重载的配置同样要让 alarm 立即生效（镜像 reloadTranslateFromFile 多这一步）
+      await chrome.runtime.sendMessage({ action: 'updateAlarms', force: true }).catch(() => {});
+      showStatus(`已从 config/cron.json 读取定时任务配置：${getScheduleText(scheduleConfig)}`, true);
+    } catch (e) {
+      console.error('[ShortScraping] 读取定时任务配置失败:', e);
+      showStatus(`读取定时任务配置失败：${e.message}`, false);
+    }
   }
 
   function renderConfigSummary() {
@@ -374,21 +539,6 @@
     });
   }
 
-  function renderScheduleSummary() {
-    elements.scheduleSummary.innerHTML = '';
-
-    const config = state.scheduleConfig || {};
-    const cards = [
-      { label: '配置文件', value: 'config/cron.json' },
-      { label: '调度模式', value: config.scheduleMode === 'cron' ? 'Cron' : '间隔执行' },
-      { label: '抓取计划', value: config.scheduleMode === 'cron' ? (config.scrapeCron || '未配置') : `${config.scrapeInterval || 6} 小时` },
-      { label: '翻译计划', value: config.scheduleMode === 'cron' ? (config.translateCron || '未配置') : `${config.translateInterval || 1} 小时` }
-    ];
-
-    cards.forEach(card => {
-      elements.scheduleSummary.appendChild(createSummaryCard(card.label, card.value));
-    });
-  }
 
   function updateTranslateModeVisibility() {
     const form = elements.translateForm;
@@ -976,19 +1126,6 @@
         seen.add(item.urlPattern);
         return true;
       });
-  }
-
-  function normalizeScheduleConfig(rawConfig) {
-    const config = { ...DEFAULT_SCHEDULE_CONFIG, ...(rawConfig || {}) };
-    const scheduleMode = config.scheduleMode === 'cron' ? 'cron' : 'interval';
-
-    return {
-      scheduleMode,
-      scrapeInterval: toPositiveNumber(config.scrapeInterval, DEFAULT_SCHEDULE_CONFIG.scrapeInterval),
-      translateInterval: toPositiveNumber(config.translateInterval, DEFAULT_SCHEDULE_CONFIG.translateInterval),
-      scrapeCron: String(config.scrapeCron || DEFAULT_SCHEDULE_CONFIG.scrapeCron).trim(),
-      translateCron: String(config.translateCron || DEFAULT_SCHEDULE_CONFIG.translateCron).trim()
-    };
   }
 
   function normalizeTranslateConfig(rawConfig) {

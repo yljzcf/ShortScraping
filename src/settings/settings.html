@@ -146,6 +146,10 @@
       margin-bottom: 12px;
     }
 
+    .cron-preview.is-invalid {
+      color: var(--danger);
+    }
+
     .muted {
       color: var(--text-secondary);
     }
@@ -511,11 +515,53 @@
           <div class="section-header">
             <div>
               <div class="section-title"><span>⏰</span> 定时任务</div>
-              <p class="help-text">对应 <code>config/cron.json</code>。Cron 为 5 段格式：分钟 小时 日期 月份 星期，例如 <code>45 * * * *</code>。</p>
+              <p class="help-text">对应 <code>config/cron.json</code>。Cron 为 5 段格式：分钟 小时 日期 月份 星期，例如 <code>45 * * * *</code>（支持 <code>*</code>、<code>a-b</code>、<code>a,b,c</code>、<code>*/n</code>）。</p>
             </div>
-            <button class="btn btn-secondary" id="btnOpenScheduleFromSchedule">查看 config/cron.json</button>
+            <div class="actions">
+              <button class="btn btn-secondary" id="btnReloadSchedule">从配置文件重载</button>
+              <button class="btn btn-secondary" id="btnOpenScheduleFromSchedule">查看 config/cron.json</button>
+            </div>
           </div>
-          <div class="grid" id="scheduleSummary"></div>
+
+          <div class="form-field" style="max-width: 240px; margin-top: 12px;">
+            <label for="scheduleModeSelect">调度模式</label>
+            <select id="scheduleModeSelect">
+              <option value="interval">间隔执行</option>
+              <option value="cron">Cron 表达式</option>
+            </select>
+          </div>
+
+          <div id="intervalModeSection" style="margin-top: 12px;">
+            <div class="grid">
+              <div class="form-field">
+                <label for="scrapeIntervalInput">抓取间隔（小时）</label>
+                <input type="number" id="scrapeIntervalInput" min="0.5" step="0.5">
+              </div>
+              <div class="form-field">
+                <label for="translateIntervalInput">翻译间隔（小时）</label>
+                <input type="number" id="translateIntervalInput" min="0.5" step="0.5">
+              </div>
+            </div>
+            <p class="help-text" id="intervalPreview" style="margin-top: 8px;"></p>
+          </div>
+
+          <div id="cronModeSection" style="margin-top: 12px;">
+            <div class="form-field">
+              <label for="scrapeCronInput">抓取任务 Cron</label>
+              <input type="text" id="scrapeCronInput" placeholder="45 * * * *" spellcheck="false">
+              <p class="help-text cron-preview" id="scrapeCronPreview" style="margin-top: 6px;"></p>
+            </div>
+            <div class="form-field" style="margin-top: 10px;">
+              <label for="translateCronInput">翻译任务 Cron</label>
+              <input type="text" id="translateCronInput" placeholder="50 * * * *" spellcheck="false">
+              <p class="help-text cron-preview" id="translateCronPreview" style="margin-top: 6px;"></p>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn btn-primary" id="btnSaveSchedule">保存定时任务配置</button>
+          </div>
+          <p class="help-text">说明：保存时会校验配置（非法 Cron 表达式拒绝保存）、更新扩展本地配置并立即重排定时任务，再尝试通过本地同步服务写回 <code>config/cron.json</code>；若同步服务未启动，写回失败的配置会在扩展下次重启时被文件中的旧配置覆盖。</p>
         </div>
       </section>
 
@@ -697,6 +743,7 @@
 
   <script src="../shared/site-registry.js"></script>
   <script src="../shared/timeline-csv.js"></script>
+  <script src="../shared/schedule-config.js"></script>
   <script src="../shared/lark.js"></script>
   <script src="settings.js"></script>
 </body>
