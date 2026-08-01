@@ -278,10 +278,17 @@
    * 行数按 scrollHeight / line-height 测量（line-clamp 不影响 scrollHeight），
    * 必须在卡片进入可见 DOM 后调用；测得 0 行（容器不可见）时保持默认样式。
    */
-  function adjustCardDescription(card) {
+  // 三段拆分（v1.5.1 性能批次）：reset（写）→ measure（纯读+纯计算）→ apply（纯写），
+  // renderTimeline 对全卡分三轮批处理，强制同步 reflow 从每卡 4+ 次降为整树约 2 次。
+  // 批量测量与旧逐卡交错结果等价的依据：预算 = 同卡内 poster.bottom − box.top
+  // （平移不变量，兄弟卡高度变化只整体平移本卡不改差值）；行数取决于文字列宽，
+  // 列宽由容器网格决定、不受兄弟卡样式影响。
+
+  /** 第一段（写）：清掉上一轮动态样式，返回后续两段共用的元素上下文；非双语卡返回 null。 */
+  function resetCardDescStyles(card) {
     const zhEl = card.querySelector('.card-desc-zh');
     const enEl = card.querySelector('.card-desc-en');
-    if (!zhEl || !enEl) return;
+    if (!zhEl || !enEl) return null;
 
     const box = card.querySelector('.card-description');
     const cardTop = card.querySelector('.card-top');
@@ -289,7 +296,12 @@
     zhEl.style.removeProperty('-webkit-line-clamp');
     enEl.style.removeProperty('-webkit-line-clamp');
     if (cardTop) cardTop.style.removeProperty('height');
+    return { zhEl, enEl, box, cardTop };
+  }
 
+  /** 第二段（纯读+计算）：测量并产出应用计划；容器不可见（测得 0 行）时返回 null 保持默认样式。 */
+  function measureCardDesc(ctx, card) {
+    const { zhEl, enEl, box, cardTop } = ctx;
     const countLines = el => {
       const lineHeight = parseFloat(getComputedStyle(el).lineHeight);
       return lineHeight > 0 ? Math.round(el.scrollHeight / lineHeight) : 0;
@@ -297,7 +309,7 @@
 
     const zhLines = countLines(zhEl);
     const enLines = countLines(enEl);
-    if (zhLines === 0 || enLines === 0) return;
+    if (zhLines === 0 || enLines === 0) return null;
 
     const poster = card.querySelector('.card-poster');
     if (!card.classList.contains('card-landscape') && cardTop && poster && poster.offsetHeight > 40) {
@@ -315,24 +327,43 @@
 
       const sparse = zhLines <= zhShow && enLines <= enShow &&
         budget - (zhLines * zhLh + zhGap + enLines * enLh) >= enLh;
-      if (sparse) {
+      return { mode: 'portrait', zhShow, enShow, sparse, posterHeight: poster.offsetHeight };
+    }
+
+    return { mode: 'landscape', zhLines, enLines };
+  }
+
+  /** 第三段（纯写）：按计划应用样式。 */
+  function applyCardDesc(ctx, plan) {
+    if (!plan) return;
+    const { zhEl, enEl, box, cardTop } = ctx;
+
+    if (plan.mode === 'portrait') {
+      if (plan.sparse) {
         box.classList.add('desc-large');
       } else {
-        if (zhShow !== 3) zhEl.style.setProperty('-webkit-line-clamp', String(zhShow));
-        if (enShow !== 2) enEl.style.setProperty('-webkit-line-clamp', String(enShow));
+        if (plan.zhShow !== 3) zhEl.style.setProperty('-webkit-line-clamp', String(plan.zhShow));
+        if (plan.enShow !== 2) enEl.style.setProperty('-webkit-line-clamp', String(plan.enShow));
       }
       // 上半区高度钉死为海报高：文字增行只填充空隙，分割线不动
-      cardTop.style.height = `${poster.offsetHeight}px`;
+      cardTop.style.height = `${plan.posterHeight}px`;
       return;
     }
 
-    if (zhLines > 3) {
+    if (plan.zhLines > 3) {
       zhEl.style.setProperty('-webkit-line-clamp', '4');
-    } else if (zhLines + enLines < 7) {
+    } else if (plan.zhLines + plan.enLines < 7) {
       box.classList.add('desc-large');
-    } else if (zhLines < 3) {
-      enEl.style.setProperty('-webkit-line-clamp', String(7 - zhLines));
+    } else if (plan.zhLines < 3) {
+      enEl.style.setProperty('-webkit-line-clamp', String(7 - plan.zhLines));
     }
+  }
+
+  /** 单卡入口（海报 load 回调与两端页面沿用，签名不变）＝三段的单卡组合。 */
+  function adjustCardDescription(card) {
+    const ctx = resetCardDescStyles(card);
+    if (!ctx) return;
+    applyCardDesc(ctx, measureCardDesc(ctx, card));
   }
 
   /**
@@ -382,8 +413,12 @@
       container.appendChild(group);
     });
 
-    // 卡片进入 DOM 后按实际渲染行数微调简介排版
-    container.querySelectorAll('.drama-card').forEach(adjustCardDescription);
+    // 卡片进入 DOM 后按实际渲染行数微调简介排版：三轮批处理（全卡清样式 →
+    // 全卡测量 → 全卡应用），读写不交错，整树只强制约 2 次同步 reflow
+    const cards = Array.from(container.querySelectorAll('.drama-card'));
+    const ctxs = cards.map(resetCardDescStyles);
+    const plans = ctxs.map((ctx, i) => (ctx ? measureCardDesc(ctx, cards[i]) : null));
+    ctxs.forEach((ctx, i) => { if (ctx) applyCardDesc(ctx, plans[i]); });
     return true;
   }
 
