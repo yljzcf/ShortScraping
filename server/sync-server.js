@@ -20,6 +20,7 @@ const os = require('os');
 const UrlMatch = require('../src/shared/url-match.js');
 const Lark = require('../src/shared/lark.js');
 const TimelineCsv = require('../src/shared/timeline-csv.js');
+const ScheduleConfig = require('../src/shared/schedule-config.js');
 
 const PORT = Number(process.env.PORT) || 31919;
 const LOCAL_ONLY = process.argv.includes('--local-only');
@@ -34,6 +35,7 @@ const TIMELINE_JSON_PATH = path.join(DB_DIR, 'timeline.json');
 const TAG_CONFIG_PATH = path.join(CONFIG_DIR, 'tag.json');
 const TRANS_CONFIG_PATH = path.join(CONFIG_DIR, 'trans.json');
 const LARK_CONFIG_PATH = path.join(CONFIG_DIR, 'lark.json');
+const CRON_CONFIG_PATH = path.join(CONFIG_DIR, 'cron.json');
 // —— 局域网共享状态：最新时间线快照（内存 + db/timeline.json 持久化） ——
 let latestDramas = [];
 let latestSerialized = '[]';
@@ -131,6 +133,20 @@ function writeLarkConfig(rawConfig) {
 
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
   fs.writeFileSync(LARK_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  return config;
+}
+
+// 拒绝坏配置范式（同 /config/tag）：cron 表达式校验不过直接抛（→500），
+// 文件不动——非法调度落盘会让扩展 SW 每次唤醒都读到坏配置
+function writeCronConfig(rawConfig) {
+  const { ok, errors, config } = ScheduleConfig.validateConfig(rawConfig);
+  if (!ok) {
+    const detail = Object.entries(errors).map(([key, msg]) => `${key}: ${msg}`).join('；');
+    throw new Error(`Cron 配置无效——${detail}`);
+  }
+
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  fs.writeFileSync(CRON_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
   return config;
 }
 
@@ -416,6 +432,18 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, config, configPath: LARK_CONFIG_PATH });
     } catch (error) {
       console.error('[ShortScraping Sync] 写入 Lark 推送配置失败:', error);
+      return sendJson(res, 500, { ok: false, error: error.message });
+    }
+  }
+
+  if (req.method === 'POST' && pathname === '/config/cron') {
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const config = writeCronConfig(payload.scheduleConfig || {});
+      return sendJson(res, 200, { ok: true, config, configPath: CRON_CONFIG_PATH });
+    } catch (error) {
+      console.error('[ShortScraping Sync] 写入定时任务配置失败:', error);
       return sendJson(res, 500, { ok: false, error: error.message });
     }
   }

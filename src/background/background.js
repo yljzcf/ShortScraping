@@ -6,17 +6,9 @@
 importScripts('../shared/url-match.js');
 importScripts('../shared/site-registry.js'); // 须先于 lark.js（其 SOURCE_NAMES 取自本模块）
 importScripts('../shared/timeline-csv.js');
+importScripts('../shared/schedule-config.js'); // cron 解析/校验/默认值单一真源
 importScripts('../shared/translator.js');
 importScripts('../shared/lark.js');
-
-// 定时任务默认配置。实际配置来自 config/cron.json。
-const DEFAULT_SCHEDULE_CONFIG = {
-  scheduleMode: 'interval',
-  scrapeInterval: 6,
-  translateInterval: 1,
-  scrapeCron: '45 * * * *',
-  translateCron: '50 * * * *'
-};
 
 // 翻译接口默认配置。实际配置来自 config/trans.json。
 const DEFAULT_TRANSLATE_CONFIG = {
@@ -214,12 +206,12 @@ async function cleanupOrphanTranslateRunState() {
 async function loadConfigFromJsonFiles() {
   const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw, larkConfigRaw] = await Promise.all([
     fetchJsonFile('config/tag.json', null),
-    fetchJsonFile('config/cron.json', DEFAULT_SCHEDULE_CONFIG),
+    fetchJsonFile('config/cron.json', ScheduleConfig.DEFAULT_CONFIG),
     fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG),
     fetchJsonFile('config/lark.json', Lark.DEFAULT_CONFIG)
   ]);
 
-  const scheduleConfig = { ...DEFAULT_SCHEDULE_CONFIG, ...scheduleConfigRaw };
+  const scheduleConfig = ScheduleConfig.normalizeConfig(scheduleConfigRaw);
   const translateConfig = { ...DEFAULT_TRANSLATE_CONFIG, ...translateConfigRaw };
   const larkConfig = Lark.normalizeConfig(larkConfigRaw);
 
@@ -283,7 +275,7 @@ async function setupAlarms(options = {}) {
   await ensureAlarm(WATCHDOG_ALARM_NAME, { periodInMinutes: WATCHDOG_INTERVAL_MINUTES });
 
   const { scheduleConfig } = await chrome.storage.local.get('scheduleConfig');
-  const config = { ...DEFAULT_SCHEDULE_CONFIG, ...scheduleConfig };
+  const config = ScheduleConfig.normalizeConfig(scheduleConfig);
   const scheduleMode = config.scheduleMode === 'cron' ? 'cron' : 'interval';
 
   // 逐任务独立安装：单个任务失败不连累其余任务
@@ -309,7 +301,7 @@ async function setupTaskAlarm(name, config, scheduleMode, force = false) {
   if (scheduleMode === 'cron') {
     const cronExpression = config[task.cronKey];
     try {
-      const nextRunAt = getNextCronRun(cronExpression);
+      const nextRunAt = ScheduleConfig.getNextCronRun(cronExpression);
       const nextRunLabel = new Date(nextRunAt).toLocaleString('zh-CN');
 
       await ensureCronAlarm(name, cronExpression, nextRunAt, force);
@@ -322,7 +314,7 @@ async function setupTaskAlarm(name, config, scheduleMode, force = false) {
     }
   }
 
-  const intervalHours = Number(config[task.intervalKey]) || DEFAULT_SCHEDULE_CONFIG[task.intervalKey];
+  const intervalHours = Number(config[task.intervalKey]) || ScheduleConfig.DEFAULT_CONFIG[task.intervalKey];
   await ensureAlarm(name, {
     periodInMinutes: intervalHours * 60
   }, force);
@@ -355,7 +347,7 @@ function isFutureCronRunStillValid(scheduledTime, cronExpression) {
     return false;
   }
 
-  return matchesCron(new Date(scheduledTime), parseSimpleCron(cronExpression));
+  return ScheduleConfig.matchesCron(new Date(scheduledTime), ScheduleConfig.parseSimpleCron(cronExpression));
 }
 
 function isSameAlarm(existing, alarmInfo) {
@@ -371,130 +363,9 @@ function isSameAlarm(existing, alarmInfo) {
   return false;
 }
 
-function getNextCronRun(expression, fromDate = new Date()) {
-  const cron = parseSimpleCron(expression);
-  const candidate = new Date(fromDate.getTime());
-  candidate.setSeconds(0, 0);
-  candidate.setMinutes(candidate.getMinutes() + 1);
-
-  // 最多向后查找 366 天，避免非法表达式造成无限循环。
-  const maxAttempts = 366 * 24 * 60;
-  for (let i = 0; i < maxAttempts; i++) {
-    if (matchesCron(candidate, cron)) {
-      return candidate.getTime();
-    }
-    candidate.setMinutes(candidate.getMinutes() + 1);
-  }
-
-  throw new Error(`无法计算下一次 Cron 执行时间: ${expression}`);
-}
-
-function parseSimpleCron(expression) {
-  if (typeof expression !== 'string') {
-    throw new Error('Cron 表达式必须是字符串');
-  }
-
-  const parts = expression.trim().split(/\s+/);
-  if (parts.length !== 5) {
-    throw new Error(`Cron 表达式需要 5 段: ${expression}`);
-  }
-
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
-  const cron = {
-    minute: parseCronField(minute, 0, 59, '分钟'),
-    hour: parseCronField(hour, 0, 23, '小时'),
-    dayOfMonth: parseCronField(dayOfMonth, 1, 31, '日期'),
-    month: parseCronField(month, 1, 12, '月份'),
-    dayOfWeek: parseCronField(dayOfWeek, 0, 7, '星期')
-  };
-
-  // 日期×月份组合可行性：星期不受限时，纯日期约束必须能落在所选月份里
-  // （如 "0 0 31 2 *" 永不匹配；若不在解析期拦截，getNextCronRun 要空转
-  // 366 天×1440 分钟才报错，且每次 SW 唤醒都重来一遍）。
-  // 2 月按 29 天算：29 号在闰年合法，具体是否可达交给 getNextCronRun 判定。
-  if (!cron.dayOfMonth.any && cron.dayOfWeek.any) {
-    const MAX_DAY_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    const months = cron.month.any ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] : [...cron.month.values];
-    const feasible = months.some(m => [...cron.dayOfMonth.values].some(d => d <= MAX_DAY_IN_MONTH[m - 1]));
-    if (!feasible) {
-      throw new Error(`日期与月份组合永不匹配: ${expression}`);
-    }
-  }
-
-  return cron;
-}
-
-function parseCronField(field, min, max, label) {
-  if (field === '*') return { any: true, values: new Set() };
-
-  const values = new Set();
-  for (const part of field.split(',')) {
-    const stepSegments = part.split('/');
-    if (stepSegments.length > 2) {
-      throw new Error(`${label}字段格式错误: ${field}`);
-    }
-
-    const base = stepSegments[0];
-    const step = stepSegments.length === 2 ? Number(stepSegments[1]) : 1;
-    if (!Number.isInteger(step) || step <= 0) {
-      throw new Error(`${label}字段步长错误: ${field}`);
-    }
-
-    let rangeStart;
-    let rangeEnd;
-    if (base === '*') {
-      rangeStart = min;
-      rangeEnd = max;
-    } else if (base.includes('-')) {
-      const [startText, endText] = base.split('-');
-      rangeStart = Number(startText);
-      rangeEnd = Number(endText);
-    } else {
-      rangeStart = Number(base);
-      rangeEnd = Number(base);
-    }
-
-    if (!Number.isInteger(rangeStart) || !Number.isInteger(rangeEnd) || rangeStart < min || rangeEnd > max || rangeStart > rangeEnd) {
-      throw new Error(`${label}字段超出范围: ${field}`);
-    }
-
-    for (let value = rangeStart; value <= rangeEnd; value += step) {
-      values.add(label === '星期' && value === 7 ? 0 : value);
-    }
-  }
-
-  return { any: false, values };
-}
-
-function matchesCron(date, cron) {
-  const dayOfMonthMatches = matchesCronField(date.getDate(), cron.dayOfMonth);
-  const dayOfWeekMatches = matchesCronField(date.getDay(), cron.dayOfWeek);
-
-  let dayMatches;
-  if (cron.dayOfMonth.any && cron.dayOfWeek.any) {
-    dayMatches = true;
-  } else if (cron.dayOfMonth.any) {
-    dayMatches = dayOfWeekMatches;
-  } else if (cron.dayOfWeek.any) {
-    dayMatches = dayOfMonthMatches;
-  } else {
-    // 与常见 cron 语义保持一致：日期和星期同时受限时，任一字段匹配即可。
-    dayMatches = dayOfMonthMatches || dayOfWeekMatches;
-  }
-
-  return matchesCronField(date.getMinutes(), cron.minute)
-    && matchesCronField(date.getHours(), cron.hour)
-    && matchesCronField(date.getMonth() + 1, cron.month)
-    && dayMatches;
-}
-
-function matchesCronField(value, field) {
-  return field.any || field.values.has(value);
-}
-
 async function rescheduleCronTask(name) {
   const { scheduleConfig } = await chrome.storage.local.get('scheduleConfig');
-  const config = { ...DEFAULT_SCHEDULE_CONFIG, ...scheduleConfig };
+  const config = ScheduleConfig.normalizeConfig(scheduleConfig);
 
   if (config.scheduleMode !== 'cron') return;
 
