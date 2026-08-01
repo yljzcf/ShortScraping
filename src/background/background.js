@@ -5,6 +5,7 @@
 
 importScripts('../shared/url-match.js');
 importScripts('../shared/site-registry.js'); // 须先于 lark.js（其 SOURCE_NAMES 取自本模块）
+importScripts('../shared/timeline-csv.js');
 importScripts('../shared/translator.js');
 importScripts('../shared/lark.js');
 
@@ -1126,6 +1127,118 @@ function clearAllDramas() {
 }
 
 /**
+ * 数据存档·导入恢复（设置页 importDramas 消息）：按 itemId 合并去重——已存在
+ * 即跳过、不覆盖不做字段级补全（库内 new 条目翻译线会自愈补译；覆盖方向不可判定）。
+ * 订阅范围外的条目在入口过滤并计入 outOfScope：SW 每次唤醒的
+ * pruneDramasOutsideConfiguredUrls 会把界外条目静默删除，放进去也活不过下轮。
+ * 合并后整表按 scrapedAt 降序重排（缺失排尾）——时间线渲染按数组序分组，
+ * 单纯头插会让老条目挂在顶部日期组之后错乱；对头插维持的现库近似 no-op。
+ */
+function importDramaRecords(rawDramas) {
+  if (!Array.isArray(rawDramas)) {
+    return Promise.reject(new Error('备份文件内容不是条目数组'));
+  }
+  if (rawDramas.length > 100000) {
+    return Promise.reject(new Error(`条目数超出上限（${rawDramas.length} > 100000）`));
+  }
+
+  return enqueueDramaWrite('导入恢复', async () => {
+    const existing = await getDramasInQueue();
+    const { urlTags = [] } = await chrome.storage.local.get('urlTags');
+    const configuredSet = UrlMatch.buildConfiguredUrlSet(getConfiguredScrapeUrls(urlTags));
+
+    const seenItemIds = new Set(existing.map(d => d.itemId));
+    const seenIds = new Set(existing.map(d => d.id));
+    const added = [];
+    let invalid = 0;
+    let outOfScope = 0;
+    let duplicates = 0;
+
+    for (const raw of rawDramas) {
+      const normalized = TimelineCsv.normalizeDrama(raw || {});
+      if (!normalized.itemId) { invalid++; continue; }
+      if (!UrlMatch.isUrlCovered(normalized.sourceListUrl, configuredSet)) { outOfScope++; continue; }
+      if (seenItemIds.has(normalized.itemId)) { duplicates++; continue; } // 含备份文件内自重
+
+      // status 白名单：非 new/trans 的怪值按「有中文标题＝已翻译」推断
+      if (normalized.status !== 'new' && normalized.status !== 'trans') {
+        normalized.status = normalized.titleZh ? 'trans' : 'new';
+      }
+      // id 缺失或与现表撞车时改写（id 是卡片操作句柄，不能重复）
+      if (!normalized.id || seenIds.has(normalized.id)) {
+        normalized.id = `import_${normalized.itemId}`;
+      }
+      seenItemIds.add(normalized.itemId);
+      seenIds.add(normalized.id);
+      added.push(normalized);
+    }
+
+    if (added.length > 0) {
+      const merged = existing.concat(added);
+      merged.sort((a, b) => {
+        const ta = a.scrapedAt || '';
+        const tb = b.scrapedAt || '';
+        return tb < ta ? -1 : tb > ta ? 1 : 0; // ISO 串字典序＝时间序，降序，空串排尾
+      });
+      await writeDramasInQueue(merged);
+    }
+
+    return { added: added.length, duplicates, outOfScope, invalid, total: rawDramas.length };
+  });
+}
+
+/**
+ * 数据存档·按条件清理（设置页 pruneDramas 消息）：站点多选 + 可选「早于某时刻」。
+ * dryRun（预览命中数）与真删共用同一谓词且都进队列——保证预览数＝实删数。
+ * 无 scrapedAt 的条目在带日期条件时保守不命中（只按站点清理时照常命中）。
+ */
+function pruneDramaRecords({ sites, beforeIso, dryRun = false } = {}) {
+  if (!Array.isArray(sites) || sites.length === 0) {
+    return Promise.reject(new Error('未指定要清理的站点'));
+  }
+  const invalidSite = sites.find(site => !SiteRegistry.CATEGORY_SOURCES.includes(site));
+  if (invalidSite) {
+    return Promise.reject(new Error(`未知站点：${invalidSite}`));
+  }
+  const beforeMs = beforeIso ? Date.parse(beforeIso) : null;
+  if (beforeIso && Number.isNaN(beforeMs)) {
+    return Promise.reject(new Error(`无法解析日期：${beforeIso}`));
+  }
+
+  const siteSet = new Set(sites);
+  const matches = (drama) => {
+    if (!siteSet.has(drama.source)) return false;
+    if (beforeMs === null) return true;
+    if (!drama.scrapedAt) return false;
+    return Date.parse(drama.scrapedAt) < beforeMs;
+  };
+
+  return enqueueDramaWrite(dryRun ? '清理预览' : '条件清理', async () => {
+    const dramas = await getDramasInQueue();
+    const perSite = {};
+    let matched = 0;
+    const kept = [];
+
+    for (const drama of dramas) {
+      if (matches(drama)) {
+        matched++;
+        perSite[drama.source] = (perSite[drama.source] || 0) + 1;
+      } else {
+        kept.push(drama);
+      }
+    }
+
+    if (!dryRun && matched > 0) {
+      await writeDramasInQueue(kept); // 删除经 onChanged 自动触发 CSV 同步
+    }
+
+    return dryRun
+      ? { matched, perSite, total: dramas.length }
+      : { removed: matched, perSite, total: kept.length };
+  });
+}
+
+/**
  * 抓取任务开始后，延迟 10 秒启动一轮翻译工作线。
  * 抓取线仍在继续时，翻译线会并行扫描已新增的 new 卡片。
  */
@@ -1390,6 +1503,24 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'applyTranslation') {
     updateSingleDramaTranslation(request.dramaId, request.result).then((updated) => {
       sendResponse({ success: true, updated });
+    }).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'importDramas') {
+    importDramaRecords(request.dramas).then((result) => {
+      sendResponse({ success: true, ...result });
+    }).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'pruneDramas') {
+    pruneDramaRecords(request).then((result) => {
+      sendResponse({ success: true, ...result });
     }).catch((error) => {
       sendResponse({ success: false, error: error.message });
     });
