@@ -978,7 +978,21 @@ function saveDramaRecord(drama) {
   return enqueueDramaWrite('保存新卡', async () => {
     const existing = await getDramasInQueue();
 
-    if (existing.some(d => d.itemId === drama.itemId)) {
+    const index = existing.findIndex(d => d.itemId === drama.itemId);
+    if (index !== -1) {
+      // genres 回填（v1.5.3）：仅「库中缺、本次有」才补写这一个键，其余字段一律
+      // 不动（先到先得/翻译状态/scrapedAt 语义不变）；写时不带 lastScrape（回填
+      // 不是新卡）。权威判定在队列内：并发第二个到达者在此看到已有 → 不写，幂等。
+      const incoming = Array.isArray(drama.genres)
+        ? [...new Set(drama.genres.map(v => String(v || '').trim()).filter(Boolean))]
+        : [];
+      const current = existing[index];
+      const currentHas = Array.isArray(current.genres) && current.genres.length > 0;
+      if (incoming.length > 0 && !currentHas) {
+        const next = existing.slice();   // copy-on-write：队列缓存数组只读
+        next[index] = { ...current, genres: incoming };
+        await writeDramasInQueue(next);
+      }
       return false;
     }
 

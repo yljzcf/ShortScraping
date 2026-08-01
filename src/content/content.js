@@ -73,6 +73,7 @@
     extractBasic(item, tags, id, index) {
       return extractFromListItem(item, index, tags, id);
     },
+    genresFromDetail: true,    // genres 权威源在详情页 JSON-LD（回填路径需请求详情）
     async fetchDetail(drama) {
       // IMDB 详情失败也返回 drama（保留原行为：简介/公司可为空但仍记录）
       return await fetchImdbDetail(drama);
@@ -194,6 +195,7 @@
     extractBasic(appId, tags, id, index) {
       return buildSteamDramaSkeleton(id, index, tags);
     },
+    genresFromDetail: true,    // genres 权威源在 appdetails 接口（回填路径需请求详情）
     async fetchDetail(drama) {
       return await fetchSteamDetail(drama);
     }
@@ -322,6 +324,7 @@
       }
       return extractReelshortFromBook(item, index, tags, id);
     },
+    genresFromDetail: true,    // 列表 theme 只 1 个，权威 tag_list 在 /movie/ 详情页
     async fetchDetail(drama) {
       if (/reelshort\.com\/fandom\//.test(drama.url)) {
         return await fetchReelshortFandomDetail(drama);
@@ -467,6 +470,37 @@
   /**
    * 抓取当前页面 - 站点无关骨架，逐条保存。
    */
+  /**
+   * 存量条目 genres 回填（v1.5.3）：去重命中的在榜条目若库中还没有类型标签，
+   * 用与新条目完全相同的提取路径补一份，经 saveDrama 消息在后台队列内只合并
+   * genres 一个键（其余字段一律不动，见 background saveDramaRecord）。
+   * 成本闸门：库中已有 genres → 零成本返回；列表提取失败 → 返回；适配器标
+   * genresFromDetail（genres 权威源在详情页）才发详情请求（带与新条目同款
+   * 200ms 节流）；最终仍为空 → 不发消息（MyDrama 等恒空站点零往返）。
+   * 详情失败时与新条目路径同语义：有列表级兜底值（如 ReelShort theme）就用，
+   * 彻底为空则本轮放弃、不落任何标记，下轮抓取自动重试，自愈。
+   */
+  async function maybeBackfillGenres(adapter, item, tags, id, index, existingDrama) {
+    try {
+      if (!existingDrama || (Array.isArray(existingDrama.genres) && existingDrama.genres.length > 0)) return;
+
+      const drama = adapter.extractBasic(item, tags, id, index);
+      if (!drama) return;
+
+      if (adapter.genresFromDetail) {
+        await adapter.fetchDetail(drama);
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      if (Array.isArray(drama.genres) && drama.genres.length > 0) {
+        await saveSingleDrama(drama);
+        console.log(`[ShortScraping] ♻️ 已回填类型标签: ${drama.title}（${drama.genres.join(', ')}）`);
+      }
+    } catch (e) {
+      console.warn(`[ShortScraping] 类型标签回填失败（下轮重试）: ${id}`, e.message);
+    }
+  }
+
   async function scrapePage() {
     console.log('[ShortScraping] 开始抓取页面...');
 
@@ -491,6 +525,7 @@
 
     // 去重键统一用 itemId 字段（IMDB=ttId，Steam=appId，RoyalRoad=rr+数字）；过滤空值避免塌缩。
     const existingIds = new Set(existing.map(d => d.itemId).filter(Boolean));
+    const existingByItemId = new Map(existing.filter(d => d.itemId).map(d => [d.itemId, d]));
     const allNewDramas = [];
 
     const listItems = await adapter.getListItems();
@@ -506,6 +541,8 @@
         }
         if (existingIds.has(id)) {
           console.log(`[ShortScraping] 跳过已存在: ${id}`);
+          // 在榜存量条目缺类型标签时顺路回填（v1.5.3），照旧不入新卡
+          await maybeBackfillGenres(adapter, item, tags, id, index, existingByItemId.get(id));
           continue;
         }
 
