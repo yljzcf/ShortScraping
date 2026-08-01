@@ -12,16 +12,14 @@
   const LARK_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/lark';
   const SUBSCRIPTION_CATALOG_FILE = 'config/tag.example.json';
 
-  // tag = 该站点在订阅 tags 里的站点自身标签，页面上隐藏不显示（仅展示层，保存数据不变）
-  const SUBSCRIPTION_SITE_GROUPS = [
-    { site: 'imdb', label: 'IMDB', tag: 'IMDB', icon: 'assets/icons/site-imdb.png' },
-    { site: 'steam', label: 'Steam', tag: 'Steam', icon: 'assets/icons/site-steam.png' },
-    { site: 'royalroad', label: 'RoyalRoad', tag: 'RoyalRoad', icon: 'assets/icons/site-royalroad.png' },
-    { site: 'mydrama', label: 'MyDrama', tag: 'MyDrama', icon: 'assets/icons/site-mydrama.png' },
-    { site: 'reelshort', label: 'ReelShort', tag: 'ReelShort', icon: 'assets/icons/site-reelshort.png' },
-    { site: 'dramashorts', label: 'DramaShorts', tag: 'DramaShorts', icon: 'assets/icons/site-dramashorts.png' },
-    { site: 'netshort', label: 'NetShort', tag: 'NetShort', icon: 'assets/icons/site-netshort.png' }
-  ];
+  // tag = 该站点在订阅 tags 里的站点自身标签，页面上隐藏不显示（仅展示层，保存数据不变）。
+  // 站点清单/显示名从 site-registry.js 派生（label 与 tag 历来同值，icon 按 site 命名）
+  const SUBSCRIPTION_SITE_GROUPS = SiteRegistry.CATEGORY_SOURCES.map(site => ({
+    site,
+    label: SiteRegistry.SOURCE_NAMES[site],
+    tag: SiteRegistry.SOURCE_NAMES[site],
+    icon: `assets/icons/site-${site}.png`
+  }));
 
   const DEFAULT_SCHEDULE_CONFIG = {
     scheduleMode: 'interval',
@@ -540,22 +538,11 @@
   }
 
   /**
-   * 按域名判断订阅 URL 所属站点，与 background.js 的 siteOfUrl、content.js 的 detectSite 同规则。
+   * 按域名判断订阅 URL 所属站点。规则单一真源在 src/shared/site-registry.js；
+   * 返回 null 的 URL 归入「其他」分组。
    */
   function siteOfUrl(url) {
-    try {
-      const hostname = new URL(url).hostname;
-      if (hostname.endsWith('imdb.com')) return 'imdb';
-      if (hostname === 'store.steampowered.com') return 'steam';
-      if (hostname.endsWith('royalroad.com')) return 'royalroad';
-      if (hostname.endsWith('my-drama.com')) return 'mydrama';
-      if (hostname.endsWith('reelshort.com')) return 'reelshort';
-      if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
-      if (hostname.endsWith('netshort.com')) return 'netshort';
-    } catch (e) {
-      // 无效 URL 归入「其他」分组
-    }
-    return null;
+    return SiteRegistry.siteOfUrl(url);
   }
 
   function normalizeUrlForMatch(url) {

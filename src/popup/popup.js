@@ -156,8 +156,7 @@
 
     elements.buttons.goScrape.addEventListener('click', () => {
       const urls = getConfiguredScrapeUrls();
-      const hostBySource = { imdb: 'imdb.com', steam: 'store.steampowered.com', royalroad: 'royalroad.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com' };
-      const host = hostBySource[state.activeSource] || 'imdb.com';
+      const host = SiteRegistry.hostBySource[state.activeSource] || 'imdb.com';
       const target = urls.find(u => u.includes(host)) || urls[0];
       if (target) {
         chrome.tabs.create({ url: target });
@@ -884,23 +883,10 @@
   }
 
   /**
-   * 按域名判断订阅 URL 所属站点，与 background.js siteOfUrl、content.js detectSite、
-   * settings.js siteOfUrl 同规则（各上下文各留一份）。
+   * 按域名判断订阅 URL 所属站点。规则单一真源在 src/shared/site-registry.js。
    */
   function siteOfUrl(url) {
-    try {
-      const hostname = new URL(url).hostname;
-      if (hostname.endsWith('imdb.com')) return 'imdb';
-      if (hostname === 'store.steampowered.com') return 'steam';
-      if (hostname.endsWith('royalroad.com')) return 'royalroad';
-      if (hostname.endsWith('my-drama.com')) return 'mydrama';
-      if (hostname.endsWith('reelshort.com')) return 'reelshort';
-      if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
-      if (hostname.endsWith('netshort.com')) return 'netshort';
-    } catch (e) {
-      // 无效 URL 忽略
-    }
-    return null;
+    return SiteRegistry.siteOfUrl(url);
   }
 
   /**

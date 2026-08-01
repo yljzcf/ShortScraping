@@ -4,6 +4,7 @@
  */
 
 importScripts('../shared/url-match.js');
+importScripts('../shared/site-registry.js'); // 须先于 lark.js（其 SOURCE_NAMES 取自本模块）
 importScripts('../shared/translator.js');
 importScripts('../shared/lark.js');
 
@@ -564,22 +565,10 @@ async function performScrapeOnce({ site = null } = {}) {
 }
 
 /**
- * 按域名判断订阅 URL 所属站点，与 content.js 的 detectSite 同规则。
+ * 按域名判断订阅 URL 所属站点。规则单一真源在 src/shared/site-registry.js。
  */
 function siteOfUrl(url) {
-  try {
-    const hostname = new URL(url).hostname;
-    if (hostname.endsWith('imdb.com')) return 'imdb';
-    if (hostname === 'store.steampowered.com') return 'steam';
-    if (hostname.endsWith('royalroad.com')) return 'royalroad';
-    if (hostname.endsWith('my-drama.com')) return 'mydrama';
-    if (hostname.endsWith('reelshort.com')) return 'reelshort';
-    if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
-    if (hostname.endsWith('netshort.com')) return 'netshort';
-  } catch (e) {
-    // 无效 URL 视为不属于任何站点
-  }
-  return null;
+  return SiteRegistry.siteOfUrl(url);
 }
 
 /**
@@ -764,7 +753,8 @@ async function scrapeUrlInTab(url) {
       console.warn(`[ShortScraping] ${e.message}，强制注入后轮询触发抓取: ${url}`);
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        files: ['src/content/content.js']
+        // 与 manifest content_scripts 的 js 数组保持一致：共享模块先于 content.js
+        files: ['src/shared/site-registry.js', 'src/content/content.js']
       }).catch(err => console.warn(`[ShortScraping] 强制注入失败（继续轮询）: ${err.message}`));
       return await sendScrapeWhenReady(tab.id);
     }

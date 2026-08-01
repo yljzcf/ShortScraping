@@ -50,17 +50,11 @@
   }
 
   /**
-   * 按 hostname 判断当前站点
+   * 按 hostname 判断当前站点。规则单一真源在 src/shared/site-registry.js
+   * （经 manifest content_scripts js 数组先行注入，后台强制注入路径同序）。
    */
   function detectSite(hostname) {
-    if (hostname.endsWith('imdb.com')) return 'imdb';
-    if (hostname === 'store.steampowered.com') return 'steam';
-    if (hostname.endsWith('royalroad.com')) return 'royalroad';
-    if (hostname.endsWith('my-drama.com')) return 'mydrama';
-    if (hostname.endsWith('reelshort.com')) return 'reelshort';
-    if (hostname.endsWith('dramashorts.io')) return 'dramashorts';
-    if (hostname.endsWith('netshort.com')) return 'netshort';
-    return null;
+    return SiteRegistry.siteOfHostname(hostname);
   }
 
   /**

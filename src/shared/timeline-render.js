@@ -10,8 +10,8 @@
 (function (global) {
   'use strict';
 
-  // 分类标签：按 source 筛选时间线
-  const CATEGORY_SOURCES = ['imdb', 'steam', 'royalroad', 'mydrama', 'reelshort', 'dramashorts', 'netshort'];
+  // 分类标签：按 source 筛选时间线。站点全集单一真源在 site-registry.js（须先加载）
+  const CATEGORY_SOURCES = global.SiteRegistry.CATEGORY_SOURCES;
 
   const DEFAULT_OPTS = {
     source: 'imdb',
@@ -148,8 +148,7 @@
       return drama.tags.slice(0, 3);
     }
 
-    const sourceNames = { imdb: 'IMDB', steam: 'Steam', royalroad: 'RoyalRoad', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort' };
-    const tags = [sourceNames[drama.source] || 'IMDB'];
+    const tags = [global.SiteRegistry.SOURCE_NAMES[drama.source] || 'IMDB'];
 
     if (drama.genre) {
       tags.push(String(drama.genre).toLowerCase());

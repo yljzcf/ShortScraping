@@ -24,8 +24,10 @@
     requestTimeoutSec: 15
   };
 
-  // 站点显示名，与 timeline-render.js getDisplayTags 同值（各上下文各留一份）
-  const SOURCE_NAMES = { imdb: 'IMDB', steam: 'Steam', royalroad: 'RoyalRoad', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort' };
+  // 站点显示名单一真源在 site-registry.js；导出契约 Lark.SOURCE_NAMES 保留（sync-server 消费）
+  const SOURCE_NAMES = (typeof module !== 'undefined' && module.exports)
+    ? require('./site-registry.js').SOURCE_NAMES
+    : global.SiteRegistry.SOURCE_NAMES;
 
   function normalizeConfig(rawConfig) {
     const config = { ...DEFAULT_CONFIG, ...(rawConfig || {}) };
