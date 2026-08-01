@@ -39,6 +39,9 @@ let activeScrapeCount = 0;
 let postScrapeTranslateTimer = null;
 let postScrapeTranslateRunning = false;
 let csvSyncTimer = null;
+// 上次成功推送的时间线序列化内容（SW 内存签名，刻意不持久化——SW 回收后首推
+// 即同步服务重启场景的天然恢复机制）。同内容跳过 POST，省去约 1.5MB 冗余传输
+let lastCsvSyncSerialized = null;
 
 // 翻译轮 in-flight 共享：同一时刻只跑一轮，手动/定时/抓取后翻译线的并发调用
 // join 同一 promise，消灭重复翻译同一批条目。
@@ -1214,16 +1217,25 @@ async function syncTimelineToCsv() {
   const dramas = await getDramasSnapshot();
   const configuredDramas = filterDramasByConfiguredUrls(dramas, urlTags);
 
+  const serialized = JSON.stringify(configuredDramas);
+  if (serialized === lastCsvSyncSerialized) {
+    console.log('[ShortScraping] CSV 同步跳过：内容与上次成功推送一致');
+    return;
+  }
+
   const response = await fetch(CSV_SYNC_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dramas: configuredDramas, syncedAt: new Date().toISOString() })
+    // 字符串拼接复用 serialized，免对约 1.5MB 的数组做第二次 stringify
+    body: `{"dramas":${serialized},"syncedAt":${JSON.stringify(new Date().toISOString())}}`
   });
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
 
+  // 仅成功后记录签名——失败不记，下次触发照常重试
+  lastCsvSyncSerialized = serialized;
   const result = await response.json();
   console.log(`[ShortScraping] CSV 同步完成：${result.count} 条 -> ${result.csvPath}`);
 }
@@ -1320,7 +1332,10 @@ function showNotification(message) {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'warmupCsvSync') {
     // 弹窗检测到同步服务健康时的补喂：服务启动晚于 SW 预热推送时，
-    // 快照会一直空着，打开弹窗即可把当前时间线重新推给服务
+    // 快照会一直空着，打开弹窗即可把当前时间线重新推给服务。
+    // 必须先清内容签名强制推送——「服务重启丢快照 + SW 在世签名命中」
+    // 的组合会让补喂被签名跳过、共享页永久空白
+    lastCsvSyncSerialized = null;
     scheduleCsvSync();
     sendResponse({ success: true });
     return false;
