@@ -115,10 +115,24 @@
   /**
    * 绑定事件
    */
+  /**
+   * div[role="button"] 的键盘可达绑定：click + Enter/Space 键激活
+   * （Space 需 preventDefault 防页面滚动）。原生 button 不需要此包装。
+   */
+  function bindActivatable(el, handler) {
+    el.addEventListener('click', handler);
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handler(e);
+      }
+    });
+  }
+
   function bindEvents() {
     elements.buttons.translateAll.addEventListener('click', translateAllData);
     elements.buttons.settings.addEventListener('click', openSettings);
-    elements.syncService.container.addEventListener('click', checkSyncServiceStatus);
+    bindActivatable(elements.syncService.container, checkSyncServiceStatus);
     elements.syncService.folderBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       onSyncFolderClick();
@@ -127,8 +141,9 @@
       e.stopPropagation();
       onSyncStartClick();
     });
-    elements.versionStatus.container.addEventListener('click', checkVersionStatus);
-    elements.lanShare.container.addEventListener('click', onLanShareClick);
+    // 箭头包装防 click 事件对象误入参数位；手动重检永远绕过缓存
+    bindActivatable(elements.versionStatus.container, () => checkVersionStatus({ force: true }));
+    bindActivatable(elements.lanShare.container, onLanShareClick);
     elements.lanShare.qrBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleLanQrPopover();
@@ -140,6 +155,15 @@
           !popover.contains(e.target) &&
           !container.contains(e.target)) {
         popover.classList.add('hidden');
+      }
+    });
+    // Esc 关闭二维码浮层并把焦点归还开启按钮
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      const { popover, qrBtn } = elements.lanShare;
+      if (!popover.classList.contains('hidden')) {
+        popover.classList.add('hidden');
+        qrBtn.focus();
       }
     });
 
@@ -408,6 +432,7 @@
       QrCode.drawToCanvas(qrCanvas, url, 4, 4);
       qrUrl.textContent = url;
       popover.classList.remove('hidden');
+      popover.focus(); // 焦点移入 dialog，Esc 关闭时归还 qrBtn
     } catch (e) {
       console.error('[ShortScraping] 二维码生成失败:', e);
     }
@@ -442,7 +467,31 @@
   /**
    * 检查远端（GitHub master）是否发布了新版本。
    */
-  async function checkVersionStatus() {
+  // 版本检查缓存：成功结果 6 小时内直接复用、失败 5 分钟退避（此前每次开弹窗
+  // 都请求 GitHub raw）。缓存只存 remoteVersion——升级判定每次用本地版本现算，
+  // 用户 git pull 重载扩展后不会被缓存里的陈旧判定误导。点击状态栏 force 绕过。
+  const VERSION_CHECK_TTL_MS = 6 * 60 * 60 * 1000;
+  const VERSION_CHECK_FAIL_BACKOFF_MS = 5 * 60 * 1000;
+
+  async function checkVersionStatus({ force = false } = {}) {
+    if (!force) {
+      try {
+        const { versionCheck } = await chrome.storage.local.get('versionCheck');
+        const now = Date.now();
+        if (versionCheck?.remoteVersion && now - (versionCheck.checkedAt || 0) < VERSION_CHECK_TTL_MS) {
+          const hasUpgrade = compareVersions(versionCheck.remoteVersion, getLocalVersion()) > 0;
+          updateVersionStatus(hasUpgrade ? 'upgrade' : 'latest', versionCheck.remoteVersion);
+          return;
+        }
+        if (versionCheck?.failedAt && now - versionCheck.failedAt < VERSION_CHECK_FAIL_BACKOFF_MS) {
+          updateVersionStatus('fail');
+          return;
+        }
+      } catch (e) {
+        // 缓存读取失败不阻断检查，落到网络路径
+      }
+    }
+
     updateVersionStatus('checking');
 
     try {
@@ -464,9 +513,11 @@
         throw new Error('远端 manifest 缺少 version');
       }
 
+      await chrome.storage.local.set({ versionCheck: { remoteVersion, checkedAt: Date.now() } }).catch(() => {});
       const hasUpgrade = compareVersions(remoteVersion, getLocalVersion()) > 0;
       updateVersionStatus(hasUpgrade ? 'upgrade' : 'latest', remoteVersion);
     } catch (e) {
+      await chrome.storage.local.set({ versionCheck: { failedAt: Date.now() } }).catch(() => {});
       updateVersionStatus('fail');
     }
   }
@@ -919,8 +970,10 @@
     elements.categoryTabs.forEach(tab => {
       const site = tab.dataset.source;
       const visible = subscribed.has(site);
+      const active = visible && site === state.activeSource;
       tab.classList.toggle('hidden', !visible);
-      tab.classList.toggle('active', visible && site === state.activeSource);
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
     });
   }
 
