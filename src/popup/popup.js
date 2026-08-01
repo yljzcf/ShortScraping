@@ -55,8 +55,8 @@
       }
 
       if (changes.dramas || changes.urlTags) {
-        renderTimeline();
-        updateStats();
+        // 抓取洪峰期 storage 每保存一张卡变更一次，整树重渲染合并为 ≤1 次/秒
+        scheduleRender();
       }
     });
   }
@@ -535,8 +535,7 @@
       state.lastScrape = result.lastScrape;
       state.syncServerDir = result.syncServerDir || state.syncServerDir;
 
-      renderTimeline();
-      updateStats();
+      renderNow(); // 弹窗打开首帧不经去抖
     } catch (e) {
       console.error('[ShortScraping] 加载数据失败:', e);
     } finally {
@@ -929,6 +928,39 @@
     if (!TimelineRender.CATEGORY_SOURCES.includes(source)) return;
     state.activeSource = source;
     updateCategoryTabs();
+    renderNow(); // 手动切站点即时反馈，不经去抖
+  }
+
+  // —— onChanged 渲染去抖：trailing 250ms 合并变更风暴；首个挂起变更起算 1s
+  // 强制渲染上限，保住抓取过程中「卡片渐进出现」的产品可见性 ——
+  const RENDER_DEBOUNCE_MS = 250;
+  const RENDER_MAX_DELAY_MS = 1000;
+  let renderDebounceTimer = null;
+  let renderFirstPendingAt = null;
+
+  function scheduleRender() {
+    const now = Date.now();
+    if (renderFirstPendingAt === null) renderFirstPendingAt = now;
+    if (renderDebounceTimer) {
+      // 达到强制上限：让已挂起的定时器到点执行，不再顺延
+      if (now - renderFirstPendingAt >= RENDER_MAX_DELAY_MS) return;
+      clearTimeout(renderDebounceTimer);
+    }
+    renderDebounceTimer = setTimeout(() => {
+      renderDebounceTimer = null;
+      renderFirstPendingAt = null;
+      renderTimeline();
+      updateStats();
+    }, RENDER_DEBOUNCE_MS);
+  }
+
+  /** 立即渲染（首帧/手动切换用），并吸收所有挂起的去抖变更。 */
+  function renderNow() {
+    if (renderDebounceTimer) {
+      clearTimeout(renderDebounceTimer);
+      renderDebounceTimer = null;
+    }
+    renderFirstPendingAt = null;
     renderTimeline();
     updateStats();
   }
