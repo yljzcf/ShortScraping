@@ -408,6 +408,14 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.parse(body || '{}');
       const dramas = Array.isArray(payload.dramas) ? payload.dramas : [];
       const configured = filterDramasByTagConfig(dramas);
+      // C-6：空推送即将清空非空快照时留痕（行为不变）。分别打印原始/过滤后条数，
+      // 区分「扩展推空」与「tag.json 读取失败致全滤除」两种成因；放在写文件之前，写失败也已留痕
+      if (configured.length === 0 && latestDramas.length > 0) {
+        console.warn(
+          `[ShortScraping Sync] 警告：收到空时间线推送（原始 ${dramas.length} 条 / 过滤后 0 条），` +
+          `现有快照 ${latestDramas.length} 条即将被清空——若非主动清空订阅，请检查扩展数据与 config/tag.json`
+        );
+      }
       const count = writeTimelineCsv(configured);
 
       // 更新局域网共享快照并广播给已连接页面；内容未变化时不 bump 版本
