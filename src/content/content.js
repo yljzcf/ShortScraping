@@ -140,6 +140,9 @@
       if (enName) drama.title = enName;        // 英文原名（弹窗里的“（原名）”）
       drama.description = enDesc;
       drama.company = (developers.length ? developers : publishers).join(', ');
+      // 官方内容类型标签（Action/Adventure/RPG…宽门类）。更细的商店用户标签在
+      // 有年龄门的商店页里，appdetails 拿不到，不碰。
+      drama.genres = cleanGenres((en.genres || []).map(g => g && g.description));
       if (en.header_image) drama.poster = en.header_image;
 
       if (titleZh || descriptionZh) {
@@ -655,6 +658,7 @@
       titleZh: '',
       poster,
       tags,
+      genres: [],                // 详情页 JSON-LD genre 补充
       description: '',
       descriptionZh: '',
       company: '',
@@ -679,6 +683,7 @@
       titleZh: '',
       poster: '',              // 占位，fetchSteamDetail 用 header_image 覆盖
       tags,
+      genres: [],              // 占位，fetchSteamDetail 用 appdetails genres 覆盖
       description: '',
       descriptionZh: '',
       company: '',
@@ -730,6 +735,7 @@
       titleZh: '',
       poster,
       tags,
+      genres: cleanGenres(Array.from(item.querySelectorAll('a.fiction-tag')).map(a => a.textContent)),
       description,
       descriptionZh: '',
       company: '',               // 作者名由详情页补充
@@ -872,6 +878,7 @@
       titleZh,
       poster,
       tags,
+      genres: [],                // 平台无类型标签数据（详情页 RSC 渲染 fetch 拿不到）
       description: '',
       descriptionZh: '',
       company: '',               // 平台自制剧，无独立制作公司信息
@@ -985,6 +992,7 @@
       titleZh: '',
       poster,
       tags,
+      genres: [],                // 同主站，平台无类型标签数据
       description: '',
       descriptionZh: '',
       company: '',
@@ -1093,6 +1101,14 @@
   }
 
   /**
+   * 类型标签清洗（多适配器共用）：trim、去空、按原值去重。
+   * 存站点原始英文值，不做翻译（2026-08-02 用户定）。
+   */
+  function cleanGenres(list) {
+    return [...new Set((Array.isArray(list) ? list : []).map(v => String(v || '').trim()).filter(Boolean))];
+  }
+
+  /**
    * 从「TOP」板块的 book 对象提取基础信息。
    * special_desc 是截断版简介，先入库兜底，完整版由详情页覆盖。
    * url 先存 /full-episodes/ 全集页形态兜底（与 /movie/ 剧目页共用
@@ -1109,6 +1125,7 @@
       titleZh: '',
       poster: book.book_pic || book.default_pic || '',
       tags,
+      genres: cleanGenres(book.theme),   // 列表 theme 兜底（通常 1 个），详情页 tag_list 覆盖
       description: (book.special_desc || '').trim(),
       descriptionZh: '',
       company: '',               // 平台自制剧，无独立制作公司信息
@@ -1166,6 +1183,9 @@
         const title = (detail.book_title || '').trim();
         if (title) drama.title = title;
         if (!drama.poster && detail.book_pic) drama.poster = detail.book_pic;
+        // 详情 tag_list 是完整类型标签集（列表 theme 通常只 1 个）；为空保留列表值
+        const tagTexts = cleanGenres((detail.tag_list || []).map(t => t && t.text));
+        if (tagTexts.length) drama.genres = tagTexts;
       }
       const canonical = (response.url || '').split('?')[0] || drama.url.replace('/full-episodes/', '/movie/');
       const episodeUrl = buildReelshortEpisodeUrl(canonical, detail);
@@ -1216,6 +1236,7 @@
       titleZh: '',
       poster,
       tags,
+      genres: [],                // 映射回主站后由 /movie/ 页 tag_list 补充
       description: excerpt,
       descriptionZh: '',
       company: '',
@@ -1271,6 +1292,9 @@
             const canonical = (movieResp.url || '').split('?')[0] || movieUrl;
             const episodeUrl = buildReelshortEpisodeUrl(canonical, movieDetail);
             if (episodeUrl) drama.url = episodeUrl;
+            // 与主站详情同源的 tag_list（这次 /movie/ 请求本为取 chapter_id）
+            const tagTexts = cleanGenres(((movieDetail && movieDetail.tag_list) || []).map(t => t && t.text));
+            if (tagTexts.length) drama.genres = tagTexts;
           }
         } catch (e2) {
           console.warn(`[ShortScraping] ReelShort fandom 取播放页失败（保留全集页兜底）: ${drama.title}`, e2.message);
@@ -1357,6 +1381,7 @@
       titleZh: '',
       poster: buildDramashortsPosterUrl(images.coverWithTitle || images.cover),
       tags,
+      genres: movie.genre && movie.genre.title ? [String(movie.genre.title).trim()] : [],
       description: (movie.description || '').trim(),
       descriptionZh: '',
       company: '',               // 平台自制剧，无独立制作公司信息
@@ -1464,6 +1489,7 @@
       titleZh: '',
       poster: (item.shortPlayCover || '').trim(),
       tags,
+      genres: cleanGenres((item.labelList || []).map(l => l && l.labelName)),
       description: (item.shotIntroduce || '').trim(),
       descriptionZh: '',
       company: '',               // 平台自制剧，无独立制作公司信息
@@ -1499,6 +1525,10 @@
       // 提取出品公司
       drama.company = extractCompany(doc);
 
+      // 提取内容类型标签（JSON-LD genre）；为空保留列表页占位空数组
+      const genres = extractImdbGenres(doc);
+      if (genres.length) drama.genres = genres;
+
       // 不从详情页补封面：详情页可能返回剧照、视频缩略图或推荐图，容易误当成封面。
       // 封面只信任搜索结果列表中的海报容器；没有则使用默认占位图。
 
@@ -1530,6 +1560,23 @@
     }
 
     return '';
+  }
+
+  /**
+   * 提取内容类型标签：详情页 JSON-LD 的 genre 字段（可能是数组或单字符串，
+   * 归一成数组）。页面可能有多个 ld+json 块，取第一个含 genre 的；坏 JSON 跳过。
+   */
+  function extractImdbGenres(doc) {
+    for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const ld = JSON.parse(script.textContent || '');
+        const g = ld && ld.genre;
+        if (g) return cleanGenres(Array.isArray(g) ? g : [g]);
+      } catch (e) {
+        // 单块坏数据跳过，继续找下一块
+      }
+    }
+    return [];
   }
 
   /**
