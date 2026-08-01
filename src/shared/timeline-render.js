@@ -150,9 +150,7 @@
 
     const tags = [global.SiteRegistry.SOURCE_NAMES[drama.source] || 'IMDB'];
 
-    if (drama.genre) {
-      tags.push(String(drama.genre).toLowerCase());
-    } else if (drama.sourceListUrl) {
+    if (drama.sourceListUrl) {
       const genreMatch = drama.sourceListUrl.match(/genres=([^&,]+)/i);
       if (genreMatch) {
         tags.push(decodeURIComponent(genreMatch[1]).toLowerCase());
@@ -160,6 +158,18 @@
     }
 
     return tags.slice(0, 3);
+  }
+
+  // footer 右槽展示的类型标签数上限：左槽最多 3 个订阅标签 + 右槽 2 个类型 chip
+  // 可保 footer 单行（简介动态排版按 footer 单行建模）；全量经容器 title 悬停可见
+  const GENRE_DISPLAY_LIMIT = 2;
+
+  /**
+   * 获取卡片显示的内容类型标签（站点原始英文值，v1.5.3，不翻译）。
+   */
+  function getDisplayGenres(drama) {
+    if (!Array.isArray(drama.genres)) return [];
+    return drama.genres.map(g => String(g || '').trim()).filter(Boolean).slice(0, GENRE_DISPLAY_LIMIT);
   }
 
   /**
@@ -182,6 +192,10 @@
     // 简介
     const descZh = (drama.descriptionZh || '').trim();
     const descEn = (drama.description || '').trim();
+
+    // footer 右槽：内容类型标签 chips（v1.5.3 替换原制作公司/作者标签展示；
+    // company 字段数据保留，存储/CSV/Lark 不受影响，仅卡片不再显示）
+    const genreChips = getDisplayGenres(drama);
 
     // Lark 按钮双闸门：readOnly（共享页）不渲染，未注入回调（调用方未接入）也不渲染
     const showLarkButton = !options.readOnly && typeof options.onLarkPush === 'function';
@@ -208,7 +222,7 @@
           <div class="card-tags-left">
             ${getDisplayTags(drama).map(tag => `<span class="tag tag-source">${escapeHtml(tag)}</span>`).join('')}
           </div>
-          ${drama.company ? `<div class="card-tags-right"><span class="tag tag-company">${escapeHtml(truncate(drama.company, 20))}</span></div>` : ''}
+          ${genreChips.length ? `<div class="card-tags-right" title="${escapeAttribute(drama.genres.join(', '))}">${genreChips.map(g => `<span class="tag tag-genre">${escapeHtml(g)}</span>`).join('')}</div>` : ''}
         </div>
       </div>
     `;
@@ -431,6 +445,7 @@
     createDramaCard,
     adjustCardDescription,
     getDisplayTags,
+    getDisplayGenres,
     formatTime,
     formatRelativeTime,
     truncate,

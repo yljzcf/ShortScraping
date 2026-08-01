@@ -660,7 +660,8 @@ body {
   color: var(--primary);
 }
 
-.tag-company {
+/* 内容类型标签（footer 右槽，v1.5.3 替换原公司/作者标签） */
+.tag-genre {
   color: var(--warning);
   background: rgba(245, 158, 11, 0.1);
 }
