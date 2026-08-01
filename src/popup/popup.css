@@ -868,3 +868,16 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
 }
+
+/* —— 可访问性（v1.5.1）：键盘焦点环。只在 :focus-visible（键盘导航）出现，
+   鼠标点击不显示，避免视觉干扰 —— */
+.category-tab:focus-visible,
+.btn-icon:focus-visible,
+.sync-inline-btn:focus-visible,
+.lan-qr-btn:focus-visible,
+.btn-primary:focus-visible,
+[role="button"]:focus-visible,
+.lan-qr-popover:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}

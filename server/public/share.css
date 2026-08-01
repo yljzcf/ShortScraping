@@ -535,3 +535,9 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
 }
+
+/* —— 可访问性（v1.5.1）：键盘焦点环，仅 :focus-visible 出现 —— */
+.category-tab:focus-visible {
+  outline: 2px solid var(--primary, #6366f1);
+  outline-offset: 2px;
+}

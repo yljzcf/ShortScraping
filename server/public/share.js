@@ -65,7 +65,9 @@
     }
 
     elements.tabs.forEach(tab => {
-      tab.classList.toggle('active', tab.dataset.source === state.activeSource);
+      const active = tab.dataset.source === state.activeSource;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
     });
 
     const visible = state.dramas.filter(d => TimelineRender.dramaSource(d) === state.activeSource);
@@ -121,7 +123,9 @@
   function setLive(on) {
     elements.liveDot.classList.toggle('is-on', on);
     elements.liveDot.classList.toggle('is-off', !on);
-    elements.liveDot.title = on ? '实时同步已连接' : '连接中断，自动重连中…';
+    const text = on ? '实时同步已连接' : '连接中断，自动重连中…';
+    elements.liveDot.title = text;
+    elements.liveDot.setAttribute('aria-label', text); // 状态点无文本内容，屏读靠 aria-label
   }
 
   document.addEventListener('DOMContentLoaded', init);

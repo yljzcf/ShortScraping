@@ -10,14 +10,14 @@
   <div class="app">
     <!-- 头部导航 -->
     <header class="header">
-      <div class="category-tabs" id="categoryTabs">
-        <button type="button" class="category-tab" data-source="imdb" title="IMDB" aria-label="IMDB"><img src="../../assets/icons/site-imdb.png" alt=""></button>
-        <button type="button" class="category-tab" data-source="steam" title="Steam" aria-label="Steam"><img src="../../assets/icons/site-steam.png" alt=""></button>
-        <button type="button" class="category-tab" data-source="royalroad" title="RoyalRoad" aria-label="RoyalRoad"><img src="../../assets/icons/site-royalroad.png" alt=""></button>
-        <button type="button" class="category-tab" data-source="mydrama" title="MyDrama" aria-label="MyDrama"><img src="../../assets/icons/site-mydrama.png" alt=""></button>
-        <button type="button" class="category-tab" data-source="reelshort" title="ReelShort" aria-label="ReelShort"><img src="../../assets/icons/site-reelshort.png" alt=""></button>
-        <button type="button" class="category-tab" data-source="dramashorts" title="DramaShorts" aria-label="DramaShorts"><img src="../../assets/icons/site-dramashorts.png" alt=""></button>
-        <button type="button" class="category-tab" data-source="netshort" title="NetShort" aria-label="NetShort"><img src="../../assets/icons/site-netshort.png" alt=""></button>
+      <div class="category-tabs" id="categoryTabs" role="tablist" aria-label="站点分类">
+        <button type="button" role="tab" aria-selected="false" class="category-tab" data-source="imdb" title="IMDB" aria-label="IMDB"><img src="../../assets/icons/site-imdb.png" alt=""></button>
+        <button type="button" role="tab" aria-selected="false" class="category-tab" data-source="steam" title="Steam" aria-label="Steam"><img src="../../assets/icons/site-steam.png" alt=""></button>
+        <button type="button" role="tab" aria-selected="false" class="category-tab" data-source="royalroad" title="RoyalRoad" aria-label="RoyalRoad"><img src="../../assets/icons/site-royalroad.png" alt=""></button>
+        <button type="button" role="tab" aria-selected="false" class="category-tab" data-source="mydrama" title="MyDrama" aria-label="MyDrama"><img src="../../assets/icons/site-mydrama.png" alt=""></button>
+        <button type="button" role="tab" aria-selected="false" class="category-tab" data-source="reelshort" title="ReelShort" aria-label="ReelShort"><img src="../../assets/icons/site-reelshort.png" alt=""></button>
+        <button type="button" role="tab" aria-selected="false" class="category-tab" data-source="dramashorts" title="DramaShorts" aria-label="DramaShorts"><img src="../../assets/icons/site-dramashorts.png" alt=""></button>
+        <button type="button" role="tab" aria-selected="false" class="category-tab" data-source="netshort" title="NetShort" aria-label="NetShort"><img src="../../assets/icons/site-netshort.png" alt=""></button>
       </div>
       <div class="header-actions">
         <button id="btnTranslateAll" class="btn-icon" title="全部翻译：检查所有待翻译条目并开始翻译">🌐</button>
@@ -27,14 +27,14 @@
 
     <!-- 状态栏：左侧同步服务，右侧版本 -->
     <section class="status-bar">
-      <div class="sync-service" id="syncServiceStatus" title="正在检测本地 CSV 同步服务">
+      <div class="sync-service" id="syncServiceStatus" role="button" tabindex="0" title="正在检测本地 CSV 同步服务">
         <button id="btnSyncFolder" class="sync-inline-btn" title="打开同步服务脚本所在文件夹（需先运行 server/setup-launcher.bat 注册；未注册时复制路径）">📁</button>
         <span class="sync-service-dot" aria-hidden="true"></span>
         <span id="syncServiceText">同步服务：检测中</span>
         <button id="btnSyncStart" class="sync-inline-btn sync-start-btn hidden" title="一键启动同步服务（需先运行 server/setup-launcher.bat 注册）">▶ 启动</button>
         <span class="sync-service-hint">点击刷新状态</span>
       </div>
-      <div class="version-status" id="versionStatus" title="正在检查远端版本">
+      <div class="version-status" id="versionStatus" role="button" tabindex="0" title="正在检查远端版本">
         <span class="version-status-dot" aria-hidden="true"></span>
         <span id="versionStatusText">版本：检查中</span>
       </div>
@@ -72,7 +72,7 @@
         <span class="status-dot"></span>
         <span id="statusText">就绪</span>
       </div>
-      <div class="lan-share" id="lanShare" title="局域网共享链接">
+      <div class="lan-share" id="lanShare" role="button" tabindex="0" title="局域网共享链接">
         <span class="lan-share-icon" aria-hidden="true">📡</span>
         <span id="lanShareText">检测中</span>
         <button id="btnLanQr" class="lan-qr-btn hidden" title="显示二维码，手机扫码打开">▦</button>
@@ -85,7 +85,7 @@
     </footer>
 
     <!-- 局域网链接二维码浮层 -->
-    <div id="lanQrPopover" class="lan-qr-popover hidden">
+    <div id="lanQrPopover" class="lan-qr-popover hidden" role="dialog" aria-label="局域网共享二维码" tabindex="-1">
       <canvas id="lanQrCanvas" width="0" height="0"></canvas>
       <div class="lan-qr-url" id="lanQrUrl"></div>
     </div>
