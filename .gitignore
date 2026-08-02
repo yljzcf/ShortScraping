@@ -37,6 +37,7 @@ config/lark.json
 CLAUDE.md
 docs/
 worklog/
+/genres-inventory-*.md
 
 # Local data (runtime output)
 db/timeline.csv
