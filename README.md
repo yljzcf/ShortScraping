@@ -28,7 +28,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 站点细节：
 
 - **Steam**：成人专属/受限作品（接口 `success=false`）自动跳过；官方中文简介与英文不同时直接作为翻译结果。
-- **My Drama / ReelShort 的 fandom 入口**：文章条目通过文中回主站的链接换取主站 id，与主站条目全局去重；换不到 id 时以 `mdf-`/`rsf-`+slug 退化保留。
+- **My Drama / ReelShort 的 fandom 入口**：文章条目通过文中回主站的链接换取主站 id，与主站条目全局去重；换不到 id 的条目本轮不入库，待文章补上回链后下轮抓取自动重试。
 - **DramaShorts**：首页板块 id 支持 `top_trending`（默认）/ `popular_now` / `audience_favorite`；板块内容每次请求轮换属站点自身行为，多轮定时抓取会逐步累积。规则目录当前未内置 `audience_favorite`（该板块为大池随机采样、单次重合度低），需要时可手动写入 `config/tag.json`。
 
 ## 📦 安装与快速上手

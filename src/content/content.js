@@ -269,6 +269,7 @@
       }
       return extractMyDramaFromListItem(item, index, tags, id);
     },
+    genresFromDetail: true,    // genres 权威源在主站详情页 JSON-LD（回填路径需请求详情）
     async fetchDetail(drama) {
       if (/fandom\.my-drama\.com/.test(drama.url)) {
         return await fetchFandomDetail(drama);
@@ -476,7 +477,7 @@
    * genres 一个键（其余字段一律不动，见 background saveDramaRecord）。
    * 成本闸门：库中已有 genres → 零成本返回；列表提取失败 → 返回；适配器标
    * genresFromDetail（genres 权威源在详情页）才发详情请求（带与新条目同款
-   * 200ms 节流）；最终仍为空 → 不发消息（MyDrama 等恒空站点零往返）。
+   * 200ms 节流）；最终仍为空 → 不发消息（站点确无标签的条目零消息、下轮重试）。
    * 详情失败时与新条目路径同语义：有列表级兜底值（如 ReelShort theme）就用，
    * 彻底为空则本轮放弃、不落任何标记，下轮抓取自动重试，自愈。
    */
@@ -915,7 +916,7 @@
       titleZh,
       poster,
       tags,
-      genres: [],                // 平台无类型标签数据（详情页 RSC 渲染 fetch 拿不到）
+      genres: [],                // 列表无类型字段，详情页 JSON-LD 补采（fetchMyDramaDetail）
       description: '',
       descriptionZh: '',
       company: '',               // 平台自制剧，无独立制作公司信息
@@ -931,10 +932,12 @@
   }
 
   /**
-   * My Drama 详情页（播放页）补简介：正文由 RSC 客户端渲染、fetch 拿不到，
-   * 但 og:description / meta description 静态直出，格式
-   * 「{标题} - 集数 N - 在 My Drama 流媒体平台观看. {简介正文}」，剥模板前缀取正文。
-   * 平台自带中英文齐全时直接标记已翻译（对齐 Steam 官方中文范式）；任何失败都保留列表页数据。
+   * My Drama 详情页（播放页）补简介＋类型标签：正文由 RSC 客户端渲染、fetch 拿不到，
+   * 但 og:description / meta description 与 SEO 用 JSON-LD 静态直出——简介按
+   * 「{标题} - 集数 N - 在 My Drama 流媒体平台观看. {简介正文}」剥模板前缀取正文；
+   * genres 取 JSON-LD @graph 内 VideoObject.genre（英文原值、与浏览器语言无关，
+   * 页面上渲染的中文标签是前端 i18n 译文）。平台自带中英文齐全时直接标记已翻译
+   * （对齐 Steam 官方中文范式）；任何失败都保留列表页数据。
    */
   async function fetchMyDramaDetail(drama) {
     if (!drama.url) return drama;
@@ -975,6 +978,11 @@
           drama.title = english;
         }
       }
+
+      // 内容类型标签：SSR 直出的 JSON-LD（@graph 内 VideoObject.genre 英文原值，
+      // 与浏览器语言无关）；为空保留列表页占位空数组
+      const genres = extractJsonLdGenres(doc);
+      if (genres.length) drama.genres = genres;
 
       if (drama.titleZh && drama.descriptionZh && drama.status === 'new') {
         drama.status = 'trans';
@@ -1029,7 +1037,7 @@
       titleZh: '',
       poster,
       tags,
-      genres: [],                // 同主站，平台无类型标签数据
+      genres: [],                // fandom 文章无类型数据；映射回主站后条目再现于主站榜单时经回填补采
       description: '',
       descriptionZh: '',
       company: '',
@@ -1563,7 +1571,7 @@
       drama.company = extractCompany(doc);
 
       // 提取内容类型标签（JSON-LD genre）；为空保留列表页占位空数组
-      const genres = extractImdbGenres(doc);
+      const genres = extractJsonLdGenres(doc);
       if (genres.length) drama.genres = genres;
 
       // 不从详情页补封面：详情页可能返回剧照、视频缩略图或推荐图，容易误当成封面。
@@ -1601,14 +1609,22 @@
 
   /**
    * 提取内容类型标签：详情页 JSON-LD 的 genre 字段（可能是数组或单字符串，
-   * 归一成数组）。页面可能有多个 ld+json 块，取第一个含 genre 的；坏 JSON 跳过。
+   * 归一成数组）。兼容三种根形态：单对象（IMDB）、对象数组、含 @graph 图谱
+   * （MyDrama：genre 在 @graph 里的 VideoObject 节点上）。页面可能有多个
+   * ld+json 块，取第一个 genre 清洗后非空的节点；坏 JSON 块跳过。
    */
-  function extractImdbGenres(doc) {
+  function extractJsonLdGenres(doc) {
     for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
       try {
         const ld = JSON.parse(script.textContent || '');
-        const g = ld && ld.genre;
-        if (g) return cleanGenres(Array.isArray(g) ? g : [g]);
+        const roots = Array.isArray(ld) ? ld : [ld];
+        const nodes = roots.flatMap(n => (n && Array.isArray(n['@graph'])) ? [n, ...n['@graph']] : [n]);
+        for (const node of nodes) {
+          const g = node && node.genre;
+          if (!g) continue;
+          const genres = cleanGenres(Array.isArray(g) ? g : [g]);
+          if (genres.length) return genres;
+        }
       } catch (e) {
         // 单块坏数据跳过，继续找下一块
       }
