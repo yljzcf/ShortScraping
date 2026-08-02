@@ -160,16 +160,15 @@
     return tags.slice(0, 3);
   }
 
-  // footer 右槽展示的类型标签数上限：左槽最多 3 个订阅标签 + 右槽 2 个类型 chip
-  // 可保 footer 单行（简介动态排版按 footer 单行建模）；全量经容器 title 悬停可见
-  const GENRE_DISPLAY_LIMIT = 2;
-
   /**
    * 获取卡片显示的内容类型标签（站点原始英文值，v1.5.3，不翻译）。
+   * 全量渲染、不设数量上限：实际显示几个交给 CSS 按可用宽度自适应——
+   * 左槽来源标签优先占位（flex-shrink:0），右槽放不下的 chips 折行后被
+   * 单行 max-height 裁掉（footer 视觉高度不变），全量经容器 title 悬停可见。
    */
   function getDisplayGenres(drama) {
     if (!Array.isArray(drama.genres)) return [];
-    return drama.genres.map(g => String(g || '').trim()).filter(Boolean).slice(0, GENRE_DISPLAY_LIMIT);
+    return drama.genres.map(g => String(g || '').trim()).filter(Boolean);
   }
 
   /**

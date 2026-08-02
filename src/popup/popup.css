@@ -543,6 +543,7 @@ body {
   justify-content: flex-start;
   overflow-x: auto;
   scrollbar-width: none;
+  max-height: none;   /* 两行 footer 形态横向滚动看全量，不做单行裁切 */
 }
 
 .timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-tags-left::-webkit-scrollbar,
@@ -630,19 +631,24 @@ body {
   border-top: 1px solid var(--border);
 }
 
-/* 左侧标签 */
+/* 左侧标签（来源/订阅标签：优先占位，不因右侧类型标签收缩） */
 .card-tags-left {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
-/* 右侧标签 */
+/* 右侧标签（内容类型 chips 全量渲染，按剩余宽度尽量多显示：容器可收缩，
+   放不下的 chips 折行后被单行 max-height 裁掉，全量经容器 title 悬停可见） */
 .card-tags-right {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  min-width: 0;
+  max-height: 20px;
+  overflow: hidden;
 }
 
 /* 标签样式 */
