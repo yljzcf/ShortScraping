@@ -481,6 +481,11 @@
    * 详情失败时与新条目路径同语义：有列表级兜底值（如 ReelShort theme）就用，
    * 彻底为空则本轮放弃、不落任何标记，下轮抓取自动重试，自愈。
    */
+  // 本轮抓取的存量条目快照（itemId → 记录），scrapePage 开轮时刷新；fandom 详情
+  // 路径用它判断「库中已有 genres」以跳过代理请求（adapter.fetchDetail 签名不带
+  // 上下文，走模块级快照传递）
+  let existingDramaSnapshot = new Map();
+
   async function maybeBackfillGenres(adapter, item, tags, id, index, existingDrama) {
     try {
       if (!existingDrama || (Array.isArray(existingDrama.genres) && existingDrama.genres.length > 0)) return;
@@ -527,6 +532,7 @@
     // 去重键统一用 itemId 字段（IMDB=ttId，Steam=appId，RoyalRoad=rr+数字）；过滤空值避免塌缩。
     const existingIds = new Set(existing.map(d => d.itemId).filter(Boolean));
     const existingByItemId = new Map(existing.filter(d => d.itemId).map(d => [d.itemId, d]));
+    existingDramaSnapshot = existingByItemId;
     const allNewDramas = [];
 
     const listItems = await adapter.getListItems();
@@ -939,17 +945,40 @@
    * 页面上渲染的中文标签是前端 i18n 译文）。平台自带中英文齐全时直接标记已翻译
    * （对齐 Steam 官方中文范式）；任何失败都保留列表页数据。
    */
+  /**
+   * 经后台代理取主站播放页 HTML（v1.5.5）：fandom 子域上的 content script 直连
+   * my-drama.com 被页面 CORS 拦（/video/ 响应无 ACAO 头，2026-08-09 实测），
+   * SW fetch 对已授权主机免页面 CORS。任何失败返回 null，调用方按「详情失败
+   * 保留列表页数据」既有语义处理。
+   */
+  async function fetchDetailHtmlViaBackground(url) {
+    try {
+      const response = await chrome.runtime.sendMessage({ action: 'fetchDetailHtml', url });
+      return (response && response.success && typeof response.html === 'string') ? response.html : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   async function fetchMyDramaDetail(drama) {
     if (!drama.url) return drama;
 
     try {
-      const response = await fetch(drama.url, {
-        headers: { 'Accept': 'text/html' }
-      });
+      // fandom 子域上处理主站条目（Most Trending 菜单直链、去重回填）时直连被
+      // 页面 CORS 拦，跨源改经后台代理取 HTML；同源保持直连（v1.5.5）
+      let html;
+      if (new URL(drama.url, window.location.href).origin === window.location.origin) {
+        const response = await fetch(drama.url, {
+          headers: { 'Accept': 'text/html' }
+        });
 
-      if (!response.ok) return drama;
+        if (!response.ok) return drama;
 
-      const html = await response.text();
+        html = await response.text();
+      } else {
+        html = await fetchDetailHtmlViaBackground(drama.url);
+        if (html === null) return drama;
+      }
       const parser = new DOMParser();
       const doc = parser.parseFromString(html, 'text/html');
 
@@ -1077,6 +1106,17 @@
       if (vid) {
         drama.itemId = `md${vid[1]}`;
         drama.url = `https://my-drama.com/video/${vid[1]}`;
+        // 播放页 JSON-LD 就带 genres（v1.5.5）：映射当时顺路补采——fandom 子域
+        // 直连主站被页面 CORS 拦，经后台代理取 HTML 本地解析；存量已有 genres
+        // 的零请求，失败保留空数组下轮自愈（语义同其它详情失败路径）
+        const known = existingDramaSnapshot.get(drama.itemId);
+        if (!(known && Array.isArray(known.genres) && known.genres.length > 0)) {
+          const detailHtml = await fetchDetailHtmlViaBackground(drama.url);
+          if (detailHtml) {
+            const genres = extractJsonLdGenres(parser.parseFromString(detailHtml, 'text/html'));
+            if (genres.length) drama.genres = genres;
+          }
+        }
       }
 
       const h1 = doc.querySelector('h1');

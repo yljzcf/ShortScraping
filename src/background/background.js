@@ -1313,6 +1313,28 @@ async function handleLarkTestSend(draftConfig) {
 }
 
 /**
+ * 内容脚本详情页 HTML 代理（v1.5.5）：fandom 子域上的 content script fetch 主站
+ * 播放页被页面 CORS 拦（/video/ 响应无 ACAO 头），SW fetch 对 host_permissions
+ * 主机免页面 CORS，代取 HTML 后交回内容脚本用 DOMParser 解析（SW 无 DOM 能力）。
+ * 白名单只放 mydrama 播放页规范形态（严格 36 位 UUID、无 query，与库内 url
+ * 存储形态一致）——最小暴露面；无重试、无缓存、不落任何状态。
+ */
+const DETAIL_HTML_PROXY_PATTERN = /^https:\/\/my-drama\.com\/video\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+async function fetchDetailHtmlForContent(url) {
+  if (typeof url !== 'string' || !DETAIL_HTML_PROXY_PATTERN.test(url)) {
+    return { success: false, error: 'URL 不在代理白名单内' };
+  }
+  try {
+    const response = await fetch(url, { headers: { 'Accept': 'text/html' } });
+    if (!response.ok) return { success: false, error: `HTTP ${response.status}` };
+    return { success: true, html: await response.text() };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
  * 显示通知
  */
 function showNotification(message) {
@@ -1383,6 +1405,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }).catch((error) => {
       sendResponse({ success: false, error: error.message });
     });
+    return true;
+  }
+
+  if (request.action === 'fetchDetailHtml') {
+    // fetchDetailHtmlForContent 全路径返回对象、不 reject，无需 catch
+    fetchDetailHtmlForContent(request.url).then(sendResponse);
     return true;
   }
 
