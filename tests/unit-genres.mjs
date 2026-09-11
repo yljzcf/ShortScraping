@@ -169,6 +169,31 @@ const { saved: nsSaved } = await runScenario({
 check('N1 NetShort labelList 清洗（trim/去空/去重）',
   eq(nsSaved[0]?.genres, ['Mystery', 'Sweet Romance']), JSON.stringify(nsSaved[0]?.genres));
 
+// ---------- 场景 3b：Netflix Tudum Top 10（内联 graphql 脚本；列表无类型数据，genres 恒空数组） ----------
+const NF_ID = 81278442;
+const nfItem = {
+  __typename: 'PulseTop10ItemEntity', id: `top10-S-${NF_ID}`,
+  top10: { videoId: NF_ID, weeklyRank: 1, category: 'ENGLISH_MOVIES' },
+  artwork: { storyArt: { 'urlsSized({"sizes":{"height":675,"width":1200}})': [{ url: 'https://dnm.nflximg.net/s.jpg' }] } },
+  top10Video: { title: 'The Whisper Man', shortSynopsis: 'syn' }
+};
+const nfData = {
+  [`PulseTop10ItemEntity:${nfItem.id}`]: nfItem,
+  'PulseEntitiesSection:S': { __typename: 'PulseEntitiesSection', guid: 'top-10-card-list', entities: [{ __ref: `PulseTop10ItemEntity:${nfItem.id}` }] }
+};
+const nfLiteral = JSON.stringify({ data: nfData }).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+const { saved: nfSaved } = await runScenario({
+  location: { href: 'https://www.netflix.com/tudum/top10', hostname: 'www.netflix.com', pathname: '/tudum/top10', search: '' },
+  subscription: { urlPattern: 'https://www.netflix.com/tudum/top10', tags: ['Netflix', 'Movie', 'Global'] },
+  document: baseDocument({
+    querySelectorAll: (sel) => sel === 'script'
+      ? [{ textContent: `netflix.reactContext.models.graphql = JSON.parse('${nfLiteral}');` }]
+      : []
+  })
+});
+check('N2 Netflix 列表无类型数据 → 入库卡 genres 恒空数组',
+  nfSaved.length === 1 && eq(nfSaved[0]?.genres, []), JSON.stringify(nfSaved.map(d => [d.itemId, d.genres])));
+
 // ---------- 场景 4：Steam（appdetails 英文 genres，坏条目滤除；中文档不碰 genres） ----------
 const STEAM_URL = 'https://store.steampowered.com/category/visual_novel?flavor=contenthub_newandtrending';
 const { saved: steamSaved } = await runScenario({
@@ -482,7 +507,7 @@ check('M8 fandom 页存量回填跨域改走代理并提交 genres（菜单直�
 check('M8b 跨域场景零直连 fetch（同源直连由 M1/M3 守护）', videoDirectFetches === 0, `videoDirectFetches=${videoDirectFetches}`);
 
 // ---------- 汇总断言：所有入库卡都带 genres 数组字段 ----------
-const all = [...rsSaved, ...dsSaved, ...nsSaved, ...steamSaved, ...imdbSaved, ...mdSaved, ...fandomM5.saved, ...fandomM7.saved];
+const all = [...rsSaved, ...dsSaved, ...nsSaved, ...nfSaved, ...steamSaved, ...imdbSaved, ...mdSaved, ...fandomM5.saved, ...fandomM7.saved];
 check('G1 全部入库卡带 genres 数组字段', all.length >= 8 && all.every(d => Array.isArray(d.genres)),
   JSON.stringify({ count: all.length }));
 

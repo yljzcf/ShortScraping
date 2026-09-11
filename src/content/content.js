@@ -410,8 +410,47 @@
     }
   };
 
+  /**
+   * Netflix Tudum Top 10 适配器（www.netflix.com/tudum/top10 及其子榜单页，v1.5.8）：
+   * 榜单数据 SSR 直出在内联脚本 `netflix.reactContext.models.graphql = JSON.parse('…')`
+   * （Apollo 归一化缓存），DOM 上标题是 logo 图、无 /title/ 链接、无简介，页面全局
+   * window.netflix 在内容脚本隔离世界读不到 → 读 <script> 文本解析（NetShort 同范式）。
+   * 字面量是 JS 单引号字符串（内含裸 "，转义有 \\ \' \uXXXX \xHH），须先反转义再
+   * JSON.parse。每个榜单页是独立 URL（无 ?list= 约定），节 guid 'top-10-card-list'
+   * 引用 10 个 PulseTop10ItemEntity（'top-10-table' 为同数据副本，作回退）。
+   * 条目字段齐全（top10.videoId / top10Video.title+shortSynopsis / artwork.storyArt），
+   * fetchDetail 透传零二次请求；列表无类型数据，genres 恒空。去重键 nf+videoId，
+   * 全球榜与美国榜重叠作品按全局先到先得、每周名次/观看量不入库（2026-09-11 用户定）。
+   * 页面恒英文（localizedPaths 仅 en-us/pt-br），无平台中文，status 走 new 交 AI 翻译。
+   */
+  const netflixAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        return u.hostname.endsWith('netflix.com') && /^\/tudum\/top10(\/|$)/.test(u.pathname);
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return getNetflixTop10Items();
+    },
+    extractId(item) {
+      // videoId 是 Netflix 全站规范数字 id（/title/<id> 页所用），加 nf 前缀与全局去重键约定一致
+      const id = item && item.top10 && item.top10.videoId != null ? String(item.top10.videoId) : '';
+      return /^\d{5,}$/.test(id) ? `nf${id}` : null;
+    },
+    extractBasic(item, tags, id, index) {
+      return extractNetflixFromItem(item, index, tags, id);
+    },
+    async fetchDetail(drama) {
+      // 列表条目自带标题/简介/封面，无需二次请求
+      return drama;
+    }
+  };
+
   // 站点适配器注册表。
-  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter };
+  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, netflix: netflixAdapter };
 
   /**
    * 添加抓取按钮
@@ -613,7 +652,9 @@
 
     // 查找匹配的配置：先精确等值、再前缀匹配（容忍跳转/补斜杠导致的 href 尾部差异）。
     // 两轮分开是为了支持互为前缀的订阅 URL（如 fandom 首页与 fandom/?list=trending），
-    // 不受配置顺序影响。原第三轮 url.includes() 模糊匹配因匹配面过宽、易误标已移除。
+    // 不受配置顺序影响；前缀轮取最长匹配前缀（Netflix 六个榜单页互为前缀，带 query/
+    // 尾斜杠的 href 若按配置顺序取首个会误标到 /tudum/top10）。原第三轮 url.includes()
+    // 模糊匹配因匹配面过宽、易误标已移除。
     for (const config of urlTags) {
       if (!config.urlPattern || !config.tags) continue;
       if (url === config.urlPattern) {
@@ -621,12 +662,16 @@
         return { urlPattern: config.urlPattern, tags: config.tags.slice(0, 3) };
       }
     }
+    let longest = null;
     for (const config of urlTags) {
       if (!config.urlPattern || !config.tags) continue;
-      if (url.startsWith(config.urlPattern)) {
-        console.log(`[ShortScraping] ✓ 前缀匹配! 标签: ${config.tags.join(', ')}`);
-        return { urlPattern: config.urlPattern, tags: config.tags.slice(0, 3) }; // 最多3个标签
+      if (url.startsWith(config.urlPattern) && (!longest || config.urlPattern.length > longest.urlPattern.length)) {
+        longest = config;
       }
+    }
+    if (longest) {
+      console.log(`[ShortScraping] ✓ 前缀匹配! 标签: ${longest.tags.join(', ')}`);
+      return { urlPattern: longest.urlPattern, tags: longest.tags.slice(0, 3) }; // 最多3个标签
     }
 
     // 没有匹配，跳过当前页面
@@ -1584,6 +1629,110 @@
       sourceListUrl: window.location.href,
       status: 'new',
       url: `https://netshort.com${path}`,
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
+  }
+
+  /**
+   * 反转义 JS 单引号字符串字面量的内容（Netflix 内联脚本把 JSON 文本包在
+   * JSON.parse('…') 里：裸 " 不转义，只见 \\ \' \uXXXX；标题页还有 \x20 形态）。
+   * 只处理反斜杠转义序列，不 eval。
+   */
+  function decodeJsStringLiteral(body) {
+    const simple = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', '0': '\0' };
+    return body.replace(/\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/g, (m, esc) => {
+      if (esc.length === 5 && esc[0] === 'u') return String.fromCharCode(parseInt(esc.slice(1), 16));
+      if (esc.length === 3 && esc[0] === 'x') return String.fromCharCode(parseInt(esc.slice(1), 16));
+      return Object.prototype.hasOwnProperty.call(simple, esc) ? simple[esc] : esc;
+    });
+  }
+
+  /**
+   * 读取 Netflix 页面内联的 Apollo 归一化缓存：定位
+   * `netflix.reactContext.models.graphql = JSON.parse('` 到收尾 `');` 之间的字面量，
+   * 反转义后 JSON.parse，返回其 data 对象；缺失/坏数据返回 null。
+   */
+  function readNetflixGraphql(doc = document) {
+    const head = /netflix\.reactContext\.models\.graphql\s*=\s*JSON\.parse\('/;
+    for (const script of doc.querySelectorAll('script')) {
+      const text = script.textContent || '';
+      const m = head.exec(text);
+      if (!m) continue;
+      const start = m.index + m[0].length;
+      const end = text.lastIndexOf("');");
+      if (end <= start) continue;
+      try {
+        const parsed = JSON.parse(decodeJsStringLiteral(text.slice(start, end)));
+        if (parsed && parsed.data && typeof parsed.data === 'object') return parsed.data;
+      } catch (e) {
+        console.warn('[ShortScraping] Netflix graphql 脚本解析失败:', e.message);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Netflix Top 10 榜单条目：取 guid 为 top-10-card-list 的节（无则 top-10-table 副本），
+   * 按 entities[].__ref 解引用为 PulseTop10ItemEntity 数组。定位失败返回空数组
+   * （scrapePage 安全跳过）；条目形态守卫交给 extractId。
+   */
+  function getNetflixTop10Items() {
+    const data = readNetflixGraphql();
+    if (!data) {
+      console.log('[ShortScraping] Netflix graphql 数据未找到');
+      return [];
+    }
+    const sections = Object.values(data).filter(v => v && v.__typename === 'PulseEntitiesSection');
+    const section = sections.find(s => s.guid === 'top-10-card-list') || sections.find(s => s.guid === 'top-10-table');
+    if (!section || !Array.isArray(section.entities)) {
+      console.log('[ShortScraping] Netflix Top 10 榜单数据未找到');
+      return [];
+    }
+    return section.entities
+      .map(ref => (ref && typeof ref.__ref === 'string' ? data[ref.__ref] : null))
+      .filter(item => item && typeof item === 'object');
+  }
+
+  /**
+   * artwork 各图（storyArt/sdpArt/logoArt）的取图键形如 urlsSized({"sizes":…})，
+   * 按前缀查找取首个 url；缺失返回 ''。
+   */
+  function netflixArtUrl(art) {
+    if (!art || typeof art !== 'object') return '';
+    const key = Object.keys(art).find(k => k.startsWith('urlsSized'));
+    const first = key && Array.isArray(art[key]) ? art[key][0] : null;
+    return first && typeof first.url === 'string' ? first.url.trim() : '';
+  }
+
+  /**
+   * 从榜单条目提取基础信息。封面优先 storyArt（1200×675 横版 ≈130KB，URL 无逗号/
+   * 百分号，Lark 链接转附件可直接转换）退化 sdpArt（390×219）；标题取 top10Video.title
+   * （剧集自带季名，如 "The Gentlemen: Season 2"），缺失时用 parentShow.title + 季号拼接；
+   * url 仅凭 videoId 构造 /title/ 页（displayVideo.titlePageSlug 可为 null，不可依赖）。
+   */
+  function extractNetflixFromItem(item, index, tags, nfId) {
+    const video = item.top10Video || {};
+    const parentTitle = video.parentShow && typeof video.parentShow.title === 'string' ? video.parentShow.title.trim() : '';
+    const fallbackTitle = parentTitle
+      ? (video.number != null ? `${parentTitle}: Season ${video.number}` : parentTitle)
+      : nfId;
+    const artwork = item.artwork || {};
+    return {
+      id: `netflix_${nfId}_${index}`,
+      itemId: nfId,
+      title: (typeof video.title === 'string' && video.title.trim()) || fallbackTitle,
+      titleZh: '',
+      poster: netflixArtUrl(artwork.storyArt) || netflixArtUrl(artwork.sdpArt),
+      tags,
+      genres: [],                // 榜单数据无内容类型字段
+      description: typeof video.shortSynopsis === 'string' ? video.shortSynopsis.trim() : '',
+      descriptionZh: '',
+      company: '',
+      source: 'netflix',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      url: `https://www.netflix.com/title/${nfId.slice(2)}`,
       scrapedAt: new Date().toISOString(),
       translatedAt: null
     };
