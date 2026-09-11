@@ -418,10 +418,11 @@
    * 字面量是 JS 单引号字符串（内含裸 "，转义有 \\ \' \uXXXX \xHH），须先反转义再
    * JSON.parse。每个榜单页是独立 URL（无 ?list= 约定），节 guid 'top-10-card-list'
    * 引用 10 个 PulseTop10ItemEntity（'top-10-table' 为同数据副本，作回退）。
-   * 条目字段齐全（top10.videoId / top10Video.title+shortSynopsis / artwork.storyArt），
-   * fetchDetail 透传零二次请求；列表无类型数据，genres 恒空。去重键 nf+videoId，
-   * 全球榜与美国榜重叠作品按全局先到先得、每周名次/观看量不入库（2026-09-11 用户定）。
-   * 页面恒英文（localizedPaths 仅 en-us/pt-br），无平台中文，status 走 new 交 AI 翻译。
+   * 条目字段齐全（top10.videoId / top10Video.title+shortSynopsis / artwork.storyArt）；
+   * 榜单无类型字段，genres 经后台代理请求 /title/<videoId> 页补采（v1.5.9，见
+   * fetchNetflixDetail）。去重键 nf+videoId，全球榜与美国榜重叠作品按全局先到先得、
+   * 每周名次/观看量不入库（2026-09-11 用户定）。页面恒英文（localizedPaths 仅
+   * en-us/pt-br），无平台中文，status 走 new 交 AI 翻译。
    */
   const netflixAdapter = {
     matches(url) {
@@ -443,9 +444,10 @@
     extractBasic(item, tags, id, index) {
       return extractNetflixFromItem(item, index, tags, id);
     },
+    genresFromDetail: true,    // genres 权威源在 /title/ 详情页（回填路径需请求详情）
     async fetchDetail(drama) {
-      // 列表条目自带标题/简介/封面，无需二次请求
-      return drama;
+      // 标题/简介/封面以榜单为准，详情只为补 genres；失败保留榜单数据
+      return await fetchNetflixDetail(drama);
     }
   };
 
@@ -1736,6 +1738,70 @@
       scrapedAt: new Date().toISOString(),
       translatedAt: null
     };
+  }
+
+  /**
+   * Netflix 详情（v1.5.9）：/title/<videoId> 页只为补 genres——榜单数据无类型字段。
+   * 页面有两个随机变体（`netflix.reactContext.models.graphql` 缓存有数据 / 为空），
+   * 两者都含根对象 `netflix.reactContext = {…}`（JS 对象字面量、字符串用 \xHH 转义）→
+   * models.nmTitleGQL.data.genreInfo.coreGenre.name[].name 即 Netflix 自身简洁类型
+   * （Thrillers / Dramas / Comedies / Kids / Documentaries…），电影/剧集/非英语/授权片均有；
+   * 季 id 会 301 到剧集页，genres 同样可取。一律经后台代理取页：Tudum 页同源直连会带
+   * 用户 Netflix 登录 cookie（登录态页面形态不同），SW fetch 无 cookie，且代理对 netflix
+   * 规则强制 Accept-Language 英文（coreGenre 名随请求头本地化）。标题/简介仍以榜单为准；
+   * 任何失败保留空数组，榜单复现时经 maybeBackfillGenres 自愈。就地写 drama.genres
+   * （回填路径忽略返回值、只看 drama.genres）。
+   */
+  async function fetchNetflixDetail(drama) {
+    if (!drama.url) return drama;
+
+    try {
+      const html = await fetchDetailHtmlViaBackground(drama.url);
+      if (html === null) return drama;
+
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const root = readNetflixReactContext(doc);
+      const data = root && root.models && root.models.nmTitleGQL ? root.models.nmTitleGQL.data : null;
+      const coreGenre = data && data.genreInfo ? data.genreInfo.coreGenre : null;
+      const names = coreGenre && Array.isArray(coreGenre.name) ? coreGenre.name.map(g => g && g.name) : [];
+      const genres = cleanGenres(names);
+      if (genres.length) drama.genres = genres;
+
+      console.log(`[ShortScraping] Netflix 详情: ${drama.title} | 类型: ${genres.length ? genres.join(', ') : '无'}`);
+    } catch (e) {
+      console.warn(`[ShortScraping] Netflix 详情失败（保留榜单数据）: ${drama.title}`, e.message);
+    }
+
+    return drama;
+  }
+
+  /**
+   * 读取 Netflix 页面根对象 `netflix.reactContext = {…}`：JS 对象字面量，字符串内特殊
+   * 字符以 \xHH 转义（JSON 不认），逐个转义序列归一——\xHH → 等价的 \u00HH、\' → '，
+   * 其余（\\ \" \uXXXX \n…）原样保留——后 JSON.parse。取首个 { 到该 script 最后一个 }
+   * （字面量以 `};` 收尾、其后无其它内容）。不匹配 `netflix.reactContext.models.graphql =`
+   * 那段（点号后不是等号）。缺失/坏数据返回 null。
+   */
+  function readNetflixReactContext(doc = document) {
+    const head = /netflix\.reactContext\s*=\s*\{/;
+    for (const script of doc.querySelectorAll('script')) {
+      const text = script.textContent || '';
+      const m = head.exec(text);
+      if (!m) continue;
+      const start = m.index + m[0].length - 1;
+      const end = text.lastIndexOf('}');
+      if (end <= start) continue;
+      try {
+        const json = text.slice(start, end + 1).replace(/\\(x[0-9a-fA-F]{2}|[\s\S])/g, (whole, esc) => {
+          if (esc.length === 3 && esc[0] === 'x') return `\\u00${esc.slice(1)}`;
+          return esc === "'" ? "'" : whole;
+        });
+        return JSON.parse(json);
+      } catch (e) {
+        console.warn('[ShortScraping] Netflix reactContext 解析失败:', e.message);
+      }
+    }
+    return null;
   }
 
   /**

@@ -191,8 +191,35 @@ const { saved: nfSaved } = await runScenario({
       : []
   })
 });
-check('N2 Netflix 列表无类型数据 → 入库卡 genres 恒空数组',
+check('N2 Netflix 榜单无类型字段、详情代理失败（默认桩）→ 卡片入库且 genres 空数组（下轮回填）',
   nfSaved.length === 1 && eq(nfSaved[0]?.genres, []), JSON.stringify(nfSaved.map(d => [d.itemId, d.genres])));
+
+// N3：详情代理返回 /title/ 页——根 netflix.reactContext 对象字面量（空格编成 \x20）内
+// models.nmTitleGQL.data.genreInfo.coreGenre.name[].name 即 Netflix 自身英文类型，经 cleanGenres 清洗
+const nfRootLiteral = JSON.stringify({ models: { nmTitleGQL: { data: { genreInfo: { coreGenre: { name: [
+  { name: 'Thrillers' }, { name: ' Mysteries ' }, { name: 'Dramas' }, { name: 'Dramas' }, { name: '' }
+] } } } } } }).replace(/ /g, '\\x20');
+const nfTitleHtml = `<html><head><script>window.netflix = window.netflix || {};\nnetflix.reactContext = ${nfRootLiteral};</script>` +
+  `<script>netflix.reactContext.models.graphql = JSON.parse('{"data":{}}');</script></head></html>`;
+const { saved: nfSaved3, proxyCalls: nfProxy3 } = await runScenario({
+  location: { href: 'https://www.netflix.com/tudum/top10', hostname: 'www.netflix.com', pathname: '/tudum/top10', search: '' },
+  subscription: { urlPattern: 'https://www.netflix.com/tudum/top10', tags: ['Netflix', 'Movie', 'Global'] },
+  document: baseDocument({
+    querySelectorAll: (sel) => sel === 'script'
+      ? [{ textContent: `netflix.reactContext.models.graphql = JSON.parse('${nfLiteral}');` }]
+      : []
+  }),
+  proxy: () => ({ success: true, html: nfTitleHtml }),
+  domParser: class {
+    parseFromString(html) {
+      const scripts = [...String(html).matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => ({ textContent: m[1] }));
+      return baseDocument({ querySelectorAll: (sel) => sel === 'script' ? scripts : [] });
+    }
+  }
+});
+check('N3 Netflix 详情代理返回 nmTitleGQL → coreGenre 英文类型清洗入库（trim/去空/去重），代理目标为 /title/ 直链',
+  eq(nfSaved3[0]?.genres, ['Thrillers', 'Mysteries', 'Dramas']) && eq(nfProxy3, ['https://www.netflix.com/title/81278442']),
+  JSON.stringify({ genres: nfSaved3[0]?.genres, proxy: nfProxy3 }));
 
 // ---------- 场景 4：Steam（appdetails 英文 genres，坏条目滤除；中文档不碰 genres） ----------
 const STEAM_URL = 'https://store.steampowered.com/category/visual_novel?flavor=contenthub_newandtrending';
@@ -507,7 +534,7 @@ check('M8 fandom 页存量回填跨域改走代理并提交 genres（菜单直�
 check('M8b 跨域场景零直连 fetch（同源直连由 M1/M3 守护）', videoDirectFetches === 0, `videoDirectFetches=${videoDirectFetches}`);
 
 // ---------- 汇总断言：所有入库卡都带 genres 数组字段 ----------
-const all = [...rsSaved, ...dsSaved, ...nsSaved, ...nfSaved, ...steamSaved, ...imdbSaved, ...mdSaved, ...fandomM5.saved, ...fandomM7.saved];
+const all = [...rsSaved, ...dsSaved, ...nsSaved, ...nfSaved, ...nfSaved3, ...steamSaved, ...imdbSaved, ...mdSaved, ...fandomM5.saved, ...fandomM7.saved];
 check('G1 全部入库卡带 genres 数组字段', all.length >= 8 && all.every(d => Array.isArray(d.genres)),
   JSON.stringify({ count: all.length }));
 

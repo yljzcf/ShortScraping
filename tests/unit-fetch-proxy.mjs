@@ -131,6 +131,48 @@ const GOOD = 'https://my-drama.com/video/a36a7fe3-0e89-45ff-a409-f75093c5144f';
   check('P6 非 2xx 响应 → success:false', resp?.success === false, JSON.stringify(resp));
 }
 
+// P7 Netflix 详情页规则（v1.5.9）：/title/<videoId> 合法 URL 透传 html，请求头强制英文
+//（coreGenre 类型名随 Accept-Language 本地化，zh-CN 会得到中文）
+const NF_GOOD = 'https://www.netflix.com/title/81278442';
+{
+  fetchBehavior = async () => ({ ok: true, status: 200, text: async () => '<html>NF-TITLE</html>' });
+  fetchCalls.length = 0;
+  const resp = await ask(NF_GOOD);
+  const headers = fetchCalls[0]?.options?.headers || {};
+  check('P7 Netflix /title/<videoId> → success + html 透传',
+    resp?.success === true && resp?.html === '<html>NF-TITLE</html>', JSON.stringify(resp));
+  check('P7b Netflix 代理请求带 Accept: text/html 且 Accept-Language 以 en 开头',
+    fetchCalls.length === 1 && fetchCalls[0].url === NF_GOOD && headers.Accept === 'text/html' && /^en/.test(String(headers['Accept-Language'])),
+    JSON.stringify(fetchCalls));
+}
+
+// P8 Netflix 白名单拒绝面：协议 / 非数字 id / 非 title 路径 / 无 www / 伪装域 / query / 短 id，全部零网络
+{
+  fetchCalls.length = 0;
+  const bad = [
+    'http://www.netflix.com/title/81278442',
+    'https://www.netflix.com/title/abc',
+    'https://www.netflix.com/tudum/top10',
+    'https://netflix.com/title/81278442',
+    'https://www.netflix.com.evil.com/title/81278442',
+    `${NF_GOOD}?trkid=1`,
+    'https://www.netflix.com/title/8127'
+  ];
+  const rejections = [];
+  for (const u of bad) rejections.push(await ask(u));
+  check('P8 Netflix 拒绝面全拒', rejections.every(r => r && r.success === false), JSON.stringify(rejections));
+  check('P8b Netflix 拒绝路径零网络请求', fetchCalls.length === 0, `fetchCalls=${fetchCalls.length}`);
+}
+
+// P9 my-drama 规则不带 Accept-Language（MyDrama 详情的本地化标题/简介语义依赖浏览器语言，勿动）
+{
+  fetchCalls.length = 0;
+  await ask(GOOD);
+  check('P9 my-drama 代理请求不带 Accept-Language',
+    fetchCalls.length === 1 && !('Accept-Language' in (fetchCalls[0].options?.headers || {})),
+    JSON.stringify(fetchCalls[0]?.options));
+}
+
 console.log = origLog; console.warn = origWarn;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

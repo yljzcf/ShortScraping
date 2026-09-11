@@ -25,14 +25,14 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 | ReelShort | 主站首页 TOP 板块与 `/fandom/` 文章流 | 页内 `__NEXT_DATA__` SSR 数据直出 / WordPress SSR | `rs`+book_id |
 | DramaShorts | `/top-movies` 榜单与首页板块（`?list=<板块id>`） | 页内 `__NEXT_DATA__` 直出，无需请求详情页 | `ds`+UUID |
 | NetShort | 首页板块（`?list=<板块名>`，如 `trending_now` / `exclusive_originals`） | 页内 RSC flight 数据直出，无需请求详情页 | `ns`+shortPlayId |
-| Netflix | Tudum Top 10 六个榜单页：`/tudum/top10`、`/tv`、`/films-non-english`、`/tv-non-english`、`/united-states`、`/united-states/tv` | 页内 `netflix.reactContext` 内联脚本 SSR 数据直出，无需请求详情页 | `nf`+videoId |
+| Netflix | Tudum Top 10 六个榜单页：`/tudum/top10`、`/tv`、`/films-non-english`、`/tv-non-english`、`/united-states`、`/united-states/tv` | 页内 `netflix.reactContext` 内联脚本 SSR 榜单数据直出；类型标签经后台代理取作品 `/title/` 页 | `nf`+videoId |
 
 站点细节：
 
 - **Steam**：成人专属/受限作品（接口 `success=false`）自动跳过；官方中文简介与英文不同时直接作为翻译结果。
 - **My Drama / ReelShort 的 fandom 入口**：文章条目通过文中回主站的链接换取主站 id，与主站条目全局去重；换不到 id 的条目本轮不入库，待文章补上回链后下轮抓取自动重试。
 - **DramaShorts**：首页板块 id 支持 `top_trending`（默认）/ `popular_now` / `audience_favorite`；板块内容每次请求轮换属站点自身行为，多轮定时抓取会逐步累积。规则目录当前未内置 `audience_favorite`（该板块为大池随机采样、单次重合度低），需要时可手动写入 `config/tag.json`。
-- **Netflix**：内容脚本只注入 `/tudum/top10*` 栏目页，不进 Netflix 播放/浏览页；同一作品同时上全球榜与美国榜时按作品全局去重、先到先得（订阅顺序全球榜在前，美国榜实际记录「上美国榜但未上全球榜」的作品）；标签约定 `Global`（英语榜）/ `Global-nE`（非英语榜）/ `US`；每周名次与观看量不入库，只记录首次进榜时间。
+- **Netflix**：内容脚本只注入 `/tudum/top10*` 栏目页，不进 Netflix 播放/浏览页；同一作品同时上全球榜与美国榜时按作品全局去重、先到先得（订阅顺序全球榜在前，美国榜实际记录「上美国榜但未上全球榜」的作品）；标签约定 `Global`（英语榜）/ `Global-nE`（非英语榜）/ `US`；每周名次与观看量不入库，只记录首次进榜时间。内容类型标签取自作品 `/title/` 页 Netflix 自身分类（如 Thrillers / Dramas / Comedies，英文原值），由后台无 cookie 代理抓取，与你的 Netflix 登录状态无关；单次抓取失败的作品会在下轮榜单复现时自动补上。
 
 ## 📦 安装与快速上手
 

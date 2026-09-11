@@ -90,10 +90,49 @@ const loc = (href) => {
   return { href, hostname: u.hostname, pathname: u.pathname, search: u.search, origin: u.origin };
 };
 
-// 场景执行器：装桩 → eval 真实 content.js → 派发 'scrape' → 返回 { saved, saveCalls, response }
-async function runScenario({ location, subscriptions, document, dramas = [] }) {
+// ---------- 详情页 fixture：根 netflix.reactContext 对象字面量（\xHH 转义）内的 nmTitleGQL ----------
+// 模拟 Netflix 序列化：空格、斜杠、撇号、< > 编成 \xHH（JSON 不认 \x，解析前须归一为 \u00HH）
+const toJsObjectLiteral = (jsonText) =>
+  jsonText.replace(/[ \/'<>]/g, ch => '\\x' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
+function titlePageHtml({ genres = ['Thrillers', 'Mysteries', 'Dramas'], synopsis = 'Detail synopsis / not used', videoId = 81278442, withGraphqlData = false, brokenRoot = false } = {}) {
+  const root = {
+    title: 'Netflix', clPageName: 'nonmemberTitle',
+    models: {
+      requestHeaders: { data: {} },
+      nmTitleGQL: { data: {
+        isPlayableOnAdsPlan: true,
+        artwork: { billboard: { small: 'https://occ.nflxso.net/dnm/x.jpg' } },
+        copy: { title: "Detail Title Shouldn't Win", synopsis },
+        genreInfo: { coreGenre: { name: genres.map(name => ({ name })) } },
+        metaData: { type: 'Movie', videoId, topLevelVideoId: videoId }
+      }, type: 'ok' }
+    }
+  };
+  // 真实页面把部分字符写成 JSON 合法的 \uXXXX（与 \xHH 并存），插一个 ’ 验证 \u 序列原样保留
+  let literal = toJsObjectLiteral(JSON.stringify(root)).replace('Detail\\x20Title', 'Detail\\x20\\u2019Title');
+  if (brokenRoot) literal = literal.slice(0, -5);
+  const rootScript = `window.netflix = window.netflix || {};\n        netflix.reactContext = ${literal};`;
+  const graphqlScript = withGraphqlData
+    ? `netflix.reactContext.models.graphql = JSON.parse('{"data":{"Movie:x":{"__typename":"Movie","videoId":${videoId}}}}');`
+    : `netflix.reactContext.models.graphql = JSON.parse('{"data":{}}');`;
+  return `<!doctype html><html lang="en-US"><head><script>${rootScript}</script><script>${graphqlScript}</script></head><body></body></html>`;
+}
+// DOMParser 桩：从 HTML 字符串抠出 <script> 文本（与内容脚本 doc.querySelectorAll('script') 读法一致）
+class ScriptDomParser {
+  parseFromString(html) {
+    const scripts = [...String(html).matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => ({ textContent: m[1] }));
+    return baseDocument({ querySelectorAll: (sel) => sel === 'script' ? scripts : [] });
+  }
+}
+const okProxy = (opts) => () => ({ success: true, html: titlePageHtml(opts) });
+
+// 场景执行器：装桩 → eval 真实 content.js → 派发 'scrape' →
+// 返回 { saved, saveCalls, proxyCalls（fetchDetailHtml 后台代理请求的 url）, response }
+// 详情代理默认返回失败（success:false）——榜单字段类断言与详情无关
+async function runScenario({ location, subscriptions, document, dramas = [], proxy, domParser }) {
   const store = { dramas: structuredClone(dramas) };
   const saveCalls = [];
+  const proxyCalls = [];
   const listeners = [];
   globalThis.chrome = {
     storage: { local: { async get() { await Promise.resolve(); return { dramas: structuredClone(store.dramas), urlTags: subscriptions }; } } },
@@ -107,20 +146,25 @@ async function runScenario({ location, subscriptions, document, dramas = [] }) {
           if (!dup) store.dramas.push(structuredClone(message.drama));
           return { success: true, saved: !dup };
         }
+        if (message?.action === 'fetchDetailHtml') {
+          proxyCalls.push(message.url);
+          return proxy ? proxy(message.url) : { success: false };
+        }
         return { success: true };
       }
     }
   };
   globalThis.window = { location };
   globalThis.document = document;
-  globalThis.fetch = async () => { throw new Error('Netflix 适配器不应发起任何网络请求'); };
-  globalThis.DOMParser = class { parseFromString() { return baseDocument(); } };
+  // 详情一律经后台代理（无 cookie、可控 Accept-Language），内容脚本自身绝不直连 fetch
+  globalThis.fetch = async () => { throw new Error('Netflix 适配器不应直连 fetch（详情须走后台代理）'); };
+  globalThis.DOMParser = domParser || class { parseFromString() { return baseDocument(); } };
 
   (0, eval)(contentSrc);
   const response = await new Promise(resolve => {
     for (const fn of listeners) fn({ action: 'scrape' }, { tab: { id: 1 } }, resolve);
   });
-  return { saved: store.dramas, saveCalls, response };
+  return { saved: store.dramas, saveCalls, proxyCalls, response };
 }
 
 const SUB_MOVIES = { urlPattern: 'https://www.netflix.com/tudum/top10', tags: ['Netflix', 'Movie', 'Global'] };
@@ -223,9 +267,70 @@ const TRICKY_SYN = 'Path a\\b and 100% ünïcode — done.';
 // ---------- R：去重 ----------
 {
   const data = buildData({ cardItems: [top10Item('CARD', { videoId: 81278442, title: 'The Whisper Man' })] });
+  const existing = { id: 'netflix_nf81278442_0', itemId: 'nf81278442', title: 'The Whisper Man', tags: ['Netflix', 'Movie', 'Global'], genres: ['Dramas'], source: 'netflix', status: 'new' };
+  const { saveCalls, proxyCalls } = await runScenario({ location: loc('https://www.netflix.com/tudum/top10/united-states'), subscriptions: [SUB_US_MOVIES], document: scriptsDoc([graphqlScript(data)]), dramas: [existing], proxy: okProxy() });
+  check('R1 库中已有 nf<videoId> 且已带 genres（全球榜先到）→ 美国榜复现零 saveDrama 零代理（先到先得、不追加标签）', saveCalls.length === 0 && proxyCalls.length === 0, JSON.stringify({ saveCalls, proxyCalls }));
+}
+
+// ---------- D2-D5：详情页 genres（经后台代理取 /title/ 页根 reactContext 的 nmTitleGQL.coreGenre） ----------
+const NF_TITLE_URL = 'https://www.netflix.com/title/81278442';
+{
+  const data = buildData({ cardItems: [top10Item('CARD', { videoId: 81278442, title: 'The Whisper Man', synopsis: 'List synopsis wins' })] });
+  const { saved, proxyCalls } = await runScenario({
+    location: loc('https://www.netflix.com/tudum/top10'), subscriptions: [SUB_MOVIES], document: scriptsDoc([graphqlScript(data)]),
+    proxy: okProxy(), domParser: ScriptDomParser
+  });
+  const d = saved[0] || {};
+  check('D2 详情代理返回 nmTitleGQL → genres 取 coreGenre 英文名', eq(d.genres, ['Thrillers', 'Mysteries', 'Dramas']), JSON.stringify(d.genres));
+  check('D2b 详情只补 genres：标题/简介仍以榜单为准、url 不变', d.title === 'The Whisper Man' && d.description === 'List synopsis wins' && d.url === NF_TITLE_URL, JSON.stringify([d.title, d.description, d.url]));
+  check('D2c 恰一次代理请求且目标为库内 /title/ 直链形态', eq(proxyCalls, [NF_TITLE_URL]), JSON.stringify(proxyCalls));
+}
+{
+  const data = buildData({ cardItems: [top10Item('CARD', { videoId: 81278442, title: 'The Whisper Man' })] });
+  const { saved } = await runScenario({
+    location: loc('https://www.netflix.com/tudum/top10'), subscriptions: [SUB_MOVIES], document: scriptsDoc([graphqlScript(data)]),
+    proxy: () => ({ success: false, error: 'HTTP 503' }), domParser: ScriptDomParser
+  });
+  check('D3 详情代理失败 → 卡片照常入库、genres 空数组（下轮榜单复现时回填）', saved.length === 1 && eq(saved[0].genres, []), JSON.stringify(saved.map(d => d.genres)));
+}
+{
+  const data = buildData({ cardItems: [top10Item('CARD', { videoId: 81278442, title: 'The Whisper Man' })] });
+  const { saved } = await runScenario({
+    location: loc('https://www.netflix.com/tudum/top10'), subscriptions: [SUB_MOVIES], document: scriptsDoc([graphqlScript(data)]),
+    proxy: okProxy({ genres: ["Kids' TV", ' Comedies ', 'Comedies', ''], withGraphqlData: true }), domParser: ScriptDomParser
+  });
+  check('D4 根字面量含 \\x27 撇号与 \\u 序列、graphql 变体有数据时仍取 coreGenre，并经 cleanGenres 清洗',
+    eq(saved[0]?.genres, ["Kids' TV", 'Comedies']), JSON.stringify(saved[0]?.genres));
+}
+{
+  const data = buildData({ cardItems: [top10Item('CARD', { videoId: 81278442, title: 'The Whisper Man' })] });
+  const { saved, response } = await runScenario({
+    location: loc('https://www.netflix.com/tudum/top10'), subscriptions: [SUB_MOVIES], document: scriptsDoc([graphqlScript(data)]),
+    proxy: okProxy({ brokenRoot: true }), domParser: ScriptDomParser
+  });
+  check('D5 根字面量损坏 → 不抛错、卡片入库、genres 空数组', response?.success === true && saved.length === 1 && eq(saved[0].genres, []), JSON.stringify(saved.map(d => d.genres)));
+}
+
+// ---------- B：存量回填（榜单复现 + 库中无 genres → 经详情代理补采，只提交 genres） ----------
+{
+  const data = buildData({ cardItems: [top10Item('CARD', { videoId: 81278442, title: 'The Whisper Man' })] });
   const existing = { id: 'netflix_nf81278442_0', itemId: 'nf81278442', title: 'The Whisper Man', tags: ['Netflix', 'Movie', 'Global'], genres: [], source: 'netflix', status: 'new' };
-  const { saveCalls } = await runScenario({ location: loc('https://www.netflix.com/tudum/top10/united-states'), subscriptions: [SUB_US_MOVIES], document: scriptsDoc([graphqlScript(data)]), dramas: [existing] });
-  check('R1 库中已有 nf<videoId>（全球榜先到）→ 美国榜复现零 saveDrama（先到先得、不追加标签、无 genres 回填请求）', saveCalls.length === 0, JSON.stringify(saveCalls));
+  const { saveCalls, proxyCalls } = await runScenario({
+    location: loc('https://www.netflix.com/tudum/top10'), subscriptions: [SUB_MOVIES], document: scriptsDoc([graphqlScript(data)]),
+    dramas: [existing], proxy: okProxy(), domParser: ScriptDomParser
+  });
+  check('B1 存量无 genres 复现 → 恰 1 次代理 + 1 次 saveDrama 提交带 genres 的同 itemId',
+    eq(proxyCalls, [NF_TITLE_URL]) && saveCalls.length === 1 && saveCalls[0].itemId === 'nf81278442' && eq(saveCalls[0].genres, ['Thrillers', 'Mysteries', 'Dramas']),
+    JSON.stringify({ proxyCalls, saveCalls: saveCalls.map(d => [d.itemId, d.genres]) }));
+}
+{
+  const data = buildData({ cardItems: [top10Item('CARD', { videoId: 81278442, title: 'The Whisper Man' })] });
+  const existing = { id: 'netflix_nf81278442_0', itemId: 'nf81278442', title: 'The Whisper Man', tags: ['Netflix', 'Movie', 'Global'], genres: [], source: 'netflix', status: 'new' };
+  const { saveCalls, proxyCalls } = await runScenario({
+    location: loc('https://www.netflix.com/tudum/top10'), subscriptions: [SUB_MOVIES], document: scriptsDoc([graphqlScript(data)]),
+    dramas: [existing], proxy: () => ({ success: false }), domParser: ScriptDomParser
+  });
+  check('B2 存量回填时代理失败 → 零 saveDrama（不落空标记，下轮再试）', proxyCalls.length === 1 && saveCalls.length === 0, JSON.stringify({ proxyCalls, saveCalls }));
 }
 
 // ---------- M：adapter.matches 路径闸门 ----------

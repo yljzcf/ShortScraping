@@ -1314,17 +1314,31 @@ async function handleLarkTestSend(draftConfig) {
  * 内容脚本详情页 HTML 代理（v1.5.5）：fandom 子域上的 content script fetch 主站
  * 播放页被页面 CORS 拦（/video/ 响应无 ACAO 头），SW fetch 对 host_permissions
  * 主机免页面 CORS，代取 HTML 后交回内容脚本用 DOMParser 解析（SW 无 DOM 能力）。
- * 白名单只放 mydrama 播放页规范形态（严格 36 位 UUID、无 query，与库内 url
- * 存储形态一致）——最小暴露面；无重试、无缓存、不落任何状态。
+ * 白名单按规则表放行、逐条带各自请求头（最小暴露面；无重试、无缓存、不落任何状态）：
+ * - mydrama 播放页规范形态（严格 36 位 UUID、无 query，与库内 url 存储形态一致），
+ *   只带 Accept: text/html——详情的本地化标题/简介语义依赖浏览器语言，不加 Accept-Language；
+ * - Netflix /title/<videoId>（v1.5.9，只为补 genres）：Tudum 页同源直连会带用户 Netflix 登录
+ *   cookie（登录态页面形态不同），SW fetch 无 cookie；并强制 Accept-Language 英文——页内
+ *   coreGenre 类型名随请求头本地化（zh-CN 会得到「惊悚/悬疑/剧情片」，genres 约定存英文原值）。
  */
-const DETAIL_HTML_PROXY_PATTERN = /^https:\/\/my-drama\.com\/video\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const DETAIL_HTML_PROXY_RULES = [
+  {
+    pattern: /^https:\/\/my-drama\.com\/video\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    headers: { 'Accept': 'text/html' }
+  },
+  {
+    pattern: /^https:\/\/www\.netflix\.com\/title\/\d{5,}$/,
+    headers: { 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9' }
+  }
+];
 
 async function fetchDetailHtmlForContent(url) {
-  if (typeof url !== 'string' || !DETAIL_HTML_PROXY_PATTERN.test(url)) {
+  const rule = typeof url === 'string' ? DETAIL_HTML_PROXY_RULES.find(r => r.pattern.test(url)) : null;
+  if (!rule) {
     return { success: false, error: 'URL 不在代理白名单内' };
   }
   try {
-    const response = await fetch(url, { headers: { 'Accept': 'text/html' } });
+    const response = await fetch(url, { headers: rule.headers });
     if (!response.ok) return { success: false, error: `HTTP ${response.status}` };
     return { success: true, html: await response.text() };
   } catch (e) {
