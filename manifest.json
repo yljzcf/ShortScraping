@@ -36,7 +36,8 @@
         "*://*.my-drama.com/*",
         "*://*.reelshort.com/*",
         "*://*.dramashorts.io/*",
-        "*://*.netshort.com/*"
+        "*://*.netshort.com/*",
+        "*://*.netflix.com/tudum/top10*"
       ],
       "js": ["src/shared/site-registry.js", "src/content/content.js"],
       "css": ["src/content/content.css"],

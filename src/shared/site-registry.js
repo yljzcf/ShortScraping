@@ -8,6 +8,9 @@
  *   suffix = hostname.endsWith(host)——裸后缀匹配，不做点边界校验
  *            （notimdb.com 会命中 imdb 属历史怪癖，保真保留，勿顺手「修正」）；
  *   exact  = hostname 全等（steam 仅认 store.steampowered.com，商店子域之外不命中）。
+ * path（可选，v1.5.8）只限定 manifest content_scripts.matches 的路径段（默认 /*），
+ *   用于 Netflix 这类只需注入某个栏目页的大站；站点归属判定（siteOfHostname/siteOfUrl）
+ *   仍只按 host，后台 scripting.executeScript 强制注入兜底路径也不受 matches 限制。
  *
  * 加载方式：后台 importScripts / 弹窗、设置页、共享页 <script> 标签
  * （挂 globalThis.SiteRegistry）/ 同步服务 require（module.exports）/
@@ -23,7 +26,8 @@
     { site: 'mydrama', name: 'MyDrama', host: 'my-drama.com', match: 'suffix' },
     { site: 'reelshort', name: 'ReelShort', host: 'reelshort.com', match: 'suffix' },
     { site: 'dramashorts', name: 'DramaShorts', host: 'dramashorts.io', match: 'suffix' },
-    { site: 'netshort', name: 'NetShort', host: 'netshort.com', match: 'suffix' }
+    { site: 'netshort', name: 'NetShort', host: 'netshort.com', match: 'suffix' },
+    { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*' }
   ];
 
   const CATEGORY_SOURCES = SITES.map(entry => entry.site);
@@ -60,7 +64,7 @@
    * 避免「两处各自从注册表推一遍」导致改一处漏一处。
    */
   function contentScriptMatches() {
-    return SITES.map(entry => `*://${entry.match === 'exact' ? '' : '*.'}${entry.host}/*`);
+    return SITES.map(entry => `*://${entry.match === 'exact' ? '' : '*.'}${entry.host}${entry.path || '/*'}`);
   }
 
   const api = { SITES, CATEGORY_SOURCES, SOURCE_NAMES, hostBySource, siteOfHostname, siteOfUrl, contentScriptMatches };
