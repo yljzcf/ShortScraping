@@ -31,13 +31,13 @@
     {
       "matches": [
         "*://*.imdb.com/*",
+        "*://*.netflix.com/tudum/top10*",
         "*://store.steampowered.com/*",
-        "*://*.royalroad.com/*",
         "*://*.my-drama.com/*",
         "*://*.reelshort.com/*",
         "*://*.dramashorts.io/*",
         "*://*.netshort.com/*",
-        "*://*.netflix.com/tudum/top10*"
+        "*://*.royalroad.com/*"
       ],
       "js": ["src/shared/site-registry.js", "src/content/content.js"],
       "css": ["src/content/content.css"],

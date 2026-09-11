@@ -19,15 +19,16 @@
 (function (global) {
   'use strict';
 
+  // 顺序即展示序（2026-09-11 用户定：Netflix 紧随 IMDB 排第二，RoyalRoad 移到末位）
   const SITES = [
     { site: 'imdb', name: 'IMDB', host: 'imdb.com', match: 'suffix' },
+    { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*' },
     { site: 'steam', name: 'Steam', host: 'store.steampowered.com', match: 'exact' },
-    { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix' },
     { site: 'mydrama', name: 'MyDrama', host: 'my-drama.com', match: 'suffix' },
     { site: 'reelshort', name: 'ReelShort', host: 'reelshort.com', match: 'suffix' },
     { site: 'dramashorts', name: 'DramaShorts', host: 'dramashorts.io', match: 'suffix' },
     { site: 'netshort', name: 'NetShort', host: 'netshort.com', match: 'suffix' },
-    { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*' }
+    { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix' }
   ];
 
   const CATEGORY_SOURCES = SITES.map(entry => entry.site);
