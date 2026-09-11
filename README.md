@@ -53,7 +53,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 
 | 标签页 | 能做什么 |
 |--------|----------|
-| 配置文件 | 「重新读取配置」让三个 JSON 立即生效；快捷查看各配置文件 |
+| 配置文件 | 「重新读取配置」让四个 JSON 立即生效；快捷查看各配置文件 |
 | 网页订阅 | 勾选式订阅管理：候选规则来自目录 `config/tag.example.json`（按站点分组），保存后写回 `config/tag.json`；不支持在界面自由添加 URL，新增规则＝编辑目录文件后重载扩展 |
 | 定时任务 | **完整编辑器**（v1.5.2）：调度模式切换、间隔/Cron 表达式编辑、实时预览下一次执行时间；非法表达式拒绝保存，保存即重排定时任务并写回 `config/cron.json`（需同步服务） |
 | 翻译接口 | 完整表单编辑 `config/trans.json` 的全部字段（模式/端点/密钥/模型/提示词/批量/延迟/超时），保存写回文件（需同步服务） |
@@ -62,7 +62,9 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 
 ## ⚙️ 配置文件
 
-三个本地配置文件均已加入 `.gitignore`，共享模板为对应的 `config/*.example.json`。修改后在设置页点「重新读取配置」（或重载扩展）生效。
+四个本地配置文件均已加入 `.gitignore`，共享模板为对应的 `config/*.example.json`。修改后在设置页点「重新读取配置」（或重载扩展）生效。
+
+可以取消全部订阅；保存前会确认对应历史数据的清理。同步服务读取订阅文件失败时保留已有 CSV 和共享快照，修正文件后重新推送即可恢复同步。
 
 ### `config/tag.json` — 订阅什么
 
@@ -194,9 +196,11 @@ server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 
 ## 🔒 数据与隐私
 
-- 所有抓取数据存在本机：`chrome.storage.local`（扩展内）与 `db/`（CSV/JSON，若启用同步服务），无任何远端上报
-- 扩展主动发起的站外请求只有三类：抓取你订阅的站点、调用你配置的翻译接口、检查更新（读 GitHub 仓库 master 的 `manifest.json`）
-- 三个本地配置（含翻译密钥）均被 `.gitignore` 排除，不会随仓库分发
+- 抓取数据保存在本机：`chrome.storage.local`（扩展内）与 `db/`（CSV/JSON，若启用同步服务）。启用局域网共享时，同网设备可以只读浏览。
+- 站外请求包括抓取订阅站点、调用配置的翻译接口、检查更新，以及用户点击按钮时推送卡片至配置的飞书 webhook。
+- 四个本地配置（含翻译密钥和 webhook）均被 `.gitignore` 排除，不会随仓库分发。
+- 同步服务写接口仅接受回环连接，并拒绝普通网页来源；JSON 接口校验请求类型，管理脚本仍可本机调用。内容脚本仅注入支持的平台域名。
+- CSV 对公式起始文本添加文本前缀；原始 JSON 备份保持原文。导入跳过字段类型、日期或链接无效的记录；条件清理会验证预览范围，范围变化时需重新预览。
 
 ## 📁 项目结构
 
@@ -207,9 +211,9 @@ ShortScraping/
 ├── README.md / LICENSE / .gitignore / .gitattributes
 ├── src/
 │   ├── background/background.js  # 后台 service worker：调度、抓取/翻译编排、CSV 推送
-│   ├── content/                  # 内容脚本：六站点抓取适配器（content.js + content.css）
+│   ├── content/                  # 内容脚本：七站点抓取适配器（content.js + content.css）
 │   ├── popup/                    # 扩展弹窗（popup.html/css/js）
-│   ├── settings/                 # 设置中心：配置文件/网页订阅/定时任务/翻译接口/数据存档
+│   ├── settings/                 # 设置中心：配置文件/网页订阅/定时任务/翻译接口/Lark 推送/数据存档
 │   └── shared/                   # 共享模块：translator.js（翻译）、timeline-render.js（时间线渲染，弹窗与共享页共用）、qrcode.js（二维码）
 ├── assets/icons/                 # 扩展图标、站点图标与默认海报
 ├── config/                       # 本地配置（gitignore）与 example 模板
@@ -217,6 +221,7 @@ ShortScraping/
 │   ├── sync-server.js            # CSV 写入 + 配置写回 + 局域网只读共享（SSE）
 │   ├── public/                   # 局域网共享页（share.html/css/js）
 │   └── tools/                    # 管理脚本：stop-sync/restart-sync/fix-csv-encoding（.bat + .command）、Node 助手 stop.js/fix-csv-encoding.js、remove-launcher.bat、launcher.vbs
+├── tests/                       # 隔离回归测试与夹具（npm test）
 ├── db/timeline.csv               # CSV 输出（运行时生成）
 └── db/timeline.json              # 时间线快照（共享页数据源，服务重启后回读）
 ```
@@ -226,6 +231,12 @@ ShortScraping/
 - Chrome Extension Manifest V3，原生 JavaScript（无框架依赖）
 - Chrome Storage / Alarms / Notifications API
 - Node.js 本地同步服务（无第三方依赖；CSV 写入 + 局域网只读共享页 + SSE 实时推送）
+
+## 验证与升级
+
+使用 Node.js 22 或更新版本运行 `npm test`，无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+
+更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本域名清单，测试会检查两者一致。
 
 ## 📄 License
 

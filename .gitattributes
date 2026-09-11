@@ -1,3 +1,6 @@
 # 保证跨平台 shell 脚本使用 LF 换行，避免 Windows 提交后在 macOS 因 CRLF 无法执行
 *.command text eol=lf
 *.sh      text eol=lf
+
+# 黄金 CSV 必须保留 BOM 和 CRLF，跨平台 checkout 不得改写字节。
+/tests/timeline-csv-golden.csv -text

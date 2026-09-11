@@ -183,14 +183,14 @@
     card.dataset.id = drama.id;
 
     // 标题：中文（英文）或 英文；trim 防止仅含空白的字段渲染出空行
-    const titleZh = (drama.titleZh || '').trim();
+    const titleZh = String(drama.titleZh || '').trim();
     const titleDisplay = titleZh
       ? `${titleZh}（${drama.title}）`
       : drama.title;
 
     // 简介
-    const descZh = (drama.descriptionZh || '').trim();
-    const descEn = (drama.description || '').trim();
+    const descZh = String(drama.descriptionZh || '').trim();
+    const descEn = String(drama.description || '').trim();
 
     // footer 右槽：内容类型标签 chips（v1.5.3 替换原制作公司/作者标签展示；
     // company 字段数据保留，存储/CSV/Lark 不受影响，仅卡片不再显示）

@@ -35,6 +35,7 @@ config/lark.json
 
 # Local-only dev docs (kept on disk, not published)
 CLAUDE.md
+AGENTS.md
 docs/
 worklog/
 /genres-inventory-*.md

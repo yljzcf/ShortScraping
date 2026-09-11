@@ -34,7 +34,9 @@
 
   function csvEscape(value) {
     if (value === null || value === undefined) return '';
-    const text = Array.isArray(value) ? value.join('|') : String(value);
+    let text = Array.isArray(value) ? value.join('|') : String(value);
+    // CSV 引号只隔离列，不阻止表格公式；为不可信文本添加文本前缀。
+    if (/^\s*[=+\-@＝＋－＠]|^[\t\r\n]/u.test(text)) text = `'${text}`;
     return `"${text.replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
   }
 
@@ -58,6 +60,38 @@
       translatedAt: drama.translatedAt || '',
       genres: Array.isArray(drama.genres) ? drama.genres : []
     };
+  }
+
+  /** 导入入口严格校验；CSV 的字段投影不承担数据有效性判断。 */
+  function validateImportDrama(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const input = { ...raw };
+    for (const key of ['id', 'itemId', 'imdbId']) {
+      if (typeof input[key] === 'number' && Number.isSafeInteger(input[key]) && input[key] > 0) input[key] = String(input[key]);
+    }
+    for (const key of CSV_COLUMNS.filter(key => key !== 'tags' && key !== 'genres').concat('imdbId')) {
+      if (input[key] != null && typeof input[key] !== 'string') return null;
+    }
+    for (const key of ['tags', 'genres']) {
+      if (input[key] != null && (!Array.isArray(input[key]) || input[key].some(v => typeof v !== 'string'))) return null;
+    }
+    const result = normalizeDrama(input);
+    result.itemId = result.itemId.trim();
+    if (!result.itemId) return null;
+    for (const key of ['scrapedAt', 'translatedAt']) {
+      if (result[key]) {
+        const ms = Date.parse(result[key]);
+        if (!Number.isFinite(ms)) return null;
+        result[key] = new Date(ms).toISOString();
+      }
+    }
+    for (const key of ['url', 'sourceListUrl', 'poster']) {
+      if (result[key]) {
+        try { if (!['http:', 'https:'].includes(new URL(result[key]).protocol)) return null; }
+        catch (_) { return null; }
+      }
+    }
+    return result;
   }
 
   function serializeTimelineCsv(rows) {
@@ -85,7 +119,7 @@
     return { content: serializeTimelineCsv(rows), count: rows.length };
   }
 
-  const api = { CSV_COLUMNS, csvEscape, normalizeDrama, buildTimelineCsv };
+  const api = { CSV_COLUMNS, csvEscape, normalizeDrama, validateImportDrama, buildTimelineCsv };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;

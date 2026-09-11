@@ -4,9 +4,6 @@
  */
 
 globalThis.Translator = (() => {
-  // 默认翻译 API
-  const DEFAULT_API = 'https://api.mymemory.translated.net/get';
-
   // 批量翻译的输入/输出契约（由代码固定，拼在用户风格提示词之后）。
   // 对应关系的命根子：要求模型按输入 id 一一回填，绝不靠返回顺序。
   const BATCH_CONTRACT =
@@ -31,17 +28,8 @@ globalThis.Translator = (() => {
    * 统一新旧配置字段，避免 settings.js 与 translator.js 字段名不一致
    */
   function normalizeConfig(rawConfig) {
-    return {
-      mode: rawConfig.translateMode || rawConfig.mode || 'api',
-      apiEndpoint: rawConfig.apiEndpoint || DEFAULT_API,
-      aiEndpoint: rawConfig.aiEndpoint || '',
-      aiApiKey: rawConfig.aiApiKey || '',
-      aiModel: rawConfig.aiModel || 'gpt-3.5-turbo',
-      aiPrefixPrompt: rawConfig.aiPrefixPrompt || '你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请把片名和内容简介翻译为最有网感的中文表达。',
-      batchSize: Number(rawConfig.batchSize) || 10,
-      delayMs: Number(rawConfig.delayMs) || 200,
-      requestTimeoutSec: Number(rawConfig.requestTimeoutSec) || 10
-    };
+    const config = TranslateConfig.normalizeConfig(rawConfig);
+    return { ...config, mode: config.translateMode };
   }
 
   /**

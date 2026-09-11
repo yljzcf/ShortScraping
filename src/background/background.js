@@ -7,21 +7,12 @@ importScripts('../shared/url-match.js');
 importScripts('../shared/site-registry.js'); // 须先于 lark.js（其 SOURCE_NAMES 取自本模块）
 importScripts('../shared/timeline-csv.js');
 importScripts('../shared/schedule-config.js'); // cron 解析/校验/默认值单一真源
+importScripts('../shared/translate-config.js');
 importScripts('../shared/translator.js');
 importScripts('../shared/lark.js');
 
 // 翻译接口默认配置。实际配置来自 config/trans.json。
-const DEFAULT_TRANSLATE_CONFIG = {
-  translateMode: 'api',
-  apiEndpoint: 'https://api.mymemory.translated.net/get',
-  aiEndpoint: '',
-  aiApiKey: '',
-  aiModel: 'gpt-3.5-turbo',
-  aiPrefixPrompt: '你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请把片名和内容简介翻译为最有网感的中文表达。',
-  batchSize: 10,
-  delayMs: 200,
-  requestTimeoutSec: 10
-};
+const DEFAULT_TRANSLATE_CONFIG = TranslateConfig.DEFAULT_CONFIG;
 
 // 运行状态。抓取走串行队列：手动单站刷新与定时全量并发触发时排队执行，
 // 避免双开同一 URL 的标签页；activeScrapeCount 覆盖「排队+运行中」的整个
@@ -212,7 +203,7 @@ async function loadConfigFromJsonFiles() {
   ]);
 
   const scheduleConfig = ScheduleConfig.normalizeConfig(scheduleConfigRaw);
-  const translateConfig = { ...DEFAULT_TRANSLATE_CONFIG, ...translateConfigRaw };
+  const translateConfig = TranslateConfig.normalizeConfig(translateConfigRaw);
   const larkConfig = Lark.normalizeConfig(larkConfigRaw);
 
   // tag.json 读取失败（fetch 异常 / JSON 损坏 / 结构不是数组）≠ 用户清空订阅：
@@ -268,9 +259,7 @@ function normalizeUrlTags(rawTags) {
 /**
  * 设置定时任务
  */
-async function setupAlarms(options = {}) {
-  const { force = false } = options;
-
+async function setupAlarms() {
   // 看门狗最先安装：即使后面的任务配置损坏，自愈通道也必须先就位。
   await ensureAlarm(WATCHDOG_ALARM_NAME, { periodInMinutes: WATCHDOG_INTERVAL_MINUTES });
 
@@ -281,7 +270,7 @@ async function setupAlarms(options = {}) {
   // 逐任务独立安装：单个任务失败不连累其余任务
   for (const name of Object.keys(SCHEDULE_TASKS)) {
     try {
-      await setupTaskAlarm(name, config, scheduleMode, force);
+      await setupTaskAlarm(name, config, scheduleMode);
     } catch (e) {
       console.error(`[ShortScraping] ${name} 定时任务安装失败:`, e?.message || e);
     }
@@ -294,7 +283,7 @@ async function setupAlarms(options = {}) {
   }
 }
 
-async function setupTaskAlarm(name, config, scheduleMode, force = false) {
+async function setupTaskAlarm(name, config, scheduleMode) {
   const task = SCHEDULE_TASKS[name];
   if (!task) return;
 
@@ -304,7 +293,8 @@ async function setupTaskAlarm(name, config, scheduleMode, force = false) {
       const nextRunAt = ScheduleConfig.getNextCronRun(cronExpression);
       const nextRunLabel = new Date(nextRunAt).toLocaleString('zh-CN');
 
-      await ensureCronAlarm(name, cronExpression, nextRunAt, force);
+      // cron 任务是一次性 alarm；形状与时间的比较统一收在 isSameAlarm 里
+      await ensureAlarm(name, { when: nextRunAt });
 
       console.log(`[ShortScraping] ${task.label} Cron 下一次执行: ${nextRunLabel} (${cronExpression})`);
       return;
@@ -317,13 +307,18 @@ async function setupTaskAlarm(name, config, scheduleMode, force = false) {
   const intervalHours = Number(config[task.intervalKey]) || ScheduleConfig.DEFAULT_CONFIG[task.intervalKey];
   await ensureAlarm(name, {
     periodInMinutes: intervalHours * 60
-  }, force);
+  });
 }
 
-async function ensureAlarm(name, alarmInfo, force = false) {
+/**
+ * alarm 安装的唯一入口：与目标计划一致就原样保留，否则清掉重建。
+ * 没有 force 旁路——强制重建会把周期任务的下一次执行重新推到「此刻 + 整个周期」，
+ * 用户每保存一次设置就饿死一轮抓取（2026-09-05 审查里的看门狗 P1 即此机制）。
+ */
+async function ensureAlarm(name, alarmInfo) {
   const existing = await chrome.alarms.get(name);
 
-  if (!force && existing && isSameAlarm(existing, alarmInfo)) {
+  if (existing && isSameAlarm(existing, alarmInfo)) {
     return;
   }
 
@@ -331,31 +326,17 @@ async function ensureAlarm(name, alarmInfo, force = false) {
   chrome.alarms.create(name, alarmInfo);
 }
 
-async function ensureCronAlarm(name, cronExpression, nextRunAt, force = false) {
-  const existing = await chrome.alarms.get(name);
-
-  if (!force && existing && isFutureCronRunStillValid(existing.scheduledTime, cronExpression)) {
-    return;
-  }
-
-  await chrome.alarms.clear(name);
-  chrome.alarms.create(name, { when: nextRunAt });
-}
-
-function isFutureCronRunStillValid(scheduledTime, cronExpression) {
-  if (typeof scheduledTime !== 'number' || scheduledTime <= Date.now()) {
-    return false;
-  }
-
-  return ScheduleConfig.matchesCron(new Date(scheduledTime), ScheduleConfig.parseSimpleCron(cronExpression));
-}
-
 function isSameAlarm(existing, alarmInfo) {
   if (typeof alarmInfo.periodInMinutes === 'number') {
+    // 一次性 alarm 的 periodInMinutes 缺席（|| 0），与任何正周期都不相等 → 重建
     return Math.abs((existing.periodInMinutes || 0) - alarmInfo.periodInMinutes) < 0.001;
   }
 
   if (typeof alarmInfo.when === 'number') {
+    // 形状必须先一致：周期 alarm 的 scheduledTime 偶然落在 cron 槽位上时，
+    // 若把它当成合法的一次性 cron alarm 留下，中间所有 cron 槽位都会被跳过
+    // （interval→cron 切换走非 force 路径时必现，'*/10 * * * *' 命中率 6/60）。
+    if (typeof existing.periodInMinutes === 'number') return false;
     // Chrome 保存的 scheduledTime 与计算值可能有毫秒级差异，1 秒以内视为同一个计划。
     return Math.abs((existing.scheduledTime || 0) - alarmInfo.when) < 1000;
   }
@@ -369,7 +350,7 @@ async function rescheduleCronTask(name) {
 
   if (config.scheduleMode !== 'cron') return;
 
-  await setupTaskAlarm(name, config, 'cron', true);
+  await setupTaskAlarm(name, config, 'cron');
 }
 
 /**
@@ -379,8 +360,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   console.log(`[ShortScraping] 闹钟触发: ${alarm.name}`);
 
   if (alarm.name === WATCHDOG_ALARM_NAME) {
-    // 看门狗：SW 被唤醒后强制重建所有 cron alarm，修复 SW 意外退出导致续排丢失的问题。
-    await setupAlarms({ force: true }).catch(e =>
+    // 补回缺失/过期/形状不符的 alarm，保留健康任务的原定执行时间，避免间隔任务被推迟。
+    await setupAlarms().catch(e =>
       console.error('[ShortScraping] 看门狗重建定时任务失败:', e?.message || e));
     return;
   }
@@ -449,7 +430,7 @@ async function performScrapeOnce({ site = null } = {}) {
       try {
         const response = await scrapeUrlInTab(url);
         if (response?.success) {
-          const newCount = (response.data || []).filter(d => d.status === 'new').length;
+          const newCount = (response.data || []).length;
           totalNewCount += newCount;
           results.push({ url, success: true, newCount });
           console.log(`[ShortScraping] 抓取完成: ${url}，新增 ${newCount} 部`);
@@ -804,7 +785,7 @@ async function performTranslateOnce(source) {
   try {
     const { translateConfig, urlTags = [] } = await chrome.storage.local.get(['translateConfig', 'urlTags']);
     const dramas = await getDramasSnapshot(); // 翻译线每轮扫描，缓存命中零全表读
-    const config = { ...DEFAULT_TRANSLATE_CONFIG, ...translateConfig };
+    const config = TranslateConfig.normalizeConfig(translateConfig);
     const configuredDramas = filterDramasByConfiguredUrls(dramas, urlTags);
     const newDramas = configuredDramas.filter(d => d.status === 'new');
     pendingCount = newDramas.length;
@@ -1040,8 +1021,9 @@ function importDramaRecords(rawDramas) {
     let duplicates = 0;
 
     for (const raw of rawDramas) {
-      const normalized = TimelineCsv.normalizeDrama(raw || {});
-      if (!normalized.itemId) { invalid++; continue; }
+      const normalized = TimelineCsv.validateImportDrama(raw);
+      if (!normalized || (normalized.source && !SiteRegistry.CATEGORY_SOURCES.includes(normalized.source))) { invalid++; continue; }
+      normalized.source ||= 'imdb';
       if (!UrlMatch.isUrlCovered(normalized.sourceListUrl, configuredSet)) { outOfScope++; continue; }
       if (seenItemIds.has(normalized.itemId)) { duplicates++; continue; } // 含备份文件内自重
 
@@ -1051,7 +1033,9 @@ function importDramaRecords(rawDramas) {
       }
       // id 缺失或与现表撞车时改写（id 是卡片操作句柄，不能重复）
       if (!normalized.id || seenIds.has(normalized.id)) {
-        normalized.id = `import_${normalized.itemId}`;
+        const baseId = `import_${normalized.itemId}`;
+        normalized.id = baseId;
+        for (let suffix = 1; seenIds.has(normalized.id); suffix++) normalized.id = `${baseId}_${suffix}`;
       }
       seenItemIds.add(normalized.itemId);
       seenIds.add(normalized.id);
@@ -1074,10 +1058,10 @@ function importDramaRecords(rawDramas) {
 
 /**
  * 数据存档·按条件清理（设置页 pruneDramas 消息）：站点多选 + 可选「早于某时刻」。
- * dryRun（预览命中数）与真删共用同一谓词且都进队列——保证预览数＝实删数。
+ * dryRun 与真删共用谓词并进入队列，预览令牌绑定条件及命中集合；范围变化拒绝删除。
  * 无 scrapedAt 的条目在带日期条件时保守不命中（只按站点清理时照常命中）。
  */
-function pruneDramaRecords({ sites, beforeIso, dryRun = false } = {}) {
+function pruneDramaRecords({ sites, beforeIso, dryRun = false, previewToken } = {}) {
   if (!Array.isArray(sites) || sites.length === 0) {
     return Promise.reject(new Error('未指定要清理的站点'));
   }
@@ -1103,22 +1087,29 @@ function pruneDramaRecords({ sites, beforeIso, dryRun = false } = {}) {
     const perSite = {};
     let matched = 0;
     const kept = [];
+    const matchedKeys = [];
 
     for (const drama of dramas) {
       if (matches(drama)) {
         matched++;
+        matchedKeys.push(JSON.stringify([drama.id, drama.itemId, drama.source, drama.scrapedAt]));
         perSite[drama.source] = (perSite[drama.source] || 0) + 1;
       } else {
         kept.push(drama);
       }
     }
 
+    // 无服务端临时状态：绑定条件与命中集合，SW 重启仍可验证；同数量换卡也会失效。
+    const signature = JSON.stringify([[...siteSet].sort(), beforeMs, matchedKeys.sort()]);
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(signature));
+    const currentToken = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+    if (!dryRun && previewToken !== currentToken) throw new Error('清理范围已变化或尚未预览，请重新预览后确认');
     if (!dryRun && matched > 0) {
       await writeDramasInQueue(kept); // 删除经 onChanged 自动触发 CSV 同步
     }
 
     return dryRun
-      ? { matched, perSite, total: dramas.length }
+      ? { matched, perSite, total: dramas.length, previewToken: currentToken }
       : { removed: matched, perSite, total: kept.length };
   });
 }
@@ -1363,7 +1354,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'updateAlarms') {
-    setupAlarms({ force: Boolean(request.force) }).then(() => {
+    setupAlarms().then(() => {
       sendResponse({ success: true });
     }).catch((error) => {
       sendResponse({ success: false, error: error.message });

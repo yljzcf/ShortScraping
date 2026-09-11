@@ -22,17 +22,7 @@
     icon: `assets/icons/site-${site}.png`
   }));
 
-  const DEFAULT_TRANSLATE_CONFIG = {
-    translateMode: 'api',
-    apiEndpoint: 'https://api.mymemory.translated.net/get',
-    aiEndpoint: '',
-    aiApiKey: '',
-    aiModel: 'gpt-3.5-turbo',
-    aiPrefixPrompt: '你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请把片名和内容简介翻译为最有网感的中文表达。',
-    batchSize: 10,
-    delayMs: 200,
-    requestTimeoutSec: 10
-  };
+  const DEFAULT_TRANSLATE_CONFIG = TranslateConfig.DEFAULT_CONFIG;
 
   const state = {
     urlTags: [],
@@ -333,7 +323,7 @@
       larkConfig: state.larkConfig
     });
 
-    const response = await chrome.runtime.sendMessage({ action: 'updateAlarms', force: true });
+    const response = await chrome.runtime.sendMessage({ action: 'updateAlarms' });
     if (!response?.success) {
       throw new Error(response?.error || '定时任务更新失败');
     }
@@ -470,7 +460,7 @@
     // 新配置已落库，下次 SW 唤醒的顶层 setupAlarms 会自愈
     let alarmNote = '';
     try {
-      const response = await chrome.runtime.sendMessage({ action: 'updateAlarms', force: true });
+      const response = await chrome.runtime.sendMessage({ action: 'updateAlarms' });
       if (!response?.success) throw new Error(response?.error || '后台无响应');
     } catch (e) {
       alarmNote = `（定时任务即时重排失败：${e.message}，扩展下次唤醒会自动生效）`;
@@ -516,7 +506,7 @@
       renderScheduleForm();
       renderConfigSummary();
       // 重载的配置同样要让 alarm 立即生效（镜像 reloadTranslateFromFile 多这一步）
-      await chrome.runtime.sendMessage({ action: 'updateAlarms', force: true }).catch(() => {});
+      await chrome.runtime.sendMessage({ action: 'updateAlarms' }).catch(() => {});
       showStatus(`已从 config/cron.json 读取定时任务配置：${getScheduleText(scheduleConfig)}`, true);
     } catch (e) {
       console.error('[ShortScraping] 读取定时任务配置失败:', e);
@@ -732,8 +722,18 @@
   async function saveSubscriptions() {
     try {
       const normalized = normalizeUrlTags(readSubscriptionsFromDom());
-      if (normalized.length === 0) {
-        throw new Error('至少需要勾选 1 条订阅');
+      const clearingAll = normalized.length === 0 && state.urlTags.length > 0;
+      if (clearingAll &&
+          !window.confirm('取消全部订阅将清理对应的历史记录，并同步清空 CSV 和共享页。是否继续？')) return;
+
+      // 取消全部订阅必须「文件优先」：写 storage 会经 onChanged 立刻让后台清空整库，
+      // 而 config/tag.json 没落盘时下次 SW 唤醒又按旧文件复活订阅——用户得到的是
+      // 「历史没了、订阅回来了」。文件写成功才动 storage；其余增减仍是 storage 优先
+      // （写文件失败最多下次唤醒回滚到旧订阅，不会删历史）。
+      const preflight = clearingAll ? await trySyncTagConfig(normalized) : null;
+      if (preflight && !preflight.ok) {
+        showStatus(`未取消订阅：写回 config/tag.json 失败（${preflight.error}）——同步服务未启动时若只改扩展本地配置，历史会被清空、而订阅会在扩展下次唤醒时从文件回读恢复`, false);
+        return;
       }
 
       state.urlTags = normalized;
@@ -741,11 +741,11 @@
       renderSubscriptions();
       renderConfigSummary();
 
-      const syncResult = await trySyncTagConfig(state.urlTags);
+      const syncResult = preflight || await trySyncTagConfig(state.urlTags);
       if (syncResult.ok) {
         showStatus(`已保存 ${state.urlTags.length} 条网页订阅，并写回 config/tag.json`, true);
       } else {
-        showStatus(`已保存到扩展本地配置；写回 config/tag.json 失败：${syncResult.error}`, false);
+        showStatus(`已保存到扩展本地配置；写回 config/tag.json 失败：${syncResult.error}——注意：同步服务未启动时，扩展下次唤醒会回读文件中的旧订阅`, false);
       }
     } catch (e) {
       console.error('[ShortScraping] 保存网页订阅失败:', e);
@@ -1024,19 +1024,30 @@
     return { sites, beforeIso };
   }
 
+  let pruneRequestVersion = 0;
+  let prunePreviewToken = null;
+
   function resetPruneConfirm() {
+    pruneRequestVersion++;
+    prunePreviewToken = null;
     elements.archive.pruneConfirm.disabled = true;
     elements.archive.pruneConfirm.textContent = '确认删除';
     elements.archive.pruneResult.textContent = '';
   }
 
   async function handlePrunePreview() {
+    resetPruneConfirm();
+    const requestVersion = pruneRequestVersion;
     const { sites, beforeIso } = readPruneCriteria();
     if (sites.length === 0) {
       showStatus('请先勾选要清理的站点', false);
       return;
     }
-    const resp = await chrome.runtime.sendMessage({ action: 'pruneDramas', sites, beforeIso, dryRun: true });
+    let resp;
+    try {
+      resp = await chrome.runtime.sendMessage({ action: 'pruneDramas', sites, beforeIso, dryRun: true });
+    } catch (e) { resp = { success: false, error: e.message }; }
+    if (requestVersion !== pruneRequestVersion) return;
     if (!resp?.success) {
       showStatus(`预览失败：${resp?.error || '后台无响应'}`, false);
       return;
@@ -1046,14 +1057,20 @@
       .join('、');
     elements.archive.pruneResult.textContent =
       `命中 ${resp.matched} 条（库内共 ${resp.total} 条）${perSite ? `：${perSite}` : ''}`;
-    elements.archive.pruneConfirm.disabled = resp.matched === 0;
+    prunePreviewToken = resp.previewToken;
+    elements.archive.pruneConfirm.disabled = resp.matched === 0 || !prunePreviewToken;
     elements.archive.pruneConfirm.textContent = resp.matched > 0 ? `确认删除 ${resp.matched} 条` : '确认删除';
   }
 
   async function handlePruneConfirm() {
     const { sites, beforeIso } = readPruneCriteria();
-    if (sites.length === 0) return;
-    const resp = await chrome.runtime.sendMessage({ action: 'pruneDramas', sites, beforeIso });
+    if (sites.length === 0 || !prunePreviewToken) return;
+    const previewToken = prunePreviewToken;
+    resetPruneConfirm();
+    let resp;
+    try {
+      resp = await chrome.runtime.sendMessage({ action: 'pruneDramas', sites, beforeIso, previewToken });
+    } catch (e) { resp = { success: false, error: e.message }; }
     if (!resp?.success) {
       showStatus(`清理失败：${resp?.error || '后台无响应'}`, false);
       return;
@@ -1129,20 +1146,7 @@
   }
 
   function normalizeTranslateConfig(rawConfig) {
-    const config = { ...DEFAULT_TRANSLATE_CONFIG, ...(rawConfig || {}) };
-    const translateMode = config.translateMode === 'ai' ? 'ai' : 'api';
-
-    return {
-      translateMode,
-      apiEndpoint: String(config.apiEndpoint || DEFAULT_TRANSLATE_CONFIG.apiEndpoint).trim(),
-      aiEndpoint: String(config.aiEndpoint || '').trim(),
-      aiApiKey: String(config.aiApiKey || '').trim(),
-      aiModel: String(config.aiModel || DEFAULT_TRANSLATE_CONFIG.aiModel).trim(),
-      aiPrefixPrompt: String(config.aiPrefixPrompt || DEFAULT_TRANSLATE_CONFIG.aiPrefixPrompt).trim(),
-      batchSize: toPositiveInteger(config.batchSize, DEFAULT_TRANSLATE_CONFIG.batchSize),
-      delayMs: toNonNegativeInteger(config.delayMs, DEFAULT_TRANSLATE_CONFIG.delayMs),
-      requestTimeoutSec: toPositiveInteger(config.requestTimeoutSec, DEFAULT_TRANSLATE_CONFIG.requestTimeoutSec)
-    };
+    return TranslateConfig.normalizeConfig(rawConfig);
   }
 
   function parseTags(value) {
@@ -1160,16 +1164,6 @@
   function toPositiveNumber(value, fallback) {
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? number : fallback;
-  }
-
-  function toPositiveInteger(value, fallback) {
-    const number = Number(value);
-    return Number.isInteger(number) && number > 0 ? number : fallback;
-  }
-
-  function toNonNegativeInteger(value, fallback) {
-    const number = Number(value);
-    return Number.isInteger(number) && number >= 0 ? number : fallback;
   }
 
   function getScheduleText(config) {

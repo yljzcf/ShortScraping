@@ -21,6 +21,7 @@ const UrlMatch = require('../src/shared/url-match.js');
 const Lark = require('../src/shared/lark.js');
 const TimelineCsv = require('../src/shared/timeline-csv.js');
 const ScheduleConfig = require('../src/shared/schedule-config.js');
+const TranslateConfig = require('../src/shared/translate-config.js');
 
 const PORT = Number(process.env.PORT) || 31919;
 const LOCAL_ONLY = process.argv.includes('--local-only');
@@ -50,16 +51,24 @@ function ensureDb() {
   }
 }
 
+// 原子落盘单一真源：先写同目录 .tmp 再 rename，进程中断不会留下半截文件。
+// CSV、局域网快照与四个配置文件共用，改写入策略（重试、fsync、临时名）只改这里。
+function writeFileAtomic(filePath, content) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.tmp`;
+  fs.writeFileSync(tmpPath, content, 'utf8');
+  fs.renameSync(tmpPath, filePath);
+}
+
+function writeJsonAtomic(filePath, value) {
+  writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
 // CSV 列序/转义/去重/normalizeDrama 单一真源在 src/shared/timeline-csv.js
 // （与设置页「导出 CSV」共用）；本函数只负责落盘
 function writeTimelineCsv(dramas) {
-  ensureDb();
-
   const { content, count } = TimelineCsv.buildTimelineCsv(dramas);
-  // 与 saveSnapshot 同款 tmp+rename 原子写：进程中断不再留下半截 CSV
-  const tmpPath = `${CSV_PATH}.tmp`;
-  fs.writeFileSync(tmpPath, content, 'utf8');
-  fs.renameSync(tmpPath, CSV_PATH);
+  writeFileAtomic(CSV_PATH, content);
   return count;
 }
 
@@ -68,6 +77,7 @@ function normalizeTagConfig(rawTags) {
 
   const seen = new Set();
   return rawTags
+    .map(item => (item && typeof item === 'object' && !Array.isArray(item) ? item : {}))
     .map(item => ({
       url: String(item.url || item.urlPattern || '').trim(),
       tags: Array.isArray(item.tags)
@@ -82,57 +92,31 @@ function normalizeTagConfig(rawTags) {
     });
 }
 
-function writeTagConfig(rawTags) {
+/** 写入前的强校验：设置页只会发合法条目，坏数据一律拒绝落盘（绝不静默收窄）。 */
+function assertTagConfig(rawTags) {
+  if (!Array.isArray(rawTags)) throw new Error('网页订阅必须是数组');
   const tags = normalizeTagConfig(rawTags);
-  if (tags.length === 0) {
-    throw new Error('没有可写入的有效网页订阅');
-  }
+  if (tags.length !== rawTags.length) throw new Error('网页订阅包含无效或重复条目');
+  return tags;
+}
 
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(TAG_CONFIG_PATH, `${JSON.stringify(tags, null, 2)}\n`, 'utf8');
+function writeTagConfig(rawTags) {
+  const tags = assertTagConfig(rawTags);
+  writeJsonAtomic(TAG_CONFIG_PATH, tags);
   return tags.length;
 }
 
-function normalizeTransConfig(rawConfig) {
-  const config = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
-  const translateMode = config.translateMode === 'ai' ? 'ai' : 'api';
-
-  return {
-    translateMode,
-    apiEndpoint: String(config.apiEndpoint || 'https://api.mymemory.translated.net/get').trim(),
-    aiEndpoint: String(config.aiEndpoint || '').trim(),
-    aiApiKey: String(config.aiApiKey || '').trim(),
-    aiModel: String(config.aiModel || 'gpt-3.5-turbo').trim(),
-    aiPrefixPrompt: String(config.aiPrefixPrompt || '').trim(),
-    batchSize: toPositiveInteger(config.batchSize, 10),
-    delayMs: toNonNegativeInteger(config.delayMs, 200),
-    requestTimeoutSec: toPositiveInteger(config.requestTimeoutSec, 10)
-  };
-}
-
-function toPositiveInteger(value, fallback) {
-  const number = Number(value);
-  return Number.isInteger(number) && number > 0 ? number : fallback;
-}
-
-function toNonNegativeInteger(value, fallback) {
-  const number = Number(value);
-  return Number.isInteger(number) && number >= 0 ? number : fallback;
-}
-
 function writeTransConfig(rawConfig) {
-  const config = normalizeTransConfig(rawConfig);
+  const config = TranslateConfig.normalizeConfig(rawConfig);
 
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(TRANS_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  writeJsonAtomic(TRANS_CONFIG_PATH, config);
   return config;
 }
 
 function writeLarkConfig(rawConfig) {
   const config = Lark.normalizeConfig(rawConfig);
 
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(LARK_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  writeJsonAtomic(LARK_CONFIG_PATH, config);
   return config;
 }
 
@@ -145,21 +129,51 @@ function writeCronConfig(rawConfig) {
     throw new Error(`Cron 配置无效——${detail}`);
   }
 
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(CRON_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  writeJsonAtomic(CRON_CONFIG_PATH, config);
   return config;
 }
 
-function readTagConfig() {
-  if (!fs.existsSync(TAG_CONFIG_PATH)) return [];
+let missingTagConfigWarned = false;
 
+/**
+ * 读取订阅配置，三态而非二态（2026-09-11 复查）：
+ *   1) 文件不存在＝尚未在设置页保存过订阅的引导态 → 按零订阅处理、只提示一次，
+ *      不能变成每次推送都 500 的错误态（新 clone 必然没有这个 gitignored 文件）；
+ *   2) 读不动 / JSON 损坏 / 根不是数组 / 整份条目全部失效 → 抛错，由调用方拒绝
+ *      本次同步并保住已有 CSV 与共享快照——这是「坏配置不清空数据」的底线；
+ *   3) 个别条目无效或重复 → 告警后丢弃该条，与扩展端 normalizeUrlTags 口径一致，
+ *      不因一条手写错误让整份文件失效、把 /sync 变成永久 500。
+ */
+function readTagConfig() {
+  let text;
   try {
-    const raw = JSON.parse(fs.readFileSync(TAG_CONFIG_PATH, 'utf8'));
-    return normalizeTagConfig(raw);
+    text = fs.readFileSync(TAG_CONFIG_PATH, 'utf8');
   } catch (error) {
-    console.warn('[ShortScraping Sync] 读取 tag.json 失败，将跳过未匹配订阅的数据:', error.message);
+    if (error.code !== 'ENOENT') throw new Error(`读取 tag.json 失败，保留现有数据：${error.message}`);
+    if (!missingTagConfigWarned) {
+      missingTagConfigWarned = true;
+      console.warn(`[ShortScraping Sync] 未找到 ${TAG_CONFIG_PATH}，按零订阅处理；在设置页保存一次网页订阅即可生成`);
+    }
     return [];
   }
+  missingTagConfigWarned = false;
+
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`读取 tag.json 失败，保留现有数据：${error.message}`);
+  }
+  if (!Array.isArray(raw)) throw new Error('读取 tag.json 失败，保留现有数据：网页订阅必须是数组');
+
+  const tags = normalizeTagConfig(raw);
+  if (raw.length > 0 && tags.length === 0) {
+    throw new Error('读取 tag.json 失败，保留现有数据：全部订阅条目无效或重复');
+  }
+  if (tags.length !== raw.length) {
+    console.warn(`[ShortScraping Sync] tag.json 有 ${raw.length - tags.length} 条订阅无效或重复，已跳过（扩展端同样忽略它们）`);
+  }
+  return tags;
 }
 
 function filterDramasByTagConfig(dramas) {
@@ -189,10 +203,7 @@ function loadSnapshot() {
 }
 
 function saveSnapshot() {
-  ensureDb();
-  const tmpPath = `${TIMELINE_JSON_PATH}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify({ version: dataVersion, updatedAt, dramas: latestDramas }), 'utf8');
-  fs.renameSync(tmpPath, TIMELINE_JSON_PATH);
+  writeFileAtomic(TIMELINE_JSON_PATH, JSON.stringify({ version: dataVersion, updatedAt, dramas: latestDramas }));
 }
 
 function broadcastUpdate() {
@@ -283,8 +294,21 @@ function readBody(req) {
   });
 }
 
-const server = http.createServer(async (req, res) => {
-  const pathname = new URL(req.url, 'http://localhost').pathname;
+async function handleRequest(req, res) {
+  let pathname;
+  try {
+    if (!req.url.startsWith('/') || req.url.startsWith('//')) throw new Error('invalid target');
+    pathname = new URL(req.url, 'http://localhost').pathname;
+  } catch (_) {
+    return sendJson(res, 400, { ok: false, error: '无效请求路径' });
+  }
+
+  // 限定实际监听地址，拒绝任意域名（含 DNS rebinding 的 Host）。
+  const hosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`]);
+  if (!LOCAL_ONLY) for (const url of getLanUrls()) hosts.add(new URL(url).host);
+  if (!hosts.has((req.headers.host || '').toLowerCase())) {
+    return sendJson(res, 403, { ok: false, error: '不允许的主机名' });
+  }
 
   if (req.method === 'OPTIONS') {
     return sendJson(res, 200, { ok: true });
@@ -293,6 +317,18 @@ const server = http.createServer(async (req, res) => {
   // 写入接口仅限本机：局域网设备只读
   if (req.method === 'POST' && !isLocalRequest(req)) {
     return sendJson(res, 403, { ok: false, error: '写入接口仅限本机调用' });
+  }
+
+  if (req.method === 'POST') {
+    const origin = req.headers.origin;
+    // Node 管理工具不带 Origin；浏览器仅允许扩展来源，普通网页（包括共享页）只读。
+    if ((origin !== undefined && !/^chrome-extension:\/\/[a-p]{32}$/.test(origin)) ||
+        (origin === undefined && req.headers['sec-fetch-site'] !== undefined)) {
+      return sendJson(res, 403, { ok: false, error: '写入请求来源不受信任' });
+    }
+    if (pathname !== '/shutdown' && (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase() !== 'application/json') {
+      return sendJson(res, 415, { ok: false, error: '请使用 application/json' });
+    }
   }
 
   if (req.method === 'GET' && pathname === '/health') {
@@ -361,10 +397,12 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
-      const dramas = Array.isArray(payload.dramas) ? payload.dramas : [];
+      if (!payload || !Array.isArray(payload.dramas) || payload.dramas.some(d => !d || typeof d !== 'object' || Array.isArray(d))) {
+        return sendJson(res, 400, { ok: false, error: '缺少有效的 dramas 数组' });
+      }
+      const dramas = payload.dramas;
       const configured = filterDramasByTagConfig(dramas);
-      // C-6：空推送即将清空非空快照时留痕（行为不变）。分别打印原始/过滤后条数，
-      // 区分「扩展推空」与「tag.json 读取失败致全滤除」两种成因；放在写文件之前，写失败也已留痕
+      // 合法空推送或订阅已取消导致清空时留痕；配置读取失败已在过滤阶段拒绝。
       if (configured.length === 0 && latestDramas.length > 0) {
         console.warn(
           `[ShortScraping Sync] 警告：收到空时间线推送（原始 ${dramas.length} 条 / 过滤后 0 条），` +
@@ -403,7 +441,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
-      const rawTags = Array.isArray(payload.urlTags) ? payload.urlTags : [];
+      const rawTags = payload?.urlTags;
       const count = writeTagConfig(rawTags);
       return sendJson(res, 200, { ok: true, count, configPath: TAG_CONFIG_PATH });
     } catch (error) {
@@ -449,6 +487,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   sendJson(res, 404, { ok: false, error: 'Not Found' });
+}
+
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch(error => {
+    console.error('[ShortScraping Sync] 请求处理失败:', error.message);
+    if (!res.headersSent && !res.destroyed) sendJson(res, 500, { ok: false, error: '请求处理失败' });
+    else res.destroy();
+  });
 });
 
 ensureDb();
