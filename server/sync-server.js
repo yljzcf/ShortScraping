@@ -15,6 +15,7 @@
 
 const http = require('http');
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
 const os = require('os');
 const UrlMatch = require('../src/shared/url-match.js');
@@ -25,6 +26,12 @@ const TranslateConfig = require('../src/shared/translate-config.js');
 
 const PORT = Number(process.env.PORT) || 31919;
 const LOCAL_ONLY = process.argv.includes('--local-only');
+// 域名形态的 Host 默认拒绝（DNS rebinding 只能经域名发起）；确需用主机名访问
+// 共享页时显式放行：node server/sync-server.js --allow-host=mypc.local
+const ALLOWED_HOSTS = new Set(process.argv
+  .filter(arg => arg.startsWith('--allow-host='))
+  .map(arg => arg.slice('--allow-host='.length).trim().toLowerCase())
+  .filter(Boolean));
 const PROJECT_DIR = path.join(__dirname, '..');
 const DB_DIR = path.join(PROJECT_DIR, 'db');
 const CONFIG_DIR = path.join(PROJECT_DIR, 'config');
@@ -37,6 +44,7 @@ const TAG_CONFIG_PATH = path.join(CONFIG_DIR, 'tag.json');
 const TRANS_CONFIG_PATH = path.join(CONFIG_DIR, 'trans.json');
 const LARK_CONFIG_PATH = path.join(CONFIG_DIR, 'lark.json');
 const CRON_CONFIG_PATH = path.join(CONFIG_DIR, 'cron.json');
+const SYNC_ORIGIN_PATH = path.join(CONFIG_DIR, 'sync-origin.json');
 // —— 局域网共享状态：最新时间线快照（内存 + db/timeline.json 持久化） ——
 let latestDramas = [];
 let latestSerialized = '[]';
@@ -241,6 +249,66 @@ function isLocalRequest(req) {
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 }
 
+/**
+ * Host 校验按「类型」而不是枚举本机地址：DNS rebinding 的前提是攻击者控制一个
+ * 域名，IP 字面量与 localhost 不可能被 rebinding。枚举 os.networkInterfaces()
+ * 会把局域网共享页的主机名/mDNS/VPN 名/端口转发访问全部误杀（还要每请求一次系统调用），
+ * 而这些正是「同网设备只读浏览」邀请的用法。
+ */
+function isAllowedHost(hostHeader) {
+  const header = (hostHeader || '').trim().toLowerCase();
+  if (!header) return false;
+  // IPv6 字面量形如 [::1]:31919；IPv4/主机名形如 127.0.0.1:31919
+  const hostname = (header.startsWith('[') ? header.slice(0, header.indexOf(']') + 1) : header.split(':')[0])
+    .replace(/^\[|\]$/g, '');
+  if (net.isIP(hostname)) return true;
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) return true;
+  return ALLOWED_HOSTS.has(hostname) || ALLOWED_HOSTS.has(header);
+}
+
+const EXTENSION_ORIGIN_PATTERN = /^chrome-extension:\/\/[a-p]{32}$/;
+let pinnedWriteOrigin = null;
+
+function loadPinnedWriteOrigin() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(SYNC_ORIGIN_PATH, 'utf8'));
+    if (EXTENSION_ORIGIN_PATTERN.test(raw && raw.origin)) pinnedWriteOrigin = raw.origin;
+  } catch (error) {
+    // 尚未固定：等第一次扩展写入时建立
+  }
+}
+
+/**
+ * 写接口来源判定。chrome-extension:// 正则只能证明「是某个扩展」——同一 profile 下
+ * 任何持 localhost 主机权限的扩展都能冒名清空数据，因此只认「首次写入时固定下来的
+ * 那一个」。未打包扩展的 ID 由加载路径派生、每台机器不同，服务端无从预知，
+ * 故用首见即固定（config/sync-origin.json，已 gitignore）；换目录重载扩展导致
+ * ID 变化时，删掉该文件即可重新固定。Node 管理工具不带 Origin，照常放行。
+ */
+function checkWriteOrigin(req) {
+  const origin = req.headers.origin;
+  if (origin === undefined) {
+    // 浏览器发起的请求一定带 Origin 或 Sec-Fetch-*；两者皆无才视为本机 Node 工具
+    return req.headers['sec-fetch-site'] === undefined;
+  }
+  if (!EXTENSION_ORIGIN_PATTERN.test(origin)) return false;
+  if (!pinnedWriteOrigin) {
+    pinnedWriteOrigin = origin;
+    try {
+      writeJsonAtomic(SYNC_ORIGIN_PATH, { origin, pinnedAt: new Date().toISOString() });
+    } catch (error) {
+      console.warn('[ShortScraping Sync] 写入来源固定失败（本次运行内仍生效）:', error.message);
+    }
+    console.log(`[ShortScraping Sync] 已固定写入来源扩展：${origin}；换目录重载扩展后如被拒，删除 ${SYNC_ORIGIN_PATH} 重新固定`);
+    return true;
+  }
+  if (origin !== pinnedWriteOrigin) {
+    console.warn(`[ShortScraping Sync] 拒绝非固定扩展的写入请求：${origin}`);
+    return false;
+  }
+  return true;
+}
+
 // —— 静态文件（显式白名单，防路径穿越） ——
 
 const STATIC_ROUTES = {
@@ -303,10 +371,7 @@ async function handleRequest(req, res) {
     return sendJson(res, 400, { ok: false, error: '无效请求路径' });
   }
 
-  // 限定实际监听地址，拒绝任意域名（含 DNS rebinding 的 Host）。
-  const hosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`]);
-  if (!LOCAL_ONLY) for (const url of getLanUrls()) hosts.add(new URL(url).host);
-  if (!hosts.has((req.headers.host || '').toLowerCase())) {
+  if (!isAllowedHost(req.headers.host)) {
     return sendJson(res, 403, { ok: false, error: '不允许的主机名' });
   }
 
@@ -320,13 +385,12 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'POST') {
-    const origin = req.headers.origin;
-    // Node 管理工具不带 Origin；浏览器仅允许扩展来源，普通网页（包括共享页）只读。
-    if ((origin !== undefined && !/^chrome-extension:\/\/[a-p]{32}$/.test(origin)) ||
-        (origin === undefined && req.headers['sec-fetch-site'] !== undefined)) {
+    if (!checkWriteOrigin(req)) {
       return sendJson(res, 403, { ok: false, error: '写入请求来源不受信任' });
     }
-    if (pathname !== '/shutdown' && (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase() !== 'application/json') {
+    // 所有写接口都要求 application/json：非简单请求必须先过预检，
+    // 无主机权限的扩展连「发出去就生效」的副作用请求都构造不出来。
+    if ((req.headers['content-type'] || '').split(';')[0].trim().toLowerCase() !== 'application/json') {
       return sendJson(res, 415, { ok: false, error: '请使用 application/json' });
     }
   }
@@ -499,6 +563,7 @@ const server = http.createServer((req, res) => {
 
 ensureDb();
 loadSnapshot();
+loadPinnedWriteOrigin();
 
 // SSE 心跳：防止空闲长连接被中间设备掐断
 setInterval(() => {

@@ -73,12 +73,26 @@ const Config = require('../src/shared/translate-config.js');
   assert.equal((await bg.run('performScrapeOnce()')).totalNewCount, 2);
 }
 
-for (const input of ['=1+1', '+1', '-1', '@SUM(A1)', ' =1', '\t=1', '\r=1', '\n=1', '＝1']) {
+for (const input of ['=1+1', '+1', '-1', '@SUM(A1)', ' =1', '\t=1', '\r=1', '\n=1']) {
   assert.ok(Csv.csvEscape(input).startsWith('"\''), input);
+}
+// 全角符号不是任何表格软件的公式起始：合法中文文案不该被加撇号
+for (const input of ['＝1', '－1℃的恋人', 'ordinary']) {
+  assert.ok(!Csv.csvEscape(input).startsWith('"\''), input);
 }
 assert.equal(Csv.csvEscape('ordinary "text"'), '"ordinary ""text"""');
 assert.equal(Csv.validateImportDrama(card('tt1', { itemId: 123 })).itemId, '123');
 assert.equal(Csv.validateImportDrama(card('tt1', { itemId: Number.MAX_SAFE_INTEGER + 1 })), null);
+// 封面取不到绝对地址只丢字段、不丢整条记录；结构性链接仍然严格
+assert.equal(Csv.validateImportDrama(card('tt1', { poster: '/img/a.jpg' })).poster, '');
+assert.equal(Csv.validateImportDrama(card('tt1', { poster: 'data:image/gif;base64,x' })).poster, '');
+assert.equal(Csv.validateImportDrama(card('tt1', { sourceListUrl: 'javascript:alert(1)' })), null);
+// 时间戳必须带时区，否则会被按宿主时区平移后固化
+assert.equal(Csv.validateImportDrama(card('tt1', { scrapedAt: '2026/09/05' })), null);
+assert.equal(Csv.validateImportDrama(card('tt1', { scrapedAt: '2026-09-05T01:00:00' })), null);
+// tags/genres 与采集侧 cleanGenres 同口径清洗
+assert.deepEqual([...Csv.validateImportDrama(card('tt1', { genres: ['', ' Romance ', 'Romance'] })).genres], ['Romance']);
+assert.deepEqual([...Csv.validateImportDrama(card('tt1', { tags: ['', 'IMDB '] })).tags], ['IMDB']);
 assert.equal(Config.normalizeConfig({ delayMs: 0, mode: 'ai' }).delayMs, 0);
 assert.equal(Config.normalizeConfig({ mode: 'ai' }).translateMode, 'ai');
 assert.equal(Config.normalizeConfig({ requestTimeoutSec: -1 }).requestTimeoutSec, 10);

@@ -36,7 +36,9 @@
     if (value === null || value === undefined) return '';
     let text = Array.isArray(value) ? value.join('|') : String(value);
     // CSV 引号只隔离列，不阻止表格公式；为不可信文本添加文本前缀。
-    if (/^\s*[=+\-@＝＋－＠]|^[\t\r\n]/u.test(text)) text = `'${text}`;
+    // 只覆盖 OWASP 明列的 = + - @ 与前导 Tab/CR/LF：没有表格软件在导入时把全角
+    // ＝＋－＠ 当公式起始，给它们加前缀只会让以「－」「＋」开头的合法中文文案多出撇号。
+    if (/^\s*[=+\-@]|^[\t\r\n]/.test(text)) text = `'${text}`;
     return `"${text.replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
   }
 
@@ -62,6 +64,20 @@
     };
   }
 
+  const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+  function isHttpUrl(value) {
+    try {
+      return ['http:', 'https:'].includes(new URL(value).protocol);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function cleanTextList(values) {
+    return [...new Set(values.map(value => value.trim()).filter(Boolean))];
+  }
+
   /** 导入入口严格校验；CSV 的字段投影不承担数据有效性判断。 */
   function validateImportDrama(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -78,19 +94,26 @@
     const result = normalizeDrama(input);
     result.itemId = result.itemId.trim();
     if (!result.itemId) return null;
+    // 时间戳只认带时区的 ISO-8601：Date.parse 会把 '2026/09/05' 与无偏移的
+    // '2026-09-05T01:00:00' 按宿主本地时区解释再固化，同一份备份在不同时区的
+    // 机器上导入出不同时刻，卡片落到错误的日期分组
     for (const key of ['scrapedAt', 'translatedAt']) {
       if (result[key]) {
-        const ms = Date.parse(result[key]);
-        if (!Number.isFinite(ms)) return null;
-        result[key] = new Date(ms).toISOString();
+        if (!ISO_TIMESTAMP.test(result[key])) return null;
+        result[key] = new Date(result[key]).toISOString();
       }
     }
-    for (const key of ['url', 'sourceListUrl', 'poster']) {
-      if (result[key]) {
-        try { if (!['http:', 'https:'].includes(new URL(result[key]).protocol)) return null; }
-        catch (_) { return null; }
-      }
+    // 结构性链接非法即判无效；封面只丢字段不丢记录——渲染端本就有默认海报兜底
+    // （timeline-render 的 poster || defaultPoster 与 onerror 两道），为一个没取到
+    // 绝对地址的封面丢掉整条剧集数据不划算
+    for (const key of ['url', 'sourceListUrl']) {
+      if (result[key] && !isHttpUrl(result[key])) return null;
     }
+    if (result.poster && !isHttpUrl(result.poster)) result.poster = '';
+    // 与采集侧 cleanGenres 同语义（trim/去空/去重）：导入曾是唯一未清洗的写入口，
+    // 空串元素会在卡片 footer 渲染出空标签、在 CSV 里留下空的竖线分段
+    result.tags = cleanTextList(result.tags);
+    result.genres = cleanTextList(result.genres);
     return result;
   }
 

@@ -51,7 +51,9 @@ try {
   const csv = fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8');
   const snapshot = fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8');
 
-  for (const origin of ['https://audit.invalid', 'null', base, 'chrome-extension://bad']) {
+  // The first extension write pins that origin; any other extension is refused afterwards.
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, 'config/sync-origin.json'), 'utf8')).origin, extensionOrigin);
+  for (const origin of ['https://audit.invalid', 'null', base, 'chrome-extension://bad', `chrome-extension://${'b'.repeat(32)}`]) {
     for (const route of ['/config/trans', '/config/tag', '/sync', '/shutdown']) {
       assert.equal((await post(route, {}, { Origin: origin, 'Content-Type': 'text/plain' })).status, 403);
     }
@@ -73,6 +75,14 @@ try {
     req.on('error', reject); req.end();
   });
   assert.equal(hostStatus, 403);
+  // Any IP literal is accepted: LAN devices reach the share page by address, not by name.
+  const lanHostStatus = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: '/health', headers: { Host: `10.0.0.5:${port}` } }, response => {
+      response.resume(); response.on('end', () => resolve(response.statusCode));
+    });
+    req.on('error', reject); req.end();
+  });
+  assert.equal(lanHostStatus, 200);
   const invalidStatus = await new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, path: '//[', method: 'GET' }, response => {
       response.resume(); response.on('end', () => resolve(response.statusCode));

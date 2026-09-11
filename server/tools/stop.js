@@ -19,7 +19,11 @@ const REQUEST_TIMEOUT_MS = 2000;
 function request(method, requestPath) {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: HOST, port: PORT, path: requestPath, method, timeout: REQUEST_TIMEOUT_MS },
+      {
+        host: HOST, port: PORT, path: requestPath, method, timeout: REQUEST_TIMEOUT_MS,
+        // 写接口统一要求 application/json：不留「简单请求免预检」的副作用通道
+        headers: method === 'POST' ? { 'Content-Type': 'application/json' } : {}
+      },
       res => {
         let data = '';
         res.on('data', chunk => { data += chunk; });
