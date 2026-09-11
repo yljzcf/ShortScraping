@@ -20,8 +20,10 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shortscraping-c6-'));
 for (const rel of ['server', 'src/shared', 'config', 'db']) {
   fs.mkdirSync(path.join(tmpRoot, rel), { recursive: true });
 }
-for (const rel of ['server/sync-server.js', 'src/shared/url-match.js', 'src/shared/site-registry.js', 'src/shared/lark.js', 'src/shared/timeline-csv.js', 'src/shared/schedule-config.js', 'src/shared/translate-config.js']) {
-  fs.copyFileSync(path.join(worktreeRoot, rel), path.join(tmpRoot, rel));
+// 整目录复制 src/shared：新增共享模块时不必再逐个套件维护复制清单
+fs.copyFileSync(path.join(worktreeRoot, 'server/sync-server.js'), path.join(tmpRoot, 'server/sync-server.js'));
+for (const name of fs.readdirSync(path.join(worktreeRoot, 'src/shared'))) {
+  fs.copyFileSync(path.join(worktreeRoot, 'src/shared', name), path.join(tmpRoot, 'src/shared', name));
 }
 fs.writeFileSync(path.join(tmpRoot, 'config/tag.json'), JSON.stringify([{ url: SUB, tags: ['T'] }], null, 2));
 const csvPath = path.join(tmpRoot, 'db/timeline.csv');

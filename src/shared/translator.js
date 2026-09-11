@@ -19,27 +19,22 @@ globalThis.Translator = (() => {
   async function getConfig() {
     return new Promise((resolve) => {
       chrome.storage.local.get('translateConfig', (result) => {
-        resolve(normalizeConfig(result.translateConfig || {}));
+        resolve(TranslateConfig.normalizeConfig(result.translateConfig));
       });
     });
   }
 
-  /**
-   * 统一新旧配置字段，避免 settings.js 与 translator.js 字段名不一致
-   */
-  function normalizeConfig(rawConfig) {
-    const config = TranslateConfig.normalizeConfig(rawConfig);
-    return { ...config, mode: config.translateMode };
-  }
+  // 配置归一化（默认值、旧 mode 字段兼容、数值兜底）的单一真源是
+  // src/shared/translate-config.js，四端共用；这里直接用，不再留本地别名。
 
   /**
    * 翻译标题和简介（AI 模式，带前置提示词）
    */
   async function translateTitleAndDesc(title, description) {
     const config = await getConfig();
-    console.log(`[ShortScraping] 翻译模式: ${config.mode}`);
+    console.log(`[ShortScraping] 翻译模式: ${config.translateMode}`);
 
-    if (config.mode === 'ai') {
+    if (config.translateMode === 'ai') {
       return await translateWithAI(title, description, config);
     } else {
       // API 模式分别翻译
@@ -102,7 +97,7 @@ globalThis.Translator = (() => {
         }
       ];
 
-      const model = config.aiModel || 'gpt-3.5-turbo';
+      const model = config.aiModel;
       console.log(`[ShortScraping] 使用模型: ${model}`);
       console.log(`[ShortScraping] 发送消息: ${userMessage.substring(0, 100)}...`);
 
@@ -242,7 +237,7 @@ globalThis.Translator = (() => {
 
     const config = await getConfig();
 
-    if (config.mode !== 'ai') {
+    if (config.translateMode !== 'ai') {
       const results = [];
       for (const it of list) {
         try {
@@ -262,7 +257,7 @@ globalThis.Translator = (() => {
     const payload = list.map((it, i) => ({ id: i + 1, title: it.title || '', desc: it.desc || '' }));
     const userMessage = `${config.aiPrefixPrompt}${BATCH_CONTRACT}${JSON.stringify(payload)}`;
     const messages = [{ role: 'user', content: userMessage }];
-    const model = config.aiModel || 'gpt-3.5-turbo';
+    const model = config.aiModel;
 
     console.log(`[ShortScraping] 批量翻译 ${list.length} 条，模型: ${model}`);
     const startAt = performance.now();

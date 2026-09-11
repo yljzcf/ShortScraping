@@ -100,7 +100,7 @@ assert.equal(Config.normalizeConfig({ requestTimeoutSec: -1 }).requestTimeoutSec
 // The manifest deliberately limits injection but keeps user-configurable API permissions.
 const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
 const Registry = require('../src/shared/site-registry.js');
-assert.deepEqual(manifest.content_scripts[0].matches, Registry.SITES.map(s => `*://${s.match === 'exact' ? '' : '*.'}${s.host}/*`));
+assert.deepEqual(manifest.content_scripts[0].matches, Registry.contentScriptMatches());
 assert.ok(manifest.host_permissions.includes('https://*/*'));
 
 // A late preview response must not re-enable confirmation after the user changes criteria.

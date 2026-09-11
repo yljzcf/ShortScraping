@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { card, SUB } from './background-fixture.mjs';
+import { freePort } from './free-port.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'shortscraping-safety-'));
@@ -17,10 +18,7 @@ for (const file of fs.readdirSync(path.join(root, 'src/shared'))) fs.copyFileSyn
 const tagFile = path.join(directory, 'config/tag.json');
 const tags = [{ url: SUB, tags: ['IMDB'] }];
 fs.writeFileSync(tagFile, JSON.stringify(tags));
-const probe = http.createServer();
-await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
-const port = probe.address().port;
-await new Promise(resolve => probe.close(resolve));
+const port = await freePort();
 const child = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
   cwd: directory, env: { ...process.env, PORT: String(port) }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
 });

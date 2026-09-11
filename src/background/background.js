@@ -834,7 +834,7 @@ async function performTranslateOnce(source) {
       processedCount++;
     };
 
-    const mode = config.translateMode || config.mode || 'api';
+    const mode = config.translateMode;
 
     if (mode === 'ai') {
       // AI 模式：按内容长度动态打包（1–10 条/批），一次请求译多条，明显减少请求数
@@ -1008,6 +1008,17 @@ function importDramaRecords(rawDramas) {
     return Promise.reject(new Error(`条目数超出上限（${rawDramas.length} > 100000）`));
   }
 
+  // 纯校验不依赖库内数据，先做完再进写队列：上限 10 万条的类型/日期/链接检查
+  // 独占 dramas 写队列，会让同期的抓取保存与翻译回写一直排队等待
+  const candidates = [];
+  let invalid = 0;
+  for (const raw of rawDramas) {
+    const normalized = TimelineCsv.validateImportDrama(raw);
+    if (!normalized || (normalized.source && !SiteRegistry.CATEGORY_SOURCES.includes(normalized.source))) { invalid++; continue; }
+    normalized.source ||= 'imdb'; // source 字段出现前只有 IMDB，缺失即按历史归属
+    candidates.push(normalized);
+  }
+
   return enqueueDramaWrite('导入恢复', async () => {
     const existing = await getDramasInQueue();
     const { urlTags = [] } = await chrome.storage.local.get('urlTags');
@@ -1016,14 +1027,10 @@ function importDramaRecords(rawDramas) {
     const seenItemIds = new Set(existing.map(d => d.itemId));
     const seenIds = new Set(existing.map(d => d.id));
     const added = [];
-    let invalid = 0;
     let outOfScope = 0;
     let duplicates = 0;
 
-    for (const raw of rawDramas) {
-      const normalized = TimelineCsv.validateImportDrama(raw);
-      if (!normalized || (normalized.source && !SiteRegistry.CATEGORY_SOURCES.includes(normalized.source))) { invalid++; continue; }
-      normalized.source ||= 'imdb';
+    for (const normalized of candidates) {
       if (!UrlMatch.isUrlCovered(normalized.sourceListUrl, configuredSet)) { outOfScope++; continue; }
       if (seenItemIds.has(normalized.itemId)) { duplicates++; continue; } // 含备份文件内自重
 

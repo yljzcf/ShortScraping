@@ -54,7 +54,16 @@
     }
   }
 
-  const api = { SITES, CATEGORY_SOURCES, SOURCE_NAMES, hostBySource, siteOfHostname, siteOfUrl };
+  /**
+   * manifest content_scripts.matches 的推导式。注册表是站点归属的单一真源，
+   * 生成脚本（scripts/update-site-matches.mjs）与回归断言都从这里取，
+   * 避免「两处各自从注册表推一遍」导致改一处漏一处。
+   */
+  function contentScriptMatches() {
+    return SITES.map(entry => `*://${entry.match === 'exact' ? '' : '*.'}${entry.host}/*`);
+  }
+
+  const api = { SITES, CATEGORY_SOURCES, SOURCE_NAMES, hostBySource, siteOfHostname, siteOfUrl, contentScriptMatches };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;

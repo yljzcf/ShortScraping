@@ -448,7 +448,9 @@
 
       try {
         const data = await scrapePage();
-        const newCount = data.filter(d => d.status === 'new').length;
+        // scrapePage 返回的就是本轮实际入库的新卡；再按 status 过滤会把平台自带
+        // 中文（Steam/MyDrama 直接 trans）的新卡漏计，与后台通知/弹窗 toast 口径不一致
+        const newCount = data.length;
 
         btn.innerHTML = `✅ 新增 ${newCount} 部`;
         setTimeout(() => {

@@ -32,6 +32,11 @@
     'genres'
   ];
 
+  // 逐条导入时不再重建（上限 10 万条）：标量字段＝除数组列以外的全部列 + 旧 imdbId
+  const SCALAR_IMPORT_FIELDS = CSV_COLUMNS
+    .filter(key => key !== 'tags' && key !== 'genres')
+    .concat('imdbId');
+
   function csvEscape(value) {
     if (value === null || value === undefined) return '';
     let text = Array.isArray(value) ? value.join('|') : String(value);
@@ -85,7 +90,7 @@
     for (const key of ['id', 'itemId', 'imdbId']) {
       if (typeof input[key] === 'number' && Number.isSafeInteger(input[key]) && input[key] > 0) input[key] = String(input[key]);
     }
-    for (const key of CSV_COLUMNS.filter(key => key !== 'tags' && key !== 'genres').concat('imdbId')) {
+    for (const key of SCALAR_IMPORT_FIELDS) {
       if (input[key] != null && typeof input[key] !== 'string') return null;
     }
     for (const key of ['tags', 'genres']) {
