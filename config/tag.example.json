@@ -78,5 +78,29 @@
   {
     "url": "https://netshort.com/?list=exclusive_originals",
     "tags": ["NetShort", "Exclusive"]
+  },
+  {
+    "url": "https://www.netflix.com/tudum/top10",
+    "tags": ["Netflix", "Movie", "Global"]
+  },
+  {
+    "url": "https://www.netflix.com/tudum/top10/tv",
+    "tags": ["Netflix", "TV", "Global"]
+  },
+  {
+    "url": "https://www.netflix.com/tudum/top10/films-non-english",
+    "tags": ["Netflix", "Movie", "Global-nE"]
+  },
+  {
+    "url": "https://www.netflix.com/tudum/top10/tv-non-english",
+    "tags": ["Netflix", "TV", "Global-nE"]
+  },
+  {
+    "url": "https://www.netflix.com/tudum/top10/united-states/tv",
+    "tags": ["Netflix", "TV", "US"]
+  },
+  {
+    "url": "https://www.netflix.com/tudum/top10/united-states",
+    "tags": ["Netflix", "Movie", "US"]
   }
 ]
