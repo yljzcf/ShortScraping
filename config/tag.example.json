@@ -102,5 +102,13 @@
   {
     "url": "https://www.netflix.com/tudum/top10/united-states",
     "tags": ["Netflix", "Movie", "US"]
+  },
+  {
+    "url": "https://tv.apple.com/us/collection/most-popular-now/uts.col.ChartsShows.tvs.sbd.4000",
+    "tags": ["Apple", "TV", "US"]
+  },
+  {
+    "url": "https://tv.apple.com/us/collection/most-popular-now/uts.col.ChartsMovies.tvs.sbd.4000",
+    "tags": ["Apple", "Movie", "US"]
   }
 ]

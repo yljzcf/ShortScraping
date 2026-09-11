@@ -19,10 +19,12 @@
 (function (global) {
   'use strict';
 
-  // 顺序即展示序（2026-09-11 用户定：Netflix 紧随 IMDB 排第二，RoyalRoad 移到末位）
+  // 顺序即展示序（2026-09-11 用户定：Netflix 紧随 IMDB 排第二，RoyalRoad 移到末位；
+  // 2026-09-12 用户定：AppleTV 紧随 Netflix 排第三）
   const SITES = [
     { site: 'imdb', name: 'IMDB', host: 'imdb.com', match: 'suffix' },
     { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*' },
+    { site: 'appletv', name: 'AppleTV', host: 'tv.apple.com', match: 'exact', path: '/us/collection/most-popular-now/*' },
     { site: 'steam', name: 'Steam', host: 'store.steampowered.com', match: 'exact' },
     { site: 'mydrama', name: 'MyDrama', host: 'my-drama.com', match: 'suffix' },
     { site: 'reelshort', name: 'ReelShort', host: 'reelshort.com', match: 'suffix' },

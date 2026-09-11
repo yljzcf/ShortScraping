@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ShortScraping - 短剧监控助手",
-  "version": "1.5.9",
+  "version": "1.5.10",
   "description": "监控IMDB等平台的爆款短剧榜单，支持时间线展示和自动翻译",
   "permissions": [
     "storage",
@@ -32,6 +32,7 @@
       "matches": [
         "*://*.imdb.com/*",
         "*://*.netflix.com/tudum/top10*",
+        "*://tv.apple.com/us/collection/most-popular-now/*",
         "*://store.steampowered.com/*",
         "*://*.my-drama.com/*",
         "*://*.reelshort.com/*",

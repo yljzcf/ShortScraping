@@ -1320,6 +1320,10 @@ async function handleLarkTestSend(draftConfig) {
  * - Netflix /title/<videoId>（v1.5.9，只为补 genres）：Tudum 页同源直连会带用户 Netflix 登录
  *   cookie（登录态页面形态不同），SW fetch 无 cookie；并强制 Accept-Language 英文——页内
  *   coreGenre 类型名随请求头本地化（zh-CN 会得到「惊悚/悬疑/剧情片」，genres 约定存英文原值）。
+ * - Apple TV（v1.5.10）两条：榜单 collection 页与 /us/show|movie/ 详情页。**榜单也走代理**
+ *   （其余站点只有详情走）——Apple 的 SSR 数据脚本 hydrate 后会从 DOM 删除，内容脚本
+ *   等到抓取时点已读不到，只能重新取 HTML；顺带避开用户 Apple TV+ 登录态 cookie。
+ *   详情规则对 slug 放宽（your-friends--neighbors 这类双连字符要过），但不收 query。
  */
 const DETAIL_HTML_PROXY_RULES = [
   {
@@ -1328,6 +1332,14 @@ const DETAIL_HTML_PROXY_RULES = [
   },
   {
     pattern: /^https:\/\/www\.netflix\.com\/title\/\d{5,}$/,
+    headers: { 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9' }
+  },
+  {
+    pattern: /^https:\/\/tv\.apple\.com\/us\/collection\/[^/?#]+\/uts\.col\.Charts(Shows|Movies)\.tvs\.sbd\.\d+$/,
+    headers: { 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9' }
+  },
+  {
+    pattern: /^https:\/\/tv\.apple\.com\/us\/(show|movie)\/[^/?#]+\/umc\.cmc\.[a-z0-9]+$/,
     headers: { 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9' }
   }
 ];

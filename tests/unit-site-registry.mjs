@@ -15,15 +15,16 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
 const deepEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 // ---------- T1 与 v1.5.0 字面值全等 ----------
-// 站点顺序＝弹窗/共享页图标与设置页分组顺序（2026-09-11 用户定：Netflix 第二、RoyalRoad 末位）
+// 站点顺序＝弹窗/共享页图标与设置页分组顺序（2026-09-11 用户定：Netflix 第二、RoyalRoad 末位；
+// 2026-09-12 用户定：AppleTV 紧随 Netflix 排第三）
 check('T1a CATEGORY_SOURCES 顺序与全集',
-  deepEq(SiteRegistry.CATEGORY_SOURCES, ['imdb', 'netflix', 'steam', 'mydrama', 'reelshort', 'dramashorts', 'netshort', 'royalroad']),
+  deepEq(SiteRegistry.CATEGORY_SOURCES, ['imdb', 'netflix', 'appletv', 'steam', 'mydrama', 'reelshort', 'dramashorts', 'netshort', 'royalroad']),
   JSON.stringify(SiteRegistry.CATEGORY_SOURCES));
 check('T1b SOURCE_NAMES 字面量（含键序）',
-  deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', royalroad: 'RoyalRoad' }),
+  deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', appletv: 'AppleTV', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', royalroad: 'RoyalRoad' }),
   JSON.stringify(SiteRegistry.SOURCE_NAMES));
 check('T1c hostBySource 字面量（含键序）',
-  deepEq(SiteRegistry.hostBySource, { imdb: 'imdb.com', netflix: 'netflix.com', steam: 'store.steampowered.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com', royalroad: 'royalroad.com' }),
+  deepEq(SiteRegistry.hostBySource, { imdb: 'imdb.com', netflix: 'netflix.com', appletv: 'tv.apple.com', steam: 'store.steampowered.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com', royalroad: 'royalroad.com' }),
   JSON.stringify(SiteRegistry.hostBySource));
 
 // settings.js 派生的订阅分组与旧字面量 deep-equal（label===tag、icon 按 site 命名）
@@ -33,6 +34,7 @@ const derivedGroups = SiteRegistry.CATEGORY_SOURCES.map(site => ({
 const legacyGroups = [
   { site: 'imdb', label: 'IMDB', tag: 'IMDB', icon: 'assets/icons/site-imdb.png' },
   { site: 'netflix', label: 'Netflix', tag: 'Netflix', icon: 'assets/icons/site-netflix.png' },
+  { site: 'appletv', label: 'AppleTV', tag: 'AppleTV', icon: 'assets/icons/site-appletv.png' },
   { site: 'steam', label: 'Steam', tag: 'Steam', icon: 'assets/icons/site-steam.png' },
   { site: 'mydrama', label: 'MyDrama', tag: 'MyDrama', icon: 'assets/icons/site-mydrama.png' },
   { site: 'reelshort', label: 'ReelShort', tag: 'ReelShort', icon: 'assets/icons/site-reelshort.png' },
@@ -53,6 +55,10 @@ const cases = [
   ['https://www.netshort.com/?list=trending_now', 'netshort'],
   ['https://www.netflix.com/tudum/top10/united-states/tv', 'netflix'],
   ['https://www.netflix.com/browse', 'netflix'],         // 站点归属仍按 host（注入范围由 path 另管）
+  ['https://tv.apple.com/us/collection/most-popular-now/uts.col.ChartsShows.tvs.sbd.4000', 'appletv'],
+  ['https://tv.apple.com/us/show/ted-lasso/umc.cmc.x', 'appletv'], // 归属按 host，注入范围由 path 另管
+  ['https://www.apple.com/tv/', null],                  // apple 其它子域不命中（exact 语义）
+  ['https://music.apple.com/us/browse', null],
   ['https://steamcommunity.com/app/1', null],           // steam 社区子域不命中（exact 语义）
   ['https://help.steampowered.com/', null],             // 非商店子域不命中
   ['https://notimdb.com/x', 'imdb'],                    // 裸 endsWith 历史怪癖，保真保留
@@ -99,10 +105,13 @@ for (const [rel, needle] of [
 const serverSrc = fs.readFileSync(path.join(worktreeRoot, 'server/sync-server.js'), 'utf8');
 check('T4e 共享页静态白名单含 site-registry', serverSrc.includes("'/shared/site-registry.js'"), '');
 
-// ---------- T6 manifest matches 推导：可选 path 字段限定注入路径（Netflix 只注入 /tudum/top10*） ----------
-check('T6 contentScriptMatches 按站点顺序：host 通配七项 + Netflix 路径限定项',
+// ---------- T6 manifest matches 推导：可选 path 字段限定注入路径 ----------
+// Netflix 只注入 /tudum/top10*；AppleTV 只注入两个榜单 collection 页所在路径，
+// 且 exact 语义下无 *. 前缀（不波及 apple.com 其它子域）。
+check('T6 contentScriptMatches 按站点顺序：host 通配七项 + Netflix/AppleTV 路径限定项',
   deepEq(SiteRegistry.contentScriptMatches(), [
-    '*://*.imdb.com/*', '*://*.netflix.com/tudum/top10*', '*://store.steampowered.com/*', '*://*.my-drama.com/*',
+    '*://*.imdb.com/*', '*://*.netflix.com/tudum/top10*', '*://tv.apple.com/us/collection/most-popular-now/*',
+    '*://store.steampowered.com/*', '*://*.my-drama.com/*',
     '*://*.reelshort.com/*', '*://*.dramashorts.io/*', '*://*.netshort.com/*', '*://*.royalroad.com/*'
   ]),
   JSON.stringify(SiteRegistry.contentScriptMatches()));

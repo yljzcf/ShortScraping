@@ -7,6 +7,7 @@ import './bootstrap.cjs';
 //   Steam appdetails 英文 genres（坏条目滤除）
 //   IMDB JSON-LD genre 单字符串归一 + 坏 JSON 块跳过
 //   MyDrama 详情页 JSON-LD @graph 内 genre 英文数组（简介剥模板/trans 判定不受影响）
+//   AppleTV 详情 About 节 AboutReviewCard.genres 覆盖榜单单值 caption（详情失败则跳过该卡）
 // 每个场景重建 window/document/fetch/DOMParser 并重新 eval content.js
 // （全新 window 使防重注入护栏放行，互不串扰）。
 // 用法：node tests/unit-genres.mjs
@@ -220,6 +221,61 @@ const { saved: nfSaved3, proxyCalls: nfProxy3 } = await runScenario({
 check('N3 Netflix 详情代理返回 nmTitleGQL → coreGenre 英文类型清洗入库（trim/去空/去重），代理目标为 /title/ 直链',
   eq(nfSaved3[0]?.genres, ['Thrillers', 'Mysteries', 'Dramas']) && eq(nfProxy3, ['https://www.netflix.com/title/81278442']),
   JSON.stringify({ genres: nfSaved3[0]?.genres, proxy: nfProxy3 }));
+
+// ---------- 场景 3c：Apple TV Top 10（榜单只有单个 caption，详情 About 节给官方多值） ----------
+// 榜单与详情都经后台代理取 HTML（该页 SSR 数据脚本 hydrate 后会被删出 DOM），故两次代理调用。
+const ATV_LIST_URL = 'https://tv.apple.com/us/collection/most-popular-now/uts.col.ChartsShows.tvs.sbd.4000';
+const ATV_DETAIL_URL = 'https://tv.apple.com/us/show/ted-lasso/umc.cmc.vtoh0mn0xn7t3c643xqonfzy';
+const atvSerialized = (shelves, intentKind) =>
+  `<html><body><script type="application/json" id="serialized-server-data">${JSON.stringify({
+    data: [{ intent: { $kind: 'UtsConfigureIntent' }, data: { configuration: {} } }, { intent: { $kind: intentKind }, data: { shelves } }]
+  })}</script></body></html>`;
+const atvListHtml = atvSerialized([{ $type: 'lockup', id: 'uts.col.ChartsShows.tvs.sbd.4000', items: [{
+  $kind: 'OrdinalChartLockup', id: 'umc.cmc.vtoh0mn0xn7t3c643xqonfzy', title: 'Ted Lasso', type: 'Show',
+  caption: 'Comedy', ordinal: '1',
+  artwork: { template: 'https://is1-ssl.mzstatic.com/image/thumb/HASH/{w}x{h}nr.{f}' },
+  contextAction: { url: `${ATV_DETAIL_URL}?ctx_agid=502c9996` }
+}] }], 'CollectionPageIntent');
+const atvDetailHtml = atvSerialized([
+  { $type: 'CanonicalHeader', id: 'h', items: [{ $kind: 'SuperheroLockup', title: 'Ted Lasso', primaryMetadata: ['TV Show', 'Comedy', 'Sports'] }] },
+  { $type: 'About', id: 'uts.marker.About', items: [
+    { $kind: 'AboutReviewCard', title: 'Ted Lasso', genres: ['Comedy', ' Sports ', 'Comedy', ''], description: 'Jason Sudeikis is Ted Lasso…' },
+    { $kind: 'AboutCommonSenseCard', recommendedAge: 14 }
+  ] }
+], 'ShowPageIntent');
+const atvLocation = { href: ATV_LIST_URL, hostname: 'tv.apple.com', pathname: new URL(ATV_LIST_URL).pathname, search: '' };
+const atvSubscription = { urlPattern: ATV_LIST_URL, tags: ['Apple', 'TV', 'US'] };
+const { saved: atvSaved, proxyCalls: atvProxy } = await runScenario({
+  location: atvLocation, subscription: atvSubscription, document: baseDocument(),
+  proxy: (url) => ({ success: true, html: url.includes('/collection/') ? atvListHtml : atvDetailHtml })
+});
+check('A1 Apple 详情 About 节 genres 覆盖榜单 caption 并清洗（trim/去空/去重）',
+  eq(atvSaved[0]?.genres, ['Comedy', 'Sports']), JSON.stringify(atvSaved.map(d => [d.itemId, d.genres])));
+check('A2 Apple 榜单与详情各一次代理，详情目标为剥 query 的规范 URL',
+  eq(atvProxy, [ATV_LIST_URL, ATV_DETAIL_URL]), JSON.stringify(atvProxy));
+
+// A3：详情代理失败 → 该卡跳过不入库（简介只有详情页一个来源，存下就再也补不上）
+const { saved: atvSaved3 } = await runScenario({
+  location: atvLocation, subscription: atvSubscription, document: baseDocument(),
+  proxy: (url) => url.includes('/collection/') ? { success: true, html: atvListHtml } : { success: false }
+});
+check('A3 Apple 详情失败 → 跳过该卡（0 条），下轮重试', atvSaved3.length === 0, JSON.stringify(atvSaved3.map(d => d.itemId)));
+
+// A4：存量缺 genres → 恰一次详情代理提交官方 genres；已有 genres 的零详情代理
+const atvExisting = (genres) => [{ itemId: 'atumc.cmc.vtoh0mn0xn7t3c643xqonfzy', title: 'Ted Lasso', genres, source: 'appletv', description: '旧简介' }];
+const { saveCalls: atvFillCalls, proxyCalls: atvFillProxy } = await runScenario({
+  location: atvLocation, subscription: atvSubscription, document: baseDocument(), dramas: atvExisting([]),
+  proxy: (url) => ({ success: true, html: url.includes('/collection/') ? atvListHtml : atvDetailHtml })
+});
+const { saveCalls: atvSkipCalls, proxyCalls: atvSkipProxy } = await runScenario({
+  location: atvLocation, subscription: atvSubscription, document: baseDocument(), dramas: atvExisting(['Comedy']),
+  proxy: (url) => ({ success: true, html: url.includes('/collection/') ? atvListHtml : atvDetailHtml })
+});
+check('A4 Apple 存量缺 genres → 一次详情代理并提交官方 genres',
+  atvFillCalls.length === 1 && eq(atvFillCalls[0]?.genres, ['Comedy', 'Sports']) && atvFillProxy.length === 2,
+  JSON.stringify({ calls: atvFillCalls.map(c => c.genres), proxy: atvFillProxy }));
+check('A4b Apple 已有 genres 的存量条目零详情代理（只有榜单那一次）',
+  atvSkipCalls.length === 0 && eq(atvSkipProxy, [ATV_LIST_URL]), JSON.stringify({ calls: atvSkipCalls.length, proxy: atvSkipProxy }));
 
 // ---------- 场景 4：Steam（appdetails 英文 genres，坏条目滤除；中文档不碰 genres） ----------
 const STEAM_URL = 'https://store.steampowered.com/category/visual_novel?flavor=contenthub_newandtrending';

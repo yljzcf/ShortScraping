@@ -173,6 +173,48 @@ const NF_GOOD = 'https://www.netflix.com/title/81278442';
     JSON.stringify(fetchCalls[0]?.options));
 }
 
+// P10 Apple TV 两条规则（v1.5.10）：榜单 collection 页与 /us/show|movie/ 详情页都放行、都强制英文
+//（Apple 页面恒英文，显式钉死；榜单也走代理是因为 SSR 数据脚本 hydrate 后会被删出 DOM）
+const ATV_LIST = 'https://tv.apple.com/us/collection/most-popular-now/uts.col.ChartsShows.tvs.sbd.4000';
+const ATV_SHOW = 'https://tv.apple.com/us/show/your-friends--neighbors/umc.cmc.74o37kzay0yuuub8iumddjsg';
+const ATV_MOVIE = 'https://tv.apple.com/us/movie/the-gorge/umc.cmc.26o403koqo2klixc0jtqy6tmc';
+{
+  fetchBehavior = async () => ({ ok: true, status: 200, text: async () => '<html>ATV</html>' });
+  for (const [label, url] of [['榜单页', ATV_LIST], ['剧集详情', ATV_SHOW], ['电影详情', ATV_MOVIE]]) {
+    fetchCalls.length = 0;
+    const resp = await ask(url);
+    const headers = fetchCalls[0]?.options?.headers || {};
+    check(`P10 Apple ${label} → success + html 透传，且请求头 Accept: text/html + 英文 Accept-Language`,
+      resp?.success === true && resp?.html === '<html>ATV</html>'
+      && fetchCalls.length === 1 && fetchCalls[0].url === url
+      && headers.Accept === 'text/html' && /^en/.test(String(headers['Accept-Language'])),
+      JSON.stringify({ resp, calls: fetchCalls }));
+  }
+}
+
+// P11 Apple 拒绝面：协议 / 非 us 区 / 其他 apple 子域 / 非榜单 collection / query / 非 umc id /
+//     播放与浏览路径 / 伪装域，全部零网络
+{
+  fetchCalls.length = 0;
+  const bad = [
+    'http://tv.apple.com/us/collection/most-popular-now/uts.col.ChartsShows.tvs.sbd.4000',
+    'https://tv.apple.com/gb/collection/most-popular-now/uts.col.ChartsShows.tvs.sbd.4000',
+    'https://www.apple.com/us/show/ted-lasso/umc.cmc.vtoh0mn0xn7t3c643xqonfzy',
+    'https://tv.apple.com/us/collection/most-popular-now/uts.col.Editorial.tvs.sbd.4000',
+    `${ATV_LIST}?ctx_cvs=uts.tcvs.tv-plus-canvas`,
+    `${ATV_SHOW}?ctx_agid=502c9996`,
+    'https://tv.apple.com/us/show/ted-lasso/umc.cmc.',
+    'https://tv.apple.com/us/show/ted-lasso/tt0123456',
+    'https://tv.apple.com/us/episode/pilot/umc.cmc.abc123',
+    'https://tv.apple.com/',
+    'https://tv.apple.com.evil.com/us/show/x/umc.cmc.abc123'
+  ];
+  const rejections = [];
+  for (const u of bad) rejections.push(await ask(u));
+  check('P11 Apple 拒绝面全拒', rejections.every(r => r && r.success === false), JSON.stringify(rejections));
+  check('P11b Apple 拒绝路径零网络请求', fetchCalls.length === 0, `fetchCalls=${fetchCalls.length}`);
+}
+
 console.log = origLog; console.warn = origWarn;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

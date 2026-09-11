@@ -451,8 +451,51 @@
     }
   };
 
+  /**
+   * Apple TV Top 10 适配器（tv.apple.com 的剧集榜 / 电影榜两个 collection 页，v1.5.10）：
+   * 数据 SSR 直出在 `<script type="application/json" id="serialized-server-data">`——
+   * 纯 JSON，无需像 Netflix 那样先反转义 JS 字符串字面量。
+   *
+   * 榜单与详情**都经后台代理取 HTML**，不读实时 DOM——两条硬理由：
+   *   1) 页面 hydrate 后会把该 script 从 DOM 里删掉（真机实测 ssdInDom=false），
+   *      而后台抓取是「等 tab complete + 1.5s 再发 scrape」，那时早已读不到；
+   *   2) 代理路径无 cookie（Apple TV+ 订阅用户在标签页里是登录态）且强制英文请求头，取数确定。
+   *
+   * 榜单条目（OrdinalChartLockup）字段齐全但**无简介**：id(umc.cmc.…) / title / type /
+   * caption（单个类型词）/ ordinal（名次，不入库，对齐 Netflix 裁定）/ artwork.template /
+   * contextAction.url（详情页，带 ?ctx_agid= 需剥）。简介与官方多值 genres 只有详情页
+   * `About` 节的 AboutReviewCard 有 → genresFromDetail，且详情失败**跳过该卡**（见 fetchAppleDetail）。
+   * 页面恒英文（Accept-Language: zh-CN 不改变输出），无平台中文，status 全走 new 交 AI 翻译。
+   */
+  const appletvAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        return u.hostname === 'tv.apple.com'
+          && /^\/us\/collection\/[^/]+\/uts\.col\.Charts(Shows|Movies)\.tvs\.sbd\.\d+$/.test(u.pathname);
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return await fetchAppleListItems(window.location.href);
+    },
+    extractId(item) {
+      // umc.cmc.<字母数字> 是 Apple 全站规范 id（/show|movie/ 页所用），加 at 前缀与全局去重键约定一致
+      const id = item && typeof item.id === 'string' ? item.id.trim() : '';
+      return /^umc\.cmc\.[a-z0-9]+$/.test(id) ? `at${id}` : null;
+    },
+    extractBasic(item, tags, id, index) {
+      return extractAppleFromItem(item, index, tags, id);
+    },
+    genresFromDetail: true,    // 官方多值 genres 权威源在详情页 About 节
+    async fetchDetail(drama) {
+      return await fetchAppleDetail(drama);
+    }
+  };
+
   // 站点适配器注册表。
-  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, netflix: netflixAdapter };
+  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
 
   /**
    * 添加抓取按钮
@@ -1802,6 +1845,132 @@
       }
     }
     return null;
+  }
+
+  /**
+   * 读取 Apple TV 页面 SSR 直出的 `<script type="application/json" id="serialized-server-data">`
+   * （纯 JSON，直接 JSON.parse）。根形如 `{ data: [ {intent, data}, … ] }`——第一条恒为
+   * UtsConfigureIntent（配置，无 shelves），页面数据在带 shelves 的那条（榜单页是
+   * CollectionPageIntent、详情页是 ShowPageIntent / MoviePageIntent）。**按「有 shelves 数组」
+   * 挑而不是按 intent 名挑**：Apple 给电影/剧集用不同 intent 名，白名单会漏。
+   * 缺脚本 / 坏 JSON / 无 shelves 一律返回 null（调用方安全跳过），不抛。
+   */
+  function readAppleServerData(html) {
+    const text = String(html || '');
+    const m = /<script[^>]*id="serialized-server-data"[^>]*>/.exec(text);
+    if (!m) return null;
+    const start = m.index + m[0].length;
+    const end = text.indexOf('</script>', start);
+    if (end <= start) return null;
+    try {
+      const parsed = JSON.parse(text.slice(start, end));
+      const list = parsed && Array.isArray(parsed.data) ? parsed.data : [];
+      return list.map(d => d && d.data).find(d => d && Array.isArray(d.shelves)) || null;
+    } catch (e) {
+      console.warn('[ShortScraping] Apple serialized-server-data 解析失败:', e.message);
+      return null;
+    }
+  }
+
+  /**
+   * 取榜单页的 10 个条目：经后台代理拿 HTML（理由见 appletvAdapter 注释），
+   * 页面只有一个 shelf（uts.col.Charts…），直接取 shelves[0].items。
+   * 代理失败 / 解析失败返回空数组，scrapePage 安全跳过、下轮重试。
+   */
+  async function fetchAppleListItems(url) {
+    const html = await fetchDetailHtmlViaBackground(url);
+    if (html === null) {
+      console.log('[ShortScraping] Apple 榜单页代理请求失败');
+      return [];
+    }
+    const page = readAppleServerData(html);
+    const shelf = page && page.shelves[0];
+    if (!shelf || !Array.isArray(shelf.items)) {
+      console.log('[ShortScraping] Apple 榜单数据未找到');
+      return [];
+    }
+    return shelf.items.filter(item => item && typeof item === 'object');
+  }
+
+  /**
+   * artwork.template 形如 `https://is1-ssl.mzstatic.com/image/thumb/<hash>/{w}x{h}nr.{f}`，
+   * mzstatic 按请求尺寸裁切（源图是 1680×3636 超长版），取 400×600 标准 2:3 竖版海报
+   * （≈66KB；URL 无逗号/百分号，Lark「链接转附件」可直接转，故 posterForPayload 不改写）。
+   * 裁切码（nr/sr/bb…）原样保留，只替换三个占位符。
+   */
+  function appleArtUrl(template) {
+    const t = typeof template === 'string' ? template.trim() : '';
+    if (!t) return '';
+    return t.replace('{w}', '400').replace('{h}', '600').replace('{f}', 'jpg');
+  }
+
+  /**
+   * 从榜单条目提取基础信息。genres 先填榜单的单个 caption 作兜底（同 ReelShort 的 theme），
+   * 详情成功后被 About 节的官方多值 genres 覆盖；url 取 contextAction.url 去掉 query
+   * （原值带 ?ctx_agid=…，代理白名单只认无 query 的规范形态，与 mydrama 同约定）。
+   */
+  function extractAppleFromItem(item, index, tags, atId) {
+    const detailUrl = String((item.contextAction && item.contextAction.url) || '').split('?')[0].trim();
+    return {
+      id: `appletv_${atId}_${index}`,
+      itemId: atId,
+      title: (typeof item.title === 'string' && item.title.trim()) || atId.slice(2),
+      titleZh: '',
+      poster: appleArtUrl(item.artwork && item.artwork.template),
+      tags,
+      genres: cleanGenres([item.caption]),
+      description: '',           // 榜单数据无简介，由详情页补
+      descriptionZh: '',
+      company: '',
+      source: 'appletv',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      url: detailUrl,
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
+  }
+
+  /**
+   * Apple 详情（/us/show|movie/<slug>/umc.cmc.…）：`About` 节里 $kind 为 AboutReviewCard
+   * 的那条同时给出 `description`（完整英文简介）与 `genres`（2~3 个官方类型）。
+   *
+   * **失败返回 null＝跳过该卡、下轮重试**，不同于 IMDB/ReelShort 的「保留列表页数据」：
+   * 简介只有详情页这一个来源，而存量回填只补 genres 不补简介（maybeBackfillGenres +
+   * 后台 saveDramaRecord 的合并口径），一旦存下无简介的卡就永远自愈不了。
+   * 注意回填路径忽略返回值、只看就地改写的 drama.genres，故两者都写。
+   */
+  async function fetchAppleDetail(drama) {
+    if (!drama.url) return null;
+
+    try {
+      const html = await fetchDetailHtmlViaBackground(drama.url);
+      if (html === null) {
+        console.warn(`[ShortScraping] Apple 详情代理失败（跳过，下轮重试）: ${drama.title}`);
+        return null;
+      }
+
+      const page = readAppleServerData(html);
+      const about = page && page.shelves.find(s => s && s.$type === 'About');
+      const card = about && Array.isArray(about.items)
+        ? about.items.find(i => i && i.$kind === 'AboutReviewCard')
+        : null;
+      const description = card && typeof card.description === 'string' ? card.description.trim() : '';
+      if (!description) {
+        console.warn(`[ShortScraping] Apple 详情无简介（跳过，下轮重试）: ${drama.title}`);
+        return null;
+      }
+
+      drama.description = description;
+      const genres = cleanGenres(card.genres);
+      if (genres.length) drama.genres = genres;
+
+      console.log(`[ShortScraping] Apple 详情: ${drama.title} | 类型: ${drama.genres.join(', ')}`);
+      return drama;
+    } catch (e) {
+      console.warn(`[ShortScraping] Apple 详情异常（跳过，下轮重试）: ${drama.title}`, e.message);
+      return null;
+    }
   }
 
   /**

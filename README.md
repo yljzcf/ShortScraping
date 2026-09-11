@@ -1,6 +1,6 @@
 # ShortScraping - 爆款短剧监控助手
 
-Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRoad、My Drama、ReelShort、DramaShorts、NetShort、Netflix 八个平台的榜单/板块，新条目以时间线卡片展示，自动翻译为中文，并可经本地服务同步为 CSV、在局域网内只读共享。
+Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRoad、My Drama、ReelShort、DramaShorts、NetShort、Netflix、Apple TV 九个平台的榜单/板块，新条目以时间线卡片展示，自动翻译为中文，并可经本地服务同步为 CSV、在局域网内只读共享。
 
 适合谁：追踪海外短剧/游戏/网文热榜动向的编辑、制片、市场与数据同学——打开弹窗就能看到"最近各平台新上了什么"，无需逐站巡逻。
 
@@ -26,12 +26,14 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 | DramaShorts | `/top-movies` 榜单与首页板块（`?list=<板块id>`） | 页内 `__NEXT_DATA__` 直出，无需请求详情页 | `ds`+UUID |
 | NetShort | 首页板块（`?list=<板块名>`，如 `trending_now` / `exclusive_originals`） | 页内 RSC flight 数据直出，无需请求详情页 | `ns`+shortPlayId |
 | Netflix | Tudum Top 10 六个榜单页：`/tudum/top10`、`/tv`、`/films-non-english`、`/tv-non-english`、`/united-states`、`/united-states/tv` | 页内 `netflix.reactContext` 内联脚本 SSR 榜单数据直出；类型标签经后台代理取作品 `/title/` 页 | `nf`+videoId |
+| Apple TV | Top 10 TV Shows 与 Top 10 Movies 两个榜单页（`/us/collection/most-popular-now/uts.col.Charts{Shows,Movies}.tvs.sbd.4000`） | 页内 `serialized-server-data` JSON SSR 直出榜单；简介与类型标签经后台代理取作品详情页 | `at`+`umc.cmc.` 编号 |
 
 站点细节：
 
 - **Steam**：成人专属/受限作品（接口 `success=false`）自动跳过；官方中文简介与英文不同时直接作为翻译结果。
 - **My Drama / ReelShort 的 fandom 入口**：文章条目通过文中回主站的链接换取主站 id，与主站条目全局去重；换不到 id 的条目本轮不入库，待文章补上回链后下轮抓取自动重试。
 - **DramaShorts**：首页板块 id 支持 `top_trending`（默认）/ `popular_now` / `audience_favorite`；板块内容每次请求轮换属站点自身行为，多轮定时抓取会逐步累积。规则目录当前未内置 `audience_favorite`（该板块为大池随机采样、单次重合度低），需要时可手动写入 `config/tag.json`。
+- **Apple TV**：榜单即 Apple TV+ 自家的 Top 10，两条订阅分别对应剧集榜与电影榜（标签 `Apple, TV, US` / `Apple, Movie, US`）。榜单页本身不含简介，简介与内容类型标签由后台无 cookie 代理取作品详情页补齐，与你的 Apple TV+ 登录状态无关；某条详情取不到时该作品本轮不入库，下轮榜单复现时自动重来（避免留下永远补不上简介的卡）。内容脚本只注入这两个榜单页，不进 Apple TV 的播放/浏览页。**若抓取成片失败**：先检查本机代理/VPN 是否把 tv.apple.com 的 HTTP/3(QUIC) 流量分流到了非 Apple 边缘节点——那条路会一律返回 404，关闭 QUIC 或调整分流规则即可。
 - **Netflix**：内容脚本只注入 `/tudum/top10*` 栏目页，不进 Netflix 播放/浏览页；同一作品同时上全球榜与美国榜时按作品全局去重、先到先得（订阅顺序全球榜在前，美国榜实际记录「上美国榜但未上全球榜」的作品）；标签约定 `Global`（英语榜）/ `Global-nE`（非英语榜）/ `US`；每周名次与观看量不入库，只记录首次进榜时间。内容类型标签取自作品 `/title/` 页 Netflix 自身分类（如 Thrillers / Dramas / Comedies，英文原值），由后台无 cookie 代理抓取，与你的 Netflix 登录状态无关；单次抓取失败的作品会在下轮榜单复现时自动补上。
 
 ## 📦 安装与快速上手
@@ -238,7 +240,7 @@ ShortScraping/
 
 ## 验证与升级
 
-使用 Node.js 22 或更新版本运行 `npm test`（当前 23 套），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+使用 Node.js 22 或更新版本运行 `npm test`（当前 24 套），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
 
 更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本域名清单，测试会检查两者一致。
 
