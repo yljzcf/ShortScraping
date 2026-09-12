@@ -39,36 +39,36 @@
     return latest;
   }
 
-  /** 组内当前可见（＝已订阅）的站点，保持 SITE_GROUPS 里的组内顺序。 */
-  function visibleSitesOfGroup(groupEntry, visibleSites) {
-    if (!visibleSites) return groupEntry.sites.slice();
-    return groupEntry.sites.filter(site => visibleSites.has(site));
+  /**
+   * 组内当前可见（＝已订阅）的站点，**按最近有更新降序**排（2026-09-12 用户定）：
+   * 展开一组时最新有动静的站点排最前。无更新记录的站点一律排在有记录的之后；
+   * 并列（含全都无记录）时保持 SITE_GROUPS 里的组内顺序——sort 在 ES2019+ 稳定。
+   * 排完序后 sites[0] 即「组内最近有更新的站点」，代表站点直接取它。
+   */
+  function visibleSitesOfGroup(groupEntry, visibleSites, latestBySite) {
+    const sites = visibleSites
+      ? groupEntry.sites.filter(site => visibleSites.has(site))
+      : groupEntry.sites.slice();
+
+    const latest = latestBySite || {};
+    const at = site => (typeof latest[site] === 'number' ? latest[site] : -Infinity);
+    return sites.sort((a, b) => at(b) - at(a));
   }
 
   /**
    * 组的代表站点（收起胶囊上显示的、点开后会被选中的那个）：
-   * 设置里固定的 > 组内最近有更新的 > 组内首个可见站点。
+   * 设置里固定的 > 组内最近有更新的（＝排序后的首个）。
    * 固定到一个未订阅站点时按「自动」处理，不特殊报错。
    */
   function pickRepresentative(groupEntry, opts) {
     const options = opts || {};
-    const sites = visibleSitesOfGroup(groupEntry, options.visibleSites);
+    const sites = visibleSitesOfGroup(groupEntry, options.visibleSites, options.latestBySite);
     if (sites.length === 0) return null;
 
     const pinned = (options.pins || {})[groupEntry.group];
     if (pinned && sites.includes(pinned)) return pinned;
 
-    const latestBySite = options.latestBySite || {};
-    let best = null;
-    let bestMs = -Infinity;
-    for (const site of sites) {
-      const ms = latestBySite[site];
-      if (typeof ms === 'number' && ms > bestMs) {
-        bestMs = ms;
-        best = site;
-      }
-    }
-    return best || sites[0];
+    return sites[0];
   }
 
   /**
@@ -99,7 +99,8 @@
   }
 
   /**
-   * 头部布局：每组一条 { group, name, sites, collapsed, representative }。
+   * 头部布局：每组一条 { group, name, sites, collapsed, representative }，
+   * sites 已按「最近有更新」降序排（展开时最新有动静的站点在最前）。
    * 规则：
    *   · 组内 0 个可见站点 → 整组不出现（与既有「未订阅站点不出图标」一致）；
    *   · 组内可见站点 ≤1 → 不折叠，直接平铺（否则看一个站点要点两次）；
@@ -112,7 +113,7 @@
 
     const groups = [];
     for (const groupEntry of Registry.SITE_GROUPS) {
-      const sites = visibleSitesOfGroup(groupEntry, options.visibleSites);
+      const sites = visibleSitesOfGroup(groupEntry, options.visibleSites, options.latestBySite);
       if (sites.length === 0) continue;
       groups.push({
         group: groupEntry.group,
@@ -240,6 +241,7 @@
 
   const api = {
     latestUpdateBySite,
+    visibleSitesOfGroup,
     pickRepresentative,
     resolveActiveSource,
     resolveLayout,

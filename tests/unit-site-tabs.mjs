@@ -73,7 +73,7 @@ check('R2 固定到未订阅站点时按自动处理',
   }) === 'netflix', '');
 check('R3 无固定项时取组内最近有更新的站点',
   SiteTabs.pickRepresentative(videoGroup, { visibleSites: allVisible, latestBySite: latest }) === 'netflix', '');
-check('R4 组内都没有更新记录时取首个可见站点（组内顺序）',
+check('R4 组内都没有更新记录时取首个可见站点（注册表组内顺序）',
   SiteTabs.pickRepresentative(videoGroup, { visibleSites: setOf('netflix', 'appletv'), latestBySite: {} }) === 'netflix', '');
 check('R5 组内零可见站点返回 null',
   SiteTabs.pickRepresentative(videoGroup, { visibleSites: setOf('steam'), latestBySite: latest }) === null, '');
@@ -124,6 +124,33 @@ check('L5 零可见站点的组整组不出现（video 组缺席）',
 check('L6 组内只列可见站点',
   deepEq(layoutSingle.groups.find(g => g.group === 'shortdrama').sites, ['mydrama', 'reelshort']),
   JSON.stringify(layoutSingle.groups.find(g => g.group === 'shortdrama').sites));
+
+// ---------- S 组内排序：最近有更新的排最前（2026-09-12 用户定） ----------
+const shortGroup = SiteRegistry.SITE_GROUPS.find(g => g.group === 'shortdrama');
+const shortLatest = { dramashorts: 400, mydrama: 100, netshort: 300 };  // reelshort 无记录
+check('S1 组内按最近更新降序排，无记录的排最后',
+  deepEq(SiteTabs.resolveLayout({ visibleSites: allVisible, activeSource: 'mydrama', latestBySite: shortLatest })
+    .groups.find(g => g.group === 'shortdrama').sites,
+    ['dramashorts', 'netshort', 'mydrama', 'reelshort']),
+  JSON.stringify(SiteTabs.resolveLayout({ visibleSites: allVisible, activeSource: 'mydrama', latestBySite: shortLatest })
+    .groups.find(g => g.group === 'shortdrama').sites));
+
+check('S2 全都无更新记录时保持注册表组内顺序（稳定排序）',
+  deepEq(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, {}),
+    ['mydrama', 'reelshort', 'dramashorts', 'netshort']),
+  JSON.stringify(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, {})));
+
+check('S3 更新时间并列时保持注册表组内顺序',
+  deepEq(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, { mydrama: 500, reelshort: 500, dramashorts: 500, netshort: 500 }),
+    ['mydrama', 'reelshort', 'dramashorts', 'netshort']),
+  JSON.stringify(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, { mydrama: 500, reelshort: 500, dramashorts: 500, netshort: 500 })));
+
+check('S4 排序不改注册表本身（SITE_GROUPS.sites 未被就地重排）',
+  deepEq(shortGroup.sites, ['mydrama', 'reelshort', 'dramashorts', 'netshort']),
+  JSON.stringify(shortGroup.sites));
+
+check('S5 排序后的首个站点即代表站点（与收起胶囊一致）',
+  SiteTabs.pickRepresentative(shortGroup, { visibleSites: allVisible, latestBySite: shortLatest }) === 'dramashorts', '');
 
 const layoutEmpty = SiteTabs.resolveLayout({ visibleSites: setOf(), activeSource: null, latestBySite: {} });
 check('L7 零订阅时无任何分组、activeSource 为 null',
