@@ -316,7 +316,8 @@ const STATIC_ROUTES = {
   '/public/share.css': { file: path.join(PUBLIC_DIR, 'share.css'), type: 'text/css; charset=utf-8' },
   '/public/share.js': { file: path.join(PUBLIC_DIR, 'share.js'), type: 'text/javascript; charset=utf-8' },
   '/shared/timeline-render.js': { file: path.join(SHARED_DIR, 'timeline-render.js'), type: 'text/javascript; charset=utf-8' },
-  '/shared/site-registry.js': { file: path.join(SHARED_DIR, 'site-registry.js'), type: 'text/javascript; charset=utf-8' }
+  '/shared/site-registry.js': { file: path.join(SHARED_DIR, 'site-registry.js'), type: 'text/javascript; charset=utf-8' },
+  '/shared/site-tabs.js': { file: path.join(SHARED_DIR, 'site-tabs.js'), type: 'text/javascript; charset=utf-8' }
 };
 
 const ICON_TYPES = {

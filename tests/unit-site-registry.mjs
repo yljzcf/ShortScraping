@@ -106,6 +106,17 @@ for (const [rel, needle] of [
 const serverSrc = fs.readFileSync(path.join(worktreeRoot, 'server/sync-server.js'), 'utf8');
 check('T4e 共享页静态白名单含 site-registry', serverSrc.includes("'/shared/site-registry.js'"), '');
 
+// 折叠标签条（v1.5.11）：弹窗与共享页共用 site-tabs.js，且都不再手写站点按钮
+for (const [rel, needle] of [
+  ['src/popup/popup.html', '../shared/site-tabs.js'],
+  ['server/public/share.html', '/shared/site-tabs.js']
+]) {
+  const html = fs.readFileSync(path.join(worktreeRoot, rel), 'utf8');
+  check(`T4f ${rel} 已引入 site-tabs`, html.includes(`src="${needle}"`), '');
+  check(`T4g ${rel} 无手写站点按钮残留`, !html.includes('class="category-tab"'), '');
+}
+check('T4h 共享页静态白名单含 site-tabs', serverSrc.includes("'/shared/site-tabs.js'"), '');
+
 // ---------- T6 manifest matches 推导：可选 path 字段限定注入路径 ----------
 // Netflix 只注入 /tudum/top10*；AppleTV 只注入两个榜单 collection 页所在路径，
 // 且 exact 语义下无 *. 前缀（不波及 apple.com 其它子域）。

@@ -57,10 +57,70 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-/* 分类标签（纯图标，title 提示站名） */
+/* 分类标签（纯图标，title 提示站名）
+   v1.5.11 起按 site-registry.js 的 SITE_GROUPS 折叠：同一时间只展开一组，
+   收起组压成「‹ 代表 logo ›」胶囊，整条由 shared/site-tabs.js 渲染 */
 .category-tabs {
   display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 展开组：图标外套浅色衬底，视觉上圈出「这几个是一组」
+   （单站点组不加 is-open，只是个普通图标） */
+.tab-group {
+  display: flex;
   gap: 6px;
+}
+
+.tab-group.is-open {
+  background: var(--bg);
+  border-radius: 10px;
+  padding: 2px 4px;
+}
+
+/* 收起胶囊：箭头纯装饰，整枚是一个按钮 */
+.tab-group-chip {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 6px 4px;
+  border: none;
+  background: var(--bg);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tab-group-chip img {
+  display: block;
+  width: 24px;
+  height: 24px;
+  padding: 2px;
+  border-radius: 5px;
+  filter: grayscale(1);
+  opacity: 0.55;
+  transition: all 0.2s;
+}
+
+.tab-group-chevron {
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.tab-group-chip:hover {
+  background: var(--bg-card);
+}
+
+.tab-group-chip:hover img {
+  opacity: 0.85;
+}
+
+.tab-group-chip:hover .tab-group-chevron {
+  color: var(--text);
+  opacity: 1;
 }
 
 .category-tab {
@@ -545,7 +605,8 @@ body {
 }
 
 /* —— 可访问性（v1.5.1）：键盘焦点环，仅 :focus-visible 出现 —— */
-.category-tab:focus-visible {
+.category-tab:focus-visible,
+.tab-group-chip:focus-visible {
   outline: 2px solid var(--primary, #6366f1);
   outline-offset: 2px;
 }

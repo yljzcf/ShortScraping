@@ -23,11 +23,8 @@
     elements.statsTotal = document.getElementById('statsTotal');
     elements.statsLastUpdate = document.getElementById('statsLastUpdate');
     elements.liveDot = document.getElementById('liveDot');
-    elements.tabs = Array.from(document.querySelectorAll('.category-tab'));
-
-    elements.tabs.forEach(tab => {
-      tab.addEventListener('click', () => setActiveSource(tab.dataset.source));
-    });
+    // 标签条内容由 SiteTabs 动态渲染（分组折叠），这里只缓存容器
+    elements.categoryTabs = document.getElementById('categoryTabs');
 
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) loadTimeline();
@@ -60,14 +57,20 @@
   }
 
   function render() {
-    if (!state.activeSource) {
-      state.activeSource = TimelineRender.pickDefaultSource(state.dramas);
-    }
+    // 分组折叠标签条：同一时间只展开一组，收起组压成「‹ 代表 logo ›」胶囊。
+    // 共享页读不到扩展存储，所以没有「固定 logo」，代表站点恒按「最近有更新」；
+    // 也不做展开状态记忆（刷新即回到默认短剧组）。站点显隐同样不做过滤，
+    // 九站全列（与改造前一致，共享页没有订阅信息）。
+    const layout = SiteTabs.resolveLayout({
+      activeSource: state.activeSource,
+      latestBySite: SiteTabs.latestUpdateBySite(state.dramas)
+    });
+    state.activeSource = layout.activeSource;
 
-    elements.tabs.forEach(tab => {
-      const active = tab.dataset.source === state.activeSource;
-      tab.classList.toggle('active', active);
-      tab.setAttribute('aria-selected', String(active));
+    SiteTabs.render(elements.categoryTabs, layout, {
+      assetsBase: '/assets/icons',
+      onSelectSite: setActiveSource,
+      onExpandGroup: (group, representative) => setActiveSource(representative)
     });
 
     const visible = state.dramas.filter(d => TimelineRender.dramaSource(d) === state.activeSource);
