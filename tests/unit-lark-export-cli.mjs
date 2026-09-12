@@ -94,7 +94,7 @@ run([]);
 let files = outFiles();
 check('O1 不分批时产单个 csv', files.length === 1 && /^lark-import-\d{8}\.csv$/.test(files[0]), files.join(','));
 let text = fs.readFileSync(path.join(OUT, files[0]), 'utf8');
-check('O2 BOM + CRLF + 16 列中文表头', text.startsWith('﻿')
+check('O2 BOM + CRLF + 15 列中文表头', text.startsWith('﻿')
   && text.split('\r\n')[0].replace('﻿', '') === Lark.TABLE_HEADERS.map(h => `"${h}"`).join(','),
   text.split('\r\n')[0].slice(0, 80));
 check('O3 poster 已改写（IMDB 去逗号变换段、mydrama 归一 %20/%3A）',
@@ -120,7 +120,7 @@ check('O7 tsv 扩展名 + 无表头无 BOM 无 CRLF', files[0].endsWith('.tsv')
   && !text.startsWith('﻿') && !text.includes('\r')
   && text.split('\n')[0].split('\t')[1] === 'tt0001',
   `${files[0]} | ${JSON.stringify(text.slice(0, 40))}`);
-check('O8 tsv 每行 16 格且行数＝记录数', text.split('\n').every(line => line.split('\t').length === 16)
+check('O8 tsv 每行 15 格且行数＝记录数', text.split('\n').every(line => line.split('\t').length === 15)
   && text.split('\n').length === 4, text.split('\n').map(l => l.split('\t').length).join(','));
 
 reset();

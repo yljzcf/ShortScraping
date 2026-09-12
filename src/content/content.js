@@ -140,7 +140,6 @@
 
       if (enName) drama.title = enName;        // 英文原名（弹窗里的“（原名）”）
       drama.description = enDesc;
-      drama.company = (developers.length ? developers : publishers).join(', ');
       // 官方内容类型标签（Action/Adventure/RPG…宽门类）。更细的商店用户标签在
       // 有年龄门的商店页里，appdetails 拿不到，不碰。
       drama.genres = cleanGenres((en.genres || []).map(g => g && g.description));
@@ -154,7 +153,7 @@
         drama.translatedAt = new Date().toISOString();
       }
 
-      console.log(`[ShortScraping] Steam 详情: ${drama.title}${titleZh ? ` / ${titleZh}` : ''} | 公司: ${drama.company || '无'}`);
+      console.log(`[ShortScraping] Steam 详情: ${drama.title}${titleZh ? ` / ${titleZh}` : ''}`);
       return drama;
     } catch (e) {
       console.warn(`[ShortScraping] Steam 详情获取失败: ${drama.title} (${appId})`, e.message);
@@ -797,7 +796,6 @@
       genres: [],                // 详情页 JSON-LD genre 补充
       description: '',
       descriptionZh: '',
-      company: '',
       source: 'imdb',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -822,7 +820,6 @@
       genres: [],              // 占位，fetchSteamDetail 用 appdetails genres 覆盖
       description: '',
       descriptionZh: '',
-      company: '',
       source: 'steam',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -874,7 +871,6 @@
       genres: cleanGenres(Array.from(item.querySelectorAll('a.fiction-tag')).map(a => a.textContent)),
       description,
       descriptionZh: '',
-      company: '',               // 作者名由详情页补充
       source: 'royalroad',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -885,7 +881,7 @@
   }
 
   /**
-   * RoyalRoad 详情页补作者（存 company 字段）与完整简介；任何失败都保留列表页数据。
+   * RoyalRoad 详情页补完整简介；任何失败都保留列表页数据。
    */
   async function fetchRoyalRoadDetail(drama) {
     if (!drama.url) return drama;
@@ -901,20 +897,13 @@
       const parser = new DOMParser();
       const doc = parser.parseFromString(html, 'text/html');
 
-      // 作者：页头 "by <a href=/profile/...>"；兜底取文档序第一个 profile 链接
-      const authorLink = doc.querySelector('h4.font-white a[href*="/profile/"]') ||
-                         doc.querySelector('a[href*="/profile/"]');
-      if (authorLink) {
-        drama.company = authorLink.textContent.replace(/^by\s+/i, '').trim();
-      }
-
       // 完整简介：非空才覆盖列表页版本
       const fullDesc = extractParagraphText(
         doc.querySelector('.description .hidden-content') || doc.querySelector('.description')
       );
       if (fullDesc) drama.description = fullDesc;
 
-      console.log(`[ShortScraping] RoyalRoad 详情: ${drama.title} | 作者: ${drama.company || '无'}`);
+      console.log(`[ShortScraping] RoyalRoad 详情: ${drama.title} | 简介: ${fullDesc ? '已补全' : '沿用列表页'}`);
     } catch (e) {
       console.warn(`[ShortScraping] RoyalRoad 详情获取失败: ${drama.title}`, e.message);
     }
@@ -1017,7 +1006,6 @@
       genres: [],                // 列表无类型字段，详情页 JSON-LD 补采（fetchMyDramaDetail）
       description: '',
       descriptionZh: '',
-      company: '',               // 平台自制剧，无独立制作公司信息
       source: 'mydrama',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -1161,7 +1149,6 @@
       genres: [],                // fandom 文章无类型数据；映射回主站后条目再现于主站榜单时经回填补采
       description: '',
       descriptionZh: '',
-      company: '',
       source: 'mydrama',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -1305,7 +1292,6 @@
       genres: cleanGenres(book.theme),   // 列表 theme 兜底（通常 1 个），详情页 tag_list 覆盖
       description: (book.special_desc || '').trim(),
       descriptionZh: '',
-      company: '',               // 平台自制剧，无独立制作公司信息
       source: 'reelshort',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -1416,7 +1402,6 @@
       genres: [],                // 映射回主站后由 /movie/ 页 tag_list 补充
       description: excerpt,
       descriptionZh: '',
-      company: '',
       source: 'reelshort',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -1561,7 +1546,6 @@
       genres: movie.genre && movie.genre.title ? [String(movie.genre.title).trim()] : [],
       description: (movie.description || '').trim(),
       descriptionZh: '',
-      company: '',               // 平台自制剧，无独立制作公司信息
       source: 'dramashorts',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -1669,7 +1653,6 @@
       genres: cleanGenres((item.labelList || []).map(l => l && l.labelName)),
       description: (item.shotIntroduce || '').trim(),
       descriptionZh: '',
-      company: '',               // 平台自制剧，无独立制作公司信息
       source: 'netshort',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -1773,7 +1756,6 @@
       genres: [],                // 榜单数据无内容类型字段
       description: typeof video.shortSynopsis === 'string' ? video.shortSynopsis.trim() : '',
       descriptionZh: '',
-      company: '',
       source: 'netflix',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -1921,7 +1903,6 @@
       genres: cleanGenres([item.caption]),
       description: '',           // 榜单数据无简介，由详情页补
       descriptionZh: '',
-      company: '',
       source: 'appletv',
       sourceListUrl: window.location.href,
       status: 'new',
@@ -1993,9 +1974,6 @@
       // 提取简介
       drama.description = extractDescription(doc);
 
-      // 提取出品公司
-      drama.company = extractCompany(doc);
-
       // 提取内容类型标签（JSON-LD genre）；为空保留列表页占位空数组
       const genres = extractJsonLdGenres(doc);
       if (genres.length) drama.genres = genres;
@@ -2003,7 +1981,7 @@
       // 不从详情页补封面：详情页可能返回剧照、视频缩略图或推荐图，容易误当成封面。
       // 封面只信任搜索结果列表中的海报容器；没有则使用默认占位图。
 
-      console.log(`[ShortScraping] 详情: ${drama.title} | 公司: ${drama.company || '无'} | 封面: ${drama.poster ? '有' : '无'}`);
+      console.log(`[ShortScraping] 详情: ${drama.title} | 封面: ${drama.poster ? '有' : '无'}`);
     } catch (e) {
       console.warn(`[ShortScraping] 详情获取失败: ${drama.title}`, e.message);
     }
@@ -2056,38 +2034,6 @@
       }
     }
     return [];
-  }
-
-  /**
-   * 提取出品公司
-   */
-  function extractCompany(doc) {
-    // 查找 company 链接
-    const companyLinks = doc.querySelectorAll('a[href*="/company/"]');
-    for (const link of companyLinks) {
-      const text = link.textContent.trim();
-      // 排除标签文本
-      if (text.length > 2 && !/production compan|companies/i.test(text)) {
-        return text;
-      }
-    }
-
-    // 旧版 IMDB
-    const txtBlocks = doc.querySelectorAll('.txt-block');
-    for (const block of txtBlocks) {
-      const header = block.querySelector('h4, h3, span.inline');
-      if (header && /company/i.test(header.textContent)) {
-        const links = block.querySelectorAll('a');
-        for (const link of links) {
-          const text = link.textContent.trim();
-          if (text.length > 2 && !/company/i.test(text)) {
-            return text;
-          }
-        }
-      }
-    }
-
-    return '';
   }
 
   /**

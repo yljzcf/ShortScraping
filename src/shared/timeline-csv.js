@@ -1,7 +1,7 @@
 /**
  * 时间线 CSV 序列化（单一真源，2026-08-01 自 sync-server.js 抽出）：
- * 列序、转义规则（双引号翻倍/换行折空格/数组竖线连接）、BOM+CRLF、
- * itemId||id 去重与 normalizeDrama 16 字段白名单在此收敛——
+ * 列序、转义规则（双引号翻倍/换行折空格/数组英文逗号连接）、BOM+CRLF、
+ * itemId||id 去重与 normalizeDrama 15 字段白名单在此收敛——
  * 同步服务写 db/timeline.csv 与设置页「导出 CSV」共用，两端产物必然一致。
  *
  * 加载方式：设置页 <script> 标签 / 后台 importScripts（挂 globalThis.TimelineCsv），
@@ -21,7 +21,6 @@
     'tags',
     'description',
     'descriptionZh',
-    'company',
     'source',
     'status',
     'url',
@@ -39,7 +38,11 @@
 
   function csvEscape(value) {
     if (value === null || value === undefined) return '';
-    let text = Array.isArray(value) ? value.join('|') : String(value);
+    // 数组用英文逗号连接（v1.5.13 由竖线改，与 Lark payload 自 2026-07-25 的约定一致，
+    // 表格软件/Base 把文本列转多选时默认也按逗号切）：单元格本就带引号包裹，逗号
+    // 不会把它拆成两列。已知残留风险——标签值本身若含英文逗号会在 Base 里被错切成
+    // 两个标签，全量 3454 条实测零命中，payload 侧暴露同样风险已久，两边保持一致。
+    let text = Array.isArray(value) ? value.join(',') : String(value);
     // CSV 引号只隔离列，不阻止表格公式；为不可信文本添加文本前缀。
     // 只覆盖 OWASP 明列的 = + - @ 与前导 Tab/CR/LF：没有表格软件在导入时把全角
     // ＝＋－＠ 当公式起始，给它们加前缀只会让以「－」「＋」开头的合法中文文案多出撇号。
@@ -57,7 +60,6 @@
       tags: Array.isArray(drama.tags) ? drama.tags : [],
       description: drama.description || '',
       descriptionZh: drama.descriptionZh || '',
-      company: drama.company || '',
       source: drama.source || '',
       status: drama.status || '',
       url: drama.url || '',

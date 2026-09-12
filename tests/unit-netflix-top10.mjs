@@ -216,8 +216,8 @@ const TRICKY_SYN = 'Path a\\b and 100% ünïcode — done.';
   check('F1 title/description 取 top10Video', d.title === 'The Whisper Man' && d.description === 'When his young son vanishes…', JSON.stringify([d.title, d.description]));
   check('F1 poster 取 storyArt', d.poster === 'https://dnm.nflximg.net/story.jpg', d.poster);
   check('F1 url 仅凭 videoId 构造 /title/ 页（不用可为 null 的 titlePageSlug）', d.url === 'https://www.netflix.com/title/81278442', d.url);
-  check('F1 source/status/genres/company/titleZh 约定', d.source === 'netflix' && d.status === 'new' && eq(d.genres, []) && d.company === '' && d.titleZh === '' && d.descriptionZh === '',
-    JSON.stringify([d.source, d.status, d.genres, d.company, d.titleZh, d.descriptionZh]));
+  check('F1 source/status/genres/titleZh 约定', d.source === 'netflix' && d.status === 'new' && eq(d.genres, []) && d.titleZh === '' && d.descriptionZh === '',
+    JSON.stringify([d.source, d.status, d.genres, d.titleZh, d.descriptionZh]));
   check('F1 tags 三个原样保留、sourceListUrl 归一为订阅 URL', eq(d.tags, ['Netflix', 'Movie', 'Global']) && d.sourceListUrl === SUB_MOVIES.urlPattern, JSON.stringify([d.tags, d.sourceListUrl]));
   check('F1 scrapedAt 为 ISO 时间、translatedAt 为 null', !Number.isNaN(Date.parse(d.scrapedAt)) && d.translatedAt === null, JSON.stringify([d.scrapedAt, d.translatedAt]));
 }

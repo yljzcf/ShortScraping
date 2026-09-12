@@ -227,6 +227,7 @@ async function loadConfigFromJsonFiles() {
   }
 
   await runLegacyDramaMigrations();
+  await dropCompanyField();
   await migrateReelshortEpisodeUrls();
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
@@ -521,6 +522,42 @@ function migrateItemIdField() {
       console.log(`[ShortScraping] 已迁移 ${changedCount} 条历史记录的去重键字段 imdbId -> itemId`);
     }
   });
+}
+
+/**
+ * 存量 company 字段清理（v1.5.13）：该字段已从数据模型彻底移除——不再采集
+ * （Steam 开发商 / RoyalRoad 作者名 / IMDB 出品方三处采集逻辑已删）、不进 CSV 列、
+ * 本就不在 Lark payload 里，v1.5.3 起也不上卡片，留着纯属死数据。
+ *
+ * **刻意不挂进 runLegacyDramaMigrations**：那个入口被 legacyDramaMigrated 标记闸住，
+ * 存量用户机器上早已置位，挂进去永远不会执行。按 rsEpisodeUrlMigrated 的先例用
+ * 独立标记 companyFieldDropped。
+ *
+ * 幂等：无该键时零写入；写回经 storage.onChanged 自动触发一次 CSV 全量重写
+ * （同步服务按 dramas 载荷签名判重，字段被摘掉即签名必变，新列序才落得了盘）。
+ */
+async function dropCompanyField() {
+  const { companyFieldDropped } = await chrome.storage.local.get('companyFieldDropped');
+  if (companyFieldDropped) return;
+
+  await enqueueDramaWrite('移除 company 字段', async () => {
+    const dramas = await getDramasInQueue();
+    let changedCount = 0;
+
+    const cleaned = dramas.map(drama => {
+      if (!drama || !('company' in drama)) return drama;
+      changedCount++;
+      const { company, ...rest } = drama;
+      return rest;
+    });
+
+    if (changedCount > 0) {
+      await writeDramasInQueue(cleaned);
+      console.log(`[ShortScraping] 已从 ${changedCount} 条历史记录中移除 company 字段`);
+    }
+  });
+
+  await chrome.storage.local.set({ companyFieldDropped: true });
 }
 
 /**

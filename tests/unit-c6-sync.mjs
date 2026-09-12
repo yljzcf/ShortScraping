@@ -55,7 +55,7 @@ async function waitHealthy() {
 
 const mk = (n) => ({
   id: `id-${n}`, itemId: `tt000${n}`, title: `Title ${n}`, titleZh: '', tags: ['T'],
-  description: `desc ${n}`, descriptionZh: '', company: '', source: 'unittest',
+  description: `desc ${n}`, descriptionZh: '', source: 'unittest',
   status: 'new', url: `${SUB}/${n}`, sourceListUrl: SUB, poster: '',
   scrapedAt: '2026-08-01T00:00:00.000Z', translatedAt: ''
 });

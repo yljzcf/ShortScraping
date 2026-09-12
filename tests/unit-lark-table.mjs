@@ -95,8 +95,10 @@ const FIXTURE = [
 ];
 
 check('T1 TABLE_COLUMNS 与 TimelineCsv.CSV_COLUMNS 严格一致',
-  deepEq(Lark.TABLE_COLUMNS, TimelineCsv.CSV_COLUMNS) && Lark.TABLE_COLUMNS.length === 16,
+  deepEq(Lark.TABLE_COLUMNS, TimelineCsv.CSV_COLUMNS) && Lark.TABLE_COLUMNS.length === 15,
   `${(Lark.TABLE_COLUMNS || []).length} 列`);
+check('T1c company 不在导出列内（v1.5.13 彻底移除）',
+  !Lark.TABLE_COLUMNS.includes('company') && !Lark.TABLE_HEADERS.some(h => h.includes('出品方')), '');
 check('T1b TABLE_HEADERS 为中文名、与列一一对应且无空缺',
   Array.isArray(Lark.TABLE_HEADERS) && Lark.TABLE_HEADERS.length === Lark.TABLE_COLUMNS.length
   && Lark.TABLE_HEADERS.every(h => typeof h === 'string' && h.trim() && !/^[a-zA-Z]+$/.test(h))
@@ -106,7 +108,7 @@ check('T1b TABLE_HEADERS 为中文名、与列一一对应且无空缺',
 const rows = Lark.buildTableRows ? Lark.buildTableRows(FIXTURE) : [];
 check('T2 itemId 去重 + 无键跳过（5 输入 → 3 行）', rows.length === 3, `rows=${rows.length}`);
 check('T3 去重先到先得（保留首条 Alpha）', rows[0]?.title === 'Alpha', rows[0]?.title);
-check('T4 每行含全部 16 键', rows.every(r => deepEq(Object.keys(r), TimelineCsv.CSV_COLUMNS)), '');
+check('T4 每行含全部 15 键', rows.every(r => deepEq(Object.keys(r), TimelineCsv.CSV_COLUMNS)), '');
 check('T5 行内 poster 已改写', rows.every(r => convertible(r.poster)),
   rows.filter(r => !convertible(r.poster)).map(r => r.poster).join(' | '));
 
@@ -129,14 +131,15 @@ const tsvLines = tsv.split('\n');
 check('S1 TSV 只有数据行、不带表头', tsvLines.length === rows.length
   && !tsvLines[0].startsWith('id\t') && !tsvLines[0].includes('条目ID'), `lines=${tsvLines.length}`);
 check('S2 TSV 首行即第一条数据', tsvLines[0].split('\t')[2] === 'Alpha', tsvLines[0].slice(0, 60));
-check('S3 TSV 每行恰好 16 格（无制表符污染导致的错位）',
-  tsvLines.every(line => line.split('\t').length === 16),
+check('S3 TSV 每行恰好 15 格（无制表符污染导致的错位）',
+  tsvLines.every(line => line.split('\t').length === 15),
   tsvLines.map(l => l.split('\t').length).join(','));
 check('S4 TSV 内嵌换行已折成空格', !/\r/.test(tsv) && tsv.includes('line one line two'), '');
 check('S5 TSV 不加公式前缀（- 开头的简介原样）', tsv.includes('- 以减号开头的正常简介') && !tsv.includes("'- 以减号"), '');
 check('S6 TSV 不做 CSV 引号包裹（逗号/引号原样进单元格）',
   tsv.includes('含，逗号与"引号"') && !tsv.includes('""引号""'), '');
-check('S7 TSV tags/genres 竖线连接', tsv.includes('IMDB|micro-drama') && tsv.includes('Romance|Drama'), '');
+check('S7 TSV tags/genres 逗号连接（制表符分列，逗号在格内无害）',
+  tsv.includes('IMDB,micro-drama') && tsv.includes('Romance,Drama'), '');
 
 const csv = Lark.toCsv(rows);
 // CSV 是「导入建表」用的，表头即字段名——固定中文（2026-09-12 用户定）
@@ -152,7 +155,7 @@ check('S12 CSV 与 TimelineCsv 产物不同（poster 已改写、表头已中文
 check('S13 空输入：CSV 只剩表头、TSV 为空串', Lark.toTsv([]) === ''
   && Lark.toCsv([]).trimEnd().split('\r\n').length === 1, JSON.stringify(Lark.toTsv([])));
 check('S14 CSV 数据行列数与表头一致', csv.trimEnd().split('\r\n').slice(1)
-  .every(line => (line.match(/","/g) || []).length + 1 === 16), '');
+  .every(line => (line.match(/","/g) || []).length + 1 === 15), '');
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

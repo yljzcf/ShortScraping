@@ -79,12 +79,13 @@ const seedLegacy = async () => {
   await resetDramasCache();
   rawStore.dramas = [
     { id: 'id-1', imdbId: 'tt0001', title: 'Old Field', tags: ['T'], source: 'unittest', status: 'trans', sourceListUrl: SUB },
-    { id: 'id-2', itemId: 'rr123', title: 'RR Tag', tags: ['RR'], source: 'royalroad', status: 'trans', sourceListUrl: SUB },
+    { id: 'id-2', itemId: 'rr123', title: 'RR Tag', tags: ['RR'], company: 'Some Author', source: 'royalroad', status: 'trans', sourceListUrl: SUB },
     { id: 'id-3', itemId: 'mdf-orphan-slug', title: 'Unmapped Fandom', tags: ['T'], source: 'mydrama', status: 'new', sourceListUrl: SUB },
-    { id: 'id-4', itemId: 'ns001', title: 'Normal', tags: ['T'], source: 'netshort', status: 'trans', sourceListUrl: SUB }
+    { id: 'id-4', itemId: 'ns001', title: 'Normal', tags: ['T'], company: '', source: 'netshort', status: 'trans', sourceListUrl: SUB }
   ];
   delete rawStore.legacyDramaMigrated;
   delete rawStore.rsEpisodeUrlMigrated;
+  delete rawStore.companyFieldDropped;
   rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
 };
 await seedLegacy();
@@ -106,6 +107,11 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   check('T1c mdf- 未映射条目已清理', !byId['id-3'] && dramas.length === 3, `len=${dramas.length}`);
   check('T1d legacyDramaMigrated 已置位', rawStore.legacyDramaMigrated === true, String(rawStore.legacyDramaMigrated));
   check('T1e rsEpisodeUrlMigrated 已置位（无候选也收口）', rawStore.rsEpisodeUrlMigrated === true, String(rawStore.rsEpisodeUrlMigrated));
+  // v1.5.13：company 彻底移除。挂在独立标记上——legacyDramaMigrated 在存量机器上早已
+  // 置位，挂进 runLegacyDramaMigrations 的话这条迁移永远不会执行
+  check('T1f company 字段已从存量记录摘除（含空串值）',
+    dramas.every(d => !('company' in d)), JSON.stringify(dramas.map(d => d.company)));
+  check('T1g companyFieldDropped 已置位', rawStore.companyFieldDropped === true, String(rawStore.companyFieldDropped));
 }
 
 // ---------- T2 二次唤醒：dramas 全表读恰 1 次（仅 prune，不可标记项） ----------

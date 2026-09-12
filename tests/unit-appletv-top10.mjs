@@ -171,9 +171,9 @@ const proxyOf = (listHtml, detail = {}) => (url) => {
   check('F1 url 取 contextAction.url 并剥掉 ?ctx_agid（代理白名单只认无 query 形态）',
     d.url === 'https://tv.apple.com/us/show/ted-lasso/umc.cmc.vtoh0mn0xn7t3c643xqonfzy', d.url);
   check('F1 genres 由详情官方多值覆盖榜单 caption', eq(d.genres, ['Comedy', 'Sports']), JSON.stringify(d.genres));
-  check('F1 source/status/company/titleZh 约定',
-    d.source === 'appletv' && d.status === 'new' && d.company === '' && d.titleZh === '' && d.descriptionZh === '',
-    JSON.stringify([d.source, d.status, d.company, d.titleZh, d.descriptionZh]));
+  check('F1 source/status/titleZh 约定',
+    d.source === 'appletv' && d.status === 'new' && d.titleZh === '' && d.descriptionZh === '',
+    JSON.stringify([d.source, d.status, d.titleZh, d.descriptionZh]));
   check('F1 tags 三个原样保留、sourceListUrl 归一为订阅 URL', eq(d.tags, ['Apple', 'TV', 'US']) && d.sourceListUrl === LIST_SHOWS, JSON.stringify([d.tags, d.sourceListUrl]));
   check('F1 scrapedAt 为 ISO 时间、translatedAt 为 null', !Number.isNaN(Date.parse(d.scrapedAt)) && d.translatedAt === null, JSON.stringify([d.scrapedAt, d.translatedAt]));
   check('F1 代理调用＝1 次榜单 + 1 次详情（且详情 URL 无 query）',

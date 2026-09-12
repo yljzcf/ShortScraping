@@ -165,13 +165,14 @@
   // 与 TABLE_COLUMNS 同序一一对应；改列必须同步改这里（unit-lark-table T1b 守着）
   const TABLE_HEADERS = [
     '记录ID', '条目ID', '标题', '中文标题', '来源标签',
-    '简介', '中文简介', '出品方/作者', '站点', '翻译状态',
+    '简介', '中文简介', '站点', '翻译状态',
     '条目链接', '订阅来源', '封面链接', '抓取时间', '翻译时间', '内容类型'
   ];
 
-  /** 单元格归一：数组竖线连接、制表符/换行折成空格（TSV 粘贴不错位的前提）。 */
+  /** 单元格归一：数组英文逗号连接（v1.5.13 由竖线改，与 payload 的 tags/genres 同口径）、
+   *  制表符/换行折成空格（TSV 粘贴不错位的前提；CSV 侧靠引号包裹，逗号不拆列）。 */
   function tableCell(value) {
-    const text = Array.isArray(value) ? value.join('|')
+    const text = Array.isArray(value) ? value.join(',')
       : (value === null || value === undefined ? '' : String(value));
     return text.replace(/[\t\r\n]+/g, ' ');
   }

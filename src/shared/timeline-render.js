@@ -193,7 +193,7 @@
     const descEn = String(drama.description || '').trim();
 
     // footer 右槽：内容类型标签 chips（v1.5.3 替换原制作公司/作者标签展示；
-    // company 字段数据保留，存储/CSV/Lark 不受影响，仅卡片不再显示）
+    // company 字段已于 v1.5.13 从数据模型彻底移除——不再采集、不进 CSV 列）
     const genreChips = getDisplayGenres(drama);
 
     // Lark 按钮双闸门：readOnly（共享页）不渲染，未注入回调（调用方未接入）也不渲染
