@@ -29,6 +29,12 @@
     ? require('./site-registry.js').SOURCE_NAMES
     : global.SiteRegistry.SOURCE_NAMES;
 
+  // 列序/字段白名单同样不另立真源，取自 timeline-csv.js（后台 importScripts 与
+  // 设置页 <script> 都已把它排在本模块之前）
+  const TimelineCsv = (typeof module !== 'undefined' && module.exports)
+    ? require('./timeline-csv.js')
+    : global.TimelineCsv;
+
   function normalizeConfig(rawConfig) {
     const config = { ...DEFAULT_CONFIG, ...(rawConfig || {}) };
     const timeout = Number(config.requestTimeoutSec);
@@ -87,6 +93,11 @@
         const u = new URL(raw);
         u.searchParams.delete('width');
         u.searchParams.delete('height');
+        // 路径段里的 %20 / %3A 换成捷径能解析的等价字符：该 CDN 对
+        // `%20`↔`+`、`%3A`↔`:` 两种形态返回同一字节（2026-09-12 逐例 curl 实测
+        // 200 且 size 完全一致）。%20 只能换 `+` 不能解成裸空格——裸空格的 URL
+        // 直接失效。只改 pathname，不动查询串。
+        u.pathname = u.pathname.replace(/%20/gi, '+').replace(/%3A/gi, ':');
         return u.toString();
       } catch (e) {
         // 解析失败原样透传
@@ -130,6 +141,76 @@
       scraped_at: asText(d.scrapedAt),
       pushed_at: new Date().toISOString()
     };
+  }
+
+  /* ——— 多维表格导出投影层 ———————————————————————————————————————
+   * webhook 触发器按「1 条记录＝1 次工作流运行」计费，存量 3453 条与每月约
+   * 1400 条的增量都远超免费额度，故批量走「导出文件/剪贴板 → Base 导入或粘贴」。
+   *
+   * 与 TimelineCsv 的两处刻意分歧（勿「统一口径」改回去，unit-lark-table 守着）：
+   * 1. poster 一律经 posterForPayload 改写——官方「链接转附件」捷径解析不了含
+   *    英文逗号/百分号编码的 URL。2026-09-12 全量实测：不改写有 601 条转不出图，
+   *    改写后只剩 5 条（1 条 netshort 与 1 条 mydrama 的逗号在 CDN 路径里、
+   *    3 条 mydrama 标题带 %E2%80%99 右单引号），无解部分是站点数据本身的形态。
+   * 2. 不加 CSV 公式前缀——Base 文本字段不执行公式，加前缀只会让以 - / + 开头的
+   *    正常简介（全量实测 4 条）平白多出撇号。
+   *
+   * CSV 与 TSV 的单元格内容完全一致，只差传输形态：CSV 给「导入」建表，
+   * TSV 给剪贴板粘贴追加（Base 粘贴按制表符分列）。
+   */
+  const CSV_BOM = '﻿';
+  const TABLE_COLUMNS = TimelineCsv.CSV_COLUMNS;
+
+  /** 单元格归一：数组竖线连接、制表符/换行折成空格（TSV 粘贴不错位的前提）。 */
+  function tableCell(value) {
+    const text = Array.isArray(value) ? value.join('|')
+      : (value === null || value === undefined ? '' : String(value));
+    return text.replace(/[\t\r\n]+/g, ' ');
+  }
+
+  /**
+   * 条目数组 → 表格行数组（16 键，键序即 TABLE_COLUMNS）。
+   * 先按 since/sources 过滤再去重：seen 只记真正产出的行，避免范围外的重复
+   * 条目把范围内的同 itemId 条目挤掉。
+   *
+   * @param {object[]} dramas
+   * @param {{since?: string, sources?: string[]}} [options] since 为 ISO 时间戳，
+   *        取 `scrapedAt >= since`（含边界）；sources 为站点白名单，空/缺省＝全部。
+   */
+  function buildTableRows(dramas, options) {
+    const opts = options || {};
+    const since = asText(opts.since);
+    const sources = Array.isArray(opts.sources) && opts.sources.length ? new Set(opts.sources) : null;
+    const seen = new Set();
+    const rows = [];
+
+    for (const drama of dramas || []) {
+      const normalized = TimelineCsv.normalizeDrama(drama);
+      const key = normalized.itemId || normalized.id;
+      if (!key) continue;
+      if (sources && !sources.has(normalized.source)) continue;
+      // 无 scrapedAt 的条目带 since 条件时保守排除（与按条件清理的日期谓词同向）
+      if (since && !(normalized.scrapedAt && normalized.scrapedAt >= since)) continue;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      rows.push({ ...normalized, poster: posterForPayload(normalized.poster) });
+    }
+
+    return rows;
+  }
+
+  /** 行数组 → 制表符分隔文本（剪贴板粘贴用，无 BOM、无引号包裹）。 */
+  function toTsv(rows) {
+    const body = (rows || []).map(row => TABLE_COLUMNS.map(column => tableCell(row[column])).join('\t'));
+    return [TABLE_COLUMNS.join('\t'), ...body].join('\n');
+  }
+
+  /** 行数组 → CSV 文本（导入建表用，BOM + CRLF，与 TimelineCsv 同款引号转义）。 */
+  function toCsv(rows) {
+    const body = (rows || []).map(row => TABLE_COLUMNS
+      .map(column => `"${tableCell(row[column]).replace(/"/g, '""')}"`).join(','));
+    return CSV_BOM + [TABLE_COLUMNS.join(','), ...body].join('\r\n') + '\r\n';
   }
 
   /**
@@ -210,9 +291,14 @@
   const api = {
     DEFAULT_CONFIG,
     SOURCE_NAMES,
+    TABLE_COLUMNS,
     normalizeConfig,
     configReadiness,
+    posterForPayload,
     buildPayload,
+    buildTableRows,
+    toTsv,
+    toCsv,
     fetchWithTimeout,
     pushDrama
   };
