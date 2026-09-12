@@ -273,28 +273,49 @@
     const heading = titleZh && title ? `${titleZh}（${title}）` : (titleZh || title || '（无标题）');
 
     const elements = [];
-    if (summary) elements.push({ tag: 'div', text: { tag: 'lark_md', content: summary } });
+    if (summary) elements.push({ tag: 'markdown', content: summary });
 
-    // 来源与类别合成一块：独立 div 天然与上文隔开一行，两行本身要贴在一起
+    // 来源与类别合成一块：独立元素天然与上文隔开一行，两行本身要贴在一起
     // （tags 自带平台名，不再另外拼 SOURCE_NAMES，否则「NetShort · NetShort」重复）
     const meta = [];
     if (tags.length) meta.push(`**来源：**${tags.join(' / ')}`);
     if (genres.length) meta.push(`**类别：**${genres.join(' / ')}`);
-    if (meta.length) elements.push({ tag: 'div', text: { tag: 'lark_md', content: meta.join('\n') } });
+    if (meta.length) elements.push({ tag: 'markdown', content: meta.join('\n') });
 
+    // 按钮靠右只有这一种走法（2026-09-12 逐个实测）：v1 的 column 不收 action
+    // （`action components are not allowed in the column`）、v2 的 button 不认
+    // `horizontal_align`（`unknown property`），只有 **v2 的 column_set 带
+    // horizontal_align:'right'、里面直接放 button** 被接受。别再试别的。
     if (/^https?:\/\//i.test(url)) {
       elements.push({
-        tag: 'action',
-        actions: [{ tag: 'button', text: { tag: 'plain_text', content: '去瞅瞅' }, url, type: 'primary' }]
+        tag: 'column_set',
+        horizontal_align: 'right',
+        flex_mode: 'none',
+        columns: [{
+          tag: 'column',
+          width: 'auto',
+          vertical_align: 'top',
+          elements: [{
+            tag: 'button',
+            text: { tag: 'plain_text', content: '去瞅瞅' },
+            behaviors: [{ type: 'open_url', default_url: url }],
+            type: 'primary'
+          }]
+        }]
       });
     }
 
     return {
       msg_type: 'interactive',
       card: {
+        // schema 2.0 是当前最新（实测 2.1 / 3.0 均回 `unknown schema`）。
+        // 切它唯一的理由就是上面那个靠右按钮——v1 做不到。结构随之全变：
+        // 顶层 elements → body.elements、div+text.lark_md → markdown、
+        // action+actions[] → 直接 button + behaviors。
+        schema: '2.0',
         config: { wide_screen_mode: true },
         header: { template: 'blue', title: { tag: 'plain_text', content: heading } },
-        elements
+        body: { elements }
       }
     };
   }

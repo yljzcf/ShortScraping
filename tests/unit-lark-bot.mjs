@@ -36,7 +36,9 @@ check('C1 buildBotCard 已导出', typeof Lark.buildBotCard === 'function', type
 // 卡片版式（2026-09-12 用户定，顺序固定）：
 //   标题栏＝中文译名（英文译名）／正文①简介（中文优先，**不再单列斜体英文原文**）
 //   ②空行后「**来源：**」+tags 与「**类别：**」+genres ③按钮「去瞅瞅」
-const mdOf = (c, i) => c?.card?.elements?.[i]?.text?.content || '';
+// v2 schema：正文在 card.body.elements，文本元素是 markdown、内容在 content
+const elsOf = (c) => c?.card?.body?.elements || [];
+const mdOf = (c, i) => elsOf(c)[i]?.content || '';
 
 if (card) {
   const json = JSON.stringify(card);
@@ -55,8 +57,11 @@ if (card) {
   check('C6c 来源在类别之前',
     mdOf(card, 1).indexOf('**来源：**') < mdOf(card, 1).indexOf('**类别：**'), mdOf(card, 1));
   check('C6d 正文只有简介与来源类别两段（无多余段落）',
-    (card.card.elements || []).filter(e => e.tag === 'div').length === 2,
-    String((card.card.elements || []).filter(e => e.tag === 'div').length));
+    elsOf(card).filter(e => e.tag === 'markdown').length === 2,
+    String(elsOf(card).filter(e => e.tag === 'markdown').length));
+  check('C6e 用 v2 schema 且正文挂在 body.elements 下',
+    card.card.schema === '2.0' && Array.isArray(card.card.body?.elements)
+    && card.card.elements === undefined, JSON.stringify(card.card.schema));
   check('C7 尾部按钮文案「去瞅瞅」并指向原页',
     json.includes('"去瞅瞅"') && json.includes('https://www.netflix.com/title/12345')
     && json.includes('"tag":"button"'), '');
@@ -114,17 +119,25 @@ if (card) {
   check('C14d 未超限的简介原样输出', mdOf(shortZh, 0) === '短简介。', mdOf(shortZh, 0));
 }
 
-// ---------- B 组：按钮对齐（2026-09-12 实测结论，别再重复试） ----------
-// 飞书 v1 卡片的 action 元素只有 bisected/trisection/flow 三种布局，都不含右对齐；
-// 想用 column_set 分栏把它挤到右边也不行——实测直接被拒：
-//   ErrCode: 200410; action components are not allowed in the column
-// 故按钮固定铺在卡片底部（左对齐）。要右对齐只能整卡切 card v2 schema，不值当。
+// ---------- B 组：按钮靠右（2026-09-12 逐个实测的唯一可行形态，别再换写法） ----------
+// 三种走法只有第三种被接受：
+//   v1 column_set 里放 action → ErrCode 200410 action components are not allowed in the column
+//   v2 button 直接加 horizontal_align → ErrCode 200621 unknown property: horizontal_align
+//   v2 column_set(horizontal_align:right) 里直接放 button → ✅
+// 另实测 schema 2.1 / 3.0 均回 `unknown schema`，2.0 就是当前最新。
 {
-  const el = card?.card?.elements || [];
-  const last = el[el.length - 1];
-  check('B1 按钮是顶层 action 元素、不套分栏（分栏放 action 会被飞书拒收）',
-    last?.tag === 'action' && Array.isArray(last?.actions)
-    && !JSON.stringify(el).includes('column_set'), JSON.stringify(last));
+  const els = elsOf(card);
+  const last = els[els.length - 1];
+  check('B1 按钮包在靠右的 column_set 里（唯一被飞书接受的靠右形态）',
+    last?.tag === 'column_set' && last?.horizontal_align === 'right'
+    && last?.columns?.[0]?.width === 'auto', JSON.stringify(last).slice(0, 160));
+  const btn = last?.columns?.[0]?.elements?.[0];
+  check('B2 button 用 v2 的 behaviors 携带跳转地址（v2 不认 v1 的 url 字段）',
+    btn?.tag === 'button' && btn?.text?.content === '去瞅瞅'
+    && btn?.behaviors?.[0]?.type === 'open_url'
+    && btn?.behaviors?.[0]?.default_url === FULL.url, JSON.stringify(btn));
+  check('B3 button 上不带 horizontal_align（v2 的 button 不认该属性，会整卡拒收）',
+    btn && !('horizontal_align' in btn), JSON.stringify(Object.keys(btn || {})));
 }
 
 // ---------- R 组：就绪判据 ----------
