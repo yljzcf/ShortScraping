@@ -34,8 +34,8 @@ const card = Lark.buildBotCard ? Lark.buildBotCard(FULL) : null;
 check('C1 buildBotCard 已导出', typeof Lark.buildBotCard === 'function', typeof Lark.buildBotCard);
 
 // 卡片版式（2026-09-12 用户定，顺序固定）：
-//   标题栏＝中文译名（英文译名）／正文①中文简介 ②斜体英文原文
-//   ③空行后「**来源：**」+tags ④「**类别：**」+genres ⑤按钮「去瞅瞅」
+//   标题栏＝中文译名（英文译名）／正文①简介（中文优先，**不再单列斜体英文原文**）
+//   ②空行后「**来源：**」+tags 与「**类别：**」+genres ③按钮「去瞅瞅」
 const mdOf = (c, i) => c?.card?.elements?.[i]?.text?.content || '';
 
 if (card) {
@@ -45,14 +45,18 @@ if (card) {
   check('C3 标题栏＝中文译名（英文译名），不带「新增」字样',
     header === '低语者（The Whisper Man）' && !header.includes('新增'), header);
   check('C4 正文第一段是中文简介', mdOf(card, 0) === '一段中文简介。', mdOf(card, 0));
-  check('C5 第二段是斜体英文原文', mdOf(card, 1) === '*An English synopsis.*', mdOf(card, 1));
+  check('C5 有中文简介时不再渲染英文原文段',
+    !json.includes('An English synopsis') && !json.includes('*An'), json.slice(0, 200));
   check('C6 来源行加粗且列 tags（tags 自带平台名）',
-    mdOf(card, 2).includes('**来源：**') && mdOf(card, 2).includes('Netflix')
-    && mdOf(card, 2).includes('Movie') && mdOf(card, 2).includes('Global'), mdOf(card, 2));
-  check('C6b 类别行列 genres', mdOf(card, 2).includes('**类别：**')
-    && mdOf(card, 2).includes('Thrillers') && mdOf(card, 2).includes('Mysteries'), mdOf(card, 2));
+    mdOf(card, 1).includes('**来源：**') && mdOf(card, 1).includes('Netflix')
+    && mdOf(card, 1).includes('Movie') && mdOf(card, 1).includes('Global'), mdOf(card, 1));
+  check('C6b 类别行列 genres', mdOf(card, 1).includes('**类别：**')
+    && mdOf(card, 1).includes('Thrillers') && mdOf(card, 1).includes('Mysteries'), mdOf(card, 1));
   check('C6c 来源在类别之前',
-    mdOf(card, 2).indexOf('**来源：**') < mdOf(card, 2).indexOf('**类别：**'), mdOf(card, 2));
+    mdOf(card, 1).indexOf('**来源：**') < mdOf(card, 1).indexOf('**类别：**'), mdOf(card, 1));
+  check('C6d 正文只有简介与来源类别两段（无多余段落）',
+    (card.card.elements || []).filter(e => e.tag === 'div').length === 2,
+    String((card.card.elements || []).filter(e => e.tag === 'div').length));
   check('C7 尾部按钮文案「去瞅瞅」并指向原页',
     json.includes('"去瞅瞅"') && json.includes('https://www.netflix.com/title/12345')
     && json.includes('"tag":"button"'), '');
@@ -67,11 +71,13 @@ if (card) {
   const noZh = Lark.buildBotCard({ ...FULL, titleZh: '', descriptionZh: '' });
   check('C10a 无中文标题时标题栏只留英文原名',
     noZh.card.header.title.content === 'The Whisper Man', noZh.card.header.title.content);
-  check('C10b 无中文简介时正文首段直接是斜体英文（不留空段）',
-    mdOf(noZh, 0) === '*An English synopsis.*', mdOf(noZh, 0));
-  const noEn = Lark.buildBotCard({ ...FULL, description: '' });
-  check('C10c 无英文原文时不渲染斜体段（第二段直接是来源/类别）',
-    mdOf(noEn, 0) === '一段中文简介。' && mdOf(noEn, 1).includes('**来源：**'), mdOf(noEn, 1));
+  // 中文缺失才回退英文（且不带斜体）：机器人只在翻译完成后推，理论上都有中文，
+  // 但半成品收口的卡可能没有，不能给张空卡
+  check('C10b 无中文简介时回退英文原文，且不加斜体',
+    mdOf(noZh, 0) === 'An English synopsis.', mdOf(noZh, 0));
+  const noAny = Lark.buildBotCard({ ...FULL, descriptionZh: '', description: '' });
+  check('C10c 中英简介都没有时不渲染简介段（首段直接是来源/类别）',
+    mdOf(noAny, 0).includes('**来源：**'), mdOf(noAny, 0));
   const noMeta = Lark.buildBotCard({ ...FULL, tags: [], genres: [] });
   check('C10d 无 tags/genres 时不渲染来源与类别行',
     !JSON.stringify(noMeta).includes('来源：') && !JSON.stringify(noMeta).includes('类别：'), '');
@@ -85,20 +91,21 @@ if (card) {
   check('C12 非 http(s) 的 url 不渲染按钮', !JSON.stringify(badUrl).includes('"tag":"button"'), '');
   const bare = Lark.buildBotCard({});
   check('C13 空条目也能组装出合法卡片', bare?.msg_type === 'interactive' && Boolean(bare?.card?.header), '');
-  // 裁剪上限 240（2026-09-12 用户定，中英两段共用）。刻意断言「被裁那一段的长度」
-  // 而不是整卡 JSON 总长——后者是随版式浮动的魔数，改版式就得跟着调，挡不住真回归
-  const LIMIT = 240;
+  // 裁剪上限 200（2026-09-12 用户定）。刻意断言「被裁那一段的长度」而不是整卡
+  // JSON 总长——后者是随版式浮动的魔数，改版式就得跟着调，挡不住真回归
+  const LIMIT = 200;
   const longDesc = Lark.buildBotCard({
     ...FULL, descriptionZh: '很长'.repeat(400), description: 'x'.repeat(900)
   });
-  check('C14a 超长中文简介裁到 240 字 + 省略号',
+  check('C14a 超长中文简介裁到 200 字 + 省略号',
     mdOf(longDesc, 0).length === LIMIT + 1 && mdOf(longDesc, 0).endsWith('…'),
     `len=${mdOf(longDesc, 0).length}`);
-  check('C14b 超长英文原文同上限（斜体星号不计入正文）',
-    mdOf(longDesc, 1).length === LIMIT + 3 && mdOf(longDesc, 1).startsWith('*')
-    && mdOf(longDesc, 1).endsWith('…*'), `len=${mdOf(longDesc, 1).length}`);
+  const longEn = Lark.buildBotCard({ ...FULL, descriptionZh: '', description: 'x'.repeat(900) });
+  check('C14b 回退的英文原文同上限', mdOf(longEn, 0).length === LIMIT + 1
+    && mdOf(longEn, 0).endsWith('…') && !mdOf(longEn, 0).startsWith('*'),
+    `len=${mdOf(longEn, 0).length}`);
 
-  const exact = '刚好'.repeat(LIMIT / 2);      // 恰好 240 字
+  const exact = '刚好'.repeat(LIMIT / 2);      // 恰好 200 字
   const atLimit = Lark.buildBotCard({ ...FULL, descriptionZh: exact });
   check('C14c 恰好等于上限时不裁、不加省略号',
     mdOf(atLimit, 0) === exact && !mdOf(atLimit, 0).endsWith('…'), `len=${mdOf(atLimit, 0).length}`);

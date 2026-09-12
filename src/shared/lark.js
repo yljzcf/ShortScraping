@@ -249,7 +249,7 @@
    * 所以卡片只有标题/来源/类型/简介/跳转按钮，封面进不来（与 Base 表「封面只能
    * 是链接」同一个根因）。unit-lark-bot C8/C9 守着。
    */
-  const BOT_SUMMARY_LIMIT = 240;
+  const BOT_SUMMARY_LIMIT = 200;
 
   function clipText(value, limit) {
     const text = asText(value).replace(/\s+/g, ' ');
@@ -262,17 +262,18 @@
     const titleZh = asText(d.titleZh);
     const tags = (Array.isArray(d.tags) ? d.tags : []).map(asText).filter(Boolean);
     const genres = (Array.isArray(d.genres) ? d.genres : []).map(asText).filter(Boolean);
-    const summaryZh = clipText(d.descriptionZh, BOT_SUMMARY_LIMIT);
-    const summaryEn = clipText(d.description, BOT_SUMMARY_LIMIT);
+    // 只出一段简介，中文优先（2026-09-12 用户定：去掉原先那段斜体英文原文）。
+    // 中文缺失时回退英文而不是留空——机器人只在翻译完成后才推，理论上都有中文，
+    // 但半成品收口（MAX_PARTIAL_TRANSLATE_ATTEMPTS 用尽）的卡可能没有，不能给张空卡。
+    const summary = asText(d.descriptionZh) ? clipText(d.descriptionZh, BOT_SUMMARY_LIMIT)
+      : clipText(d.description, BOT_SUMMARY_LIMIT);
     const url = asText(d.url);
 
     // 标题栏＝中文译名（英文原名）；缺哪边就只留另一边
     const heading = titleZh && title ? `${titleZh}（${title}）` : (titleZh || title || '（无标题）');
 
     const elements = [];
-    if (summaryZh) elements.push({ tag: 'div', text: { tag: 'lark_md', content: summaryZh } });
-    // 英文原文走斜体，与中文译文在视觉上分层
-    if (summaryEn) elements.push({ tag: 'div', text: { tag: 'lark_md', content: `*${summaryEn}*` } });
+    if (summary) elements.push({ tag: 'div', text: { tag: 'lark_md', content: summary } });
 
     // 来源与类别合成一块：独立 div 天然与上文隔开一行，两行本身要贴在一起
     // （tags 自带平台名，不再另外拼 SOURCE_NAMES，否则「NetShort · NetShort」重复）
