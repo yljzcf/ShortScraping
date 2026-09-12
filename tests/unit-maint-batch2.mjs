@@ -222,11 +222,23 @@ const mk = (n, over = {}) => ({
   check('T8c 失败条目保持待翻译（下轮重试）', (rawStore.dramas || []).every(d => d.status === 'new'),
     JSON.stringify(rawStore.dramas?.map(d => d.status)));
 
-  // T8d 部分成功不报错
+  // T8d 有写入就不报「检查配置」——哪怕只补到一半。
+  // v1.5.14 语义变更：夹具的 description 非空，只回片名不回简介＝半成品，
+  // 不计完成（translatedCount 0）、保持 new 下轮补；但接口明明通了，不该报错。
   await resetDramasCache(); rawStore.dramas = [mk(1, { status: 'new', titleZh: '' }), mk(2, { status: 'new', titleZh: '' })];
   batchBehavior = async (items) => items.map((_, i) => (i === 0 ? { title: '中文', desc: '' } : { title: '', desc: '' }));
   const r2 = await performTranslate({ source: 'manual' });
-  check('T8d 部分成功不报错（1/2）', r2?.translatedCount === 1 && !r2?.error, JSON.stringify(r2));
+  check('T8d 半成品不报「检查配置」', !r2?.error, JSON.stringify(r2));
+  check('T8d2 半成品存下已得片名但保持待翻译', (rawStore.dramas || [])
+    .every(d => d.status === 'new') && (rawStore.dramas || [])[0]?.titleZh === '中文',
+    JSON.stringify((rawStore.dramas || []).map(d => [d.status, d.titleZh, d.descriptionZh])));
+
+  // T8f 完整返回才计完成
+  await resetDramasCache(); rawStore.dramas = [mk(1, { status: 'new', titleZh: '' }), mk(2, { status: 'new', titleZh: '' })];
+  batchBehavior = async (items) => items.map((_, i) => (i === 0 ? { title: '中文', desc: '中文简介' } : { title: '', desc: '' }));
+  const rComplete = await performTranslate({ source: 'manual' });
+  check('T8f 完整返回的才计完成（1/2）', rComplete?.translatedCount === 1 && !rComplete?.error,
+    JSON.stringify(rComplete));
 
   // T8e API 模式全失败给通用提示
   rawStore.translateConfig = { translateMode: 'api', delayMs: 1 };

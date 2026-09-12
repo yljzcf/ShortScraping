@@ -6,7 +6,10 @@
     apiEndpoint: 'https://api.mymemory.translated.net/get',
     aiEndpoint: '', aiApiKey: '', aiModel: 'gpt-3.5-turbo',
     aiPrefixPrompt: '你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请把片名和内容简介翻译为最有网感的中文表达。',
-    batchSize: 10, delayMs: 200, requestTimeoutSec: 10
+    // requestTimeoutSec 是上限不是等待时长：推理型模型（deepseek-flash 等）一批
+    // 要烧几千个 reasoning token，2026-09-12 实测 10 条/批耗时 9.5~34 秒、中位 17.4，
+    // 旧默认值 10 秒会掐断约八成批次——整批作废下轮重试，API 白花、翻译被拖慢。
+    batchSize: 10, delayMs: 200, requestTimeoutSec: 60
   });
   function normalizeConfig(raw) {
     const input = raw && typeof raw === 'object' ? raw : {};

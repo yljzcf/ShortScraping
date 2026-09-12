@@ -1,13 +1,11 @@
 {
   "translateMode": "ai",
   "apiEndpoint": "https://api.mymemory.translated.net/get",
-
   "aiEndpoint": "https://api.deepseek.com/chat/completions",
   "aiApiKey": "sk-xxxx",
   "aiModel": "deepseek-v4-pro",
-
   "aiPrefixPrompt": "你是一位资深的影视爱好者，也观看过大量快节奏的短剧、短视频。请把片名和内容简介翻译为最有网感的中文表达。",
   "batchSize": 10,
   "delayMs": 200,
-  "requestTimeoutSec": 10
+  "requestTimeoutSec": 60
 }

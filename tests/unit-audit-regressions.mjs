@@ -95,7 +95,9 @@ assert.deepEqual([...Csv.validateImportDrama(card('tt1', { genres: ['', ' Romanc
 assert.deepEqual([...Csv.validateImportDrama(card('tt1', { tags: ['', 'IMDB '] })).tags], ['IMDB']);
 assert.equal(Config.normalizeConfig({ delayMs: 0, mode: 'ai' }).delayMs, 0);
 assert.equal(Config.normalizeConfig({ mode: 'ai' }).translateMode, 'ai');
-assert.equal(Config.normalizeConfig({ requestTimeoutSec: -1 }).requestTimeoutSec, 10);
+// 非法值回落到默认；默认 v1.5.14 由 10 提到 60（推理模型一批实测中位 17.4 秒）
+assert.equal(Config.normalizeConfig({ requestTimeoutSec: -1 }).requestTimeoutSec, 60);
+assert.equal(Config.normalizeConfig({ requestTimeoutSec: 15 }).requestTimeoutSec, 15);
 
 // The manifest deliberately limits injection but keeps user-configurable API permissions.
 const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));

@@ -145,10 +145,13 @@
       drama.genres = cleanGenres((en.genres || []).map(g => g && g.description));
       if (en.header_image) drama.poster = en.header_image;
 
-      if (titleZh || descriptionZh) {
-        // 采用 Steam 官方中文，跳过 AI 翻译
-        drama.titleZh = titleZh;
-        drama.descriptionZh = descriptionZh;
+      // 采用 Steam 官方中文。**官方中文齐全才跳过 AI 翻译**：只有一半时（商店有
+      // 中文名但没中文简介，或反之）留 status='new' 交翻译线补另一半——后台的
+      // fillOnly 保证不会拿 AI 译文覆盖已有的官方译名。此前判据是「任一非空即
+      // 标 trans」，缺的那半就永远补不上了（全库实测 23 条，v1.5.14 修）。
+      if (titleZh) drama.titleZh = titleZh;
+      if (descriptionZh) drama.descriptionZh = descriptionZh;
+      if (titleZh && (!enDesc || descriptionZh)) {
         drama.status = 'trans';
         drama.translatedAt = new Date().toISOString();
       }

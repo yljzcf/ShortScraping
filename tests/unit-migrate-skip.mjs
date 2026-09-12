@@ -75,17 +75,27 @@ const resetDramasCache = async () => {
   await globalThis.clearAllDramas().catch(() => {});
   failNextSet = false;
 };
+// 种入条数（条数断言一律由它推导，加夹具时不必再逐处改数字）
+const SEEDED = 7;
 const seedLegacy = async () => {
   await resetDramasCache();
   rawStore.dramas = [
     { id: 'id-1', imdbId: 'tt0001', title: 'Old Field', tags: ['T'], source: 'unittest', status: 'trans', sourceListUrl: SUB },
     { id: 'id-2', itemId: 'rr123', title: 'RR Tag', tags: ['RR'], company: 'Some Author', source: 'royalroad', status: 'trans', sourceListUrl: SUB },
     { id: 'id-3', itemId: 'mdf-orphan-slug', title: 'Unmapped Fandom', tags: ['T'], source: 'mydrama', status: 'new', sourceListUrl: SUB },
-    { id: 'id-4', itemId: 'ns001', title: 'Normal', tags: ['T'], company: '', source: 'netshort', status: 'trans', sourceListUrl: SUB }
+    { id: 'id-4', itemId: 'ns001', title: 'Normal', tags: ['T'], company: '', source: 'netshort', status: 'trans', sourceListUrl: SUB },
+    // v1.5.14 半成品翻译复位的三个面：缺中文标题 / 缺中文简介 / 齐全（不该动）
+    { id: 'id-5', itemId: 'st001', title: 'No Title Zh', description: 'en desc', titleZh: '', descriptionZh: '中文简介',
+      tags: ['T'], source: 'steam', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB },
+    { id: 'id-6', itemId: 'st002', title: 'No Desc Zh', description: 'en desc', titleZh: '官方中文名', descriptionZh: '',
+      tags: ['T'], source: 'steam', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB },
+    { id: 'id-7', itemId: 'st003', title: 'Complete', description: 'en desc', titleZh: '完整中文名', descriptionZh: '完整中文简介',
+      tags: ['T'], source: 'steam', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB }
   ];
   delete rawStore.legacyDramaMigrated;
   delete rawStore.rsEpisodeUrlMigrated;
   delete rawStore.companyFieldDropped;
+  delete rawStore.partialTranslationReset;
   rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
 };
 await seedLegacy();
@@ -104,7 +114,7 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   const byId = Object.fromEntries(dramas.map(d => [d.id, d]));
   check('T1a imdbId 字段已更名 itemId', byId['id-1'] && !('imdbId' in byId['id-1']) && byId['id-1'].itemId === 'tt0001', JSON.stringify(byId['id-1']));
   check('T1b RR 标签已改 RoyalRoad', byId['id-2']?.tags?.includes('RoyalRoad') && !byId['id-2']?.tags?.includes('RR'), JSON.stringify(byId['id-2']?.tags));
-  check('T1c mdf- 未映射条目已清理', !byId['id-3'] && dramas.length === 3, `len=${dramas.length}`);
+  check('T1c mdf- 未映射条目已清理', !byId['id-3'] && dramas.length === SEEDED - 1, `len=${dramas.length}`);
   check('T1d legacyDramaMigrated 已置位', rawStore.legacyDramaMigrated === true, String(rawStore.legacyDramaMigrated));
   check('T1e rsEpisodeUrlMigrated 已置位（无候选也收口）', rawStore.rsEpisodeUrlMigrated === true, String(rawStore.rsEpisodeUrlMigrated));
   // v1.5.13：company 彻底移除。挂在独立标记上——legacyDramaMigrated 在存量机器上早已
@@ -112,6 +122,15 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   check('T1f company 字段已从存量记录摘除（含空串值）',
     dramas.every(d => !('company' in d)), JSON.stringify(dramas.map(d => d.company)));
   check('T1g companyFieldDropped 已置位', rawStore.companyFieldDropped === true, String(rawStore.companyFieldDropped));
+  // v1.5.14：半成品翻译退回队列。缺中文标题与缺中文简介都要复位，齐全的不许动
+  check('T1h 缺中文标题的半成品已退回 new', byId['id-5']?.status === 'new', JSON.stringify(byId['id-5']));
+  check('T1i 缺中文简介的半成品已退回 new（官方译名保留）',
+    byId['id-6']?.status === 'new' && byId['id-6']?.titleZh === '官方中文名', JSON.stringify(byId['id-6']));
+  check('T1j 译文齐全的条目不被误动',
+    byId['id-7']?.status === 'trans' && byId['id-7']?.translatedAt === '2026-08-01T00:00:00.000Z',
+    JSON.stringify(byId['id-7']));
+  check('T1k partialTranslationReset 已置位', rawStore.partialTranslationReset === true,
+    String(rawStore.partialTranslationReset));
 }
 
 // ---------- T2 二次唤醒：dramas 全表读恰 1 次（仅 prune，不可标记项） ----------
@@ -123,7 +142,7 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   check('T2a 二次唤醒 dramas 全表读 ≤1 次（旧代码 4+ 次）', reads <= 1, `reads=${reads} log=${JSON.stringify(getLog)}`);
   const rsGets = getLog.filter(keys => keys.includes('rsEpisodeUrlMigrated'));
   check('T2b rs 标记读取不连带 dramas', rsGets.length === 1 && rsGets[0].length === 1, JSON.stringify(rsGets));
-  check('T2c 数据未被误动', (rawStore.dramas || []).length === 3, `len=${rawStore.dramas?.length}`);
+  check('T2c 数据未被误动', (rawStore.dramas || []).length === SEEDED - 1, `len=${rawStore.dramas?.length}`);
 }
 
 // ---------- T3 set 失败：标记不置位，下轮重试成功 ----------

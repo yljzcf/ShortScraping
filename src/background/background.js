@@ -228,6 +228,7 @@ async function loadConfigFromJsonFiles() {
 
   await runLegacyDramaMigrations();
   await dropCompanyField();
+  await resetPartialTranslations();
   await migrateReelshortEpisodeUrls();
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
@@ -561,6 +562,43 @@ async function dropCompanyField() {
 }
 
 /**
+ * 存量「半成品翻译」复位（v1.5.14）：把标着 trans 却缺了该有译文的条目退回
+ * status='new'，让翻译线重新补齐。命中条件＝原文非空而对应译文为空。
+ *
+ * 成因见 updateSingleDramaTranslation 的注释（回填判据曾是「任一非空即标完成」）
+ * 与 Steam 适配器的官方中文分支。全库实测 683 条：660 条缺中文标题、23 条缺中文简介。
+ *
+ * 复位是安全的：翻译线走 fillOnly，只补空缺，已有的官方译名/既有译文不会被冲掉。
+ * 独立标记 companyFieldDropped 同款理由——runLegacyDramaMigrations 早已置位。
+ */
+async function resetPartialTranslations() {
+  const { partialTranslationReset } = await chrome.storage.local.get('partialTranslationReset');
+  if (partialTranslationReset) return;
+
+  await enqueueDramaWrite('半成品翻译复位', async () => {
+    const dramas = await getDramasInQueue();
+    let changedCount = 0;
+
+    const reset = dramas.map(drama => {
+      if (!drama || drama.status !== 'trans') return drama;
+      const needTitle = Boolean(String(drama.title || '').trim()) && !String(drama.titleZh || '').trim();
+      const needDesc = Boolean(String(drama.description || '').trim()) && !String(drama.descriptionZh || '').trim();
+      if (!needTitle && !needDesc) return drama;
+      changedCount++;
+      const { translateAttempts, ...rest } = drama;
+      return { ...rest, status: 'new' };
+    });
+
+    if (changedCount > 0) {
+      await writeDramasInQueue(reset);
+      console.log(`[ShortScraping] 已把 ${changedCount} 条半成品翻译退回待翻译队列`);
+    }
+  });
+
+  await chrome.storage.local.set({ partialTranslationReset: true });
+}
+
+/**
  * 存量数据显示标签迁移：历史条目 tags 中的 "RR" 统一改为 "RoyalRoad"。
  * 只碰 tags 显示标签，不碰去重键 itemId 的 rr 前缀。
  * 幂等：无变化时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
@@ -814,6 +852,9 @@ async function performTranslateOnce(source) {
   let pendingCount = 0;
   let processedCount = 0;
   let translatedCount = 0;
+  // 「本轮有没有写进任何译文」与「完成了几条」是两件事：半成品（只补到一半、
+  // 保持 new 下轮重试）不计完成，但它证明接口是通的，不该触发下面的配置报错
+  let progressedCount = 0;
   let runStartedAt = null;
   let runError = null;
   let stateWritten = false;
@@ -860,11 +901,21 @@ async function performTranslateOnce(source) {
     });
 
     // 回填一条翻译结果并计进度：按 drama.id 精确定位，不依赖数组顺序（批量保对应的锚点）
+    //
+    // 完成判据＝「该翻的都翻出来了」：标题非空须有 titleZh，简介非空须有 descriptionZh
+    // （已有的值也算数——fillOnly 下它们不会被冲掉）。只回一半的留 status='new'
+    // 下轮补另一半，不再像此前那样一律标 trans 把半成品永久定格。
     const applyOne = async (drama, result) => {
       const hasTranslation = Boolean(result?.title || result?.desc);
       if (hasTranslation) {
-        const updated = await updateSingleDramaTranslation(drama.id, result);
+        const needTitle = Boolean(String(drama.title || '').trim());
+        const needDesc = Boolean(String(drama.description || '').trim());
+        const complete = (!needTitle || Boolean(result.title) || Boolean(drama.titleZh))
+          && (!needDesc || Boolean(result.desc) || Boolean(drama.descriptionZh));
+        const updated = await updateSingleDramaTranslation(drama.id, result, { fillOnly: true, complete });
+        progressedCount++;
         if (updated) translatedCount++;
+        else console.warn(`[ShortScraping] 翻译只补到一半，保持待翻译状态下轮重试: ${drama.title}`);
       } else {
         console.warn(`[ShortScraping] 翻译结果为空，保持待翻译状态: ${drama.title}`);
       }
@@ -925,9 +976,10 @@ async function performTranslateOnce(source) {
       showNotification(`已翻译 ${translatedCount} 部短剧`);
     }
 
-    // 有待翻译却一条都没翻成＝接口/配置有问题：把错误写进 summary，
-    // 弹窗据此显示 ❌ 而不是误导性的 ✅「成功翻译 0 条」。
-    if (translatedCount === 0 && pendingCount > 0) {
+    // 有待翻译却一条译文都没写进去＝接口/配置有问题：把错误写进 summary，
+    // 弹窗据此显示 ❌ 而不是误导性的 ✅「成功翻译 0 条」。判据用 progressedCount
+    // 而非 translatedCount——只补到一半也说明接口是通的，报「检查配置」会误导。
+    if (progressedCount === 0 && pendingCount > 0) {
       runError = lastError || '本轮没有任何条目翻译成功，请检查 config/trans.json 的接口配置';
       return { pendingCount, translatedCount, error: runError };
     }
@@ -963,28 +1015,53 @@ async function performTranslateOnce(source) {
   }
 }
 
+// 半成品重试上限：模型偶发只回简介不回片名，留 status='new' 下轮补；连续这么多轮
+// 仍补不齐就收口，避免个别条目每轮白烧一次 API（v1.5.14）
+const MAX_PARTIAL_TRANSLATE_ATTEMPTS = 3;
+
 /**
  * 更新单条翻译结果。读改写在单写者队列内执行，不会覆盖并行提交的新卡片。
+ *
+ * options.fillOnly（批量翻译线用）：只补空缺，绝不覆盖既有译文——保护 Steam
+ * 官方中文这类平台自带译名，也让「半成品下轮补另一半」不会把上轮成果冲掉。
+ * 弹窗单卡 🌍 重译不传该选项，仍是新结果优先（重译的语义就是要覆盖）。
+ *
+ * options.complete（同上）：false 表示该翻的还没翻全，此时**保持 status='new'**
+ * 让下一轮继续补。此前无论多残缺都直接标 trans，导致「有简介无标题」的条目被
+ * 永久定格、再也不进翻译队列（全库实测 660 条这样卡死）。
  */
-function updateSingleDramaTranslation(dramaId, result) {
+function updateSingleDramaTranslation(dramaId, result, options = {}) {
   return enqueueDramaWrite('翻译更新', async () => {
     const dramas = await getDramasInQueue();
     const index = dramas.findIndex(d => d.id === dramaId);
 
     if (index === -1) return false;
 
+    const current = dramas[index];
+    const titleZh = options.fillOnly
+      ? (current.titleZh || result.title || '')
+      : (result.title || current.titleZh);
+    const descriptionZh = options.fillOnly
+      ? (current.descriptionZh || result.desc || '')
+      : (result.desc || current.descriptionZh);
+
+    const complete = options.complete !== false;
+    const attempts = complete ? 0 : (Number(current.translateAttempts) || 0) + 1;
+    const done = complete || attempts >= MAX_PARTIAL_TRANSLATE_ATTEMPTS;
+
     // copy-on-write：缓存数组只读，不就地突变（快照读者可能正持有旧引用）
     const next = dramas.slice();
-    next[index] = {
-      ...dramas[index],
-      titleZh: result.title || dramas[index].titleZh,
-      descriptionZh: result.desc || dramas[index].descriptionZh,
-      status: 'trans',
-      translatedAt: new Date().toISOString()
-    };
+    const record = { ...current, titleZh, descriptionZh, status: done ? 'trans' : 'new' };
+    if (done) {
+      record.translatedAt = new Date().toISOString();
+      delete record.translateAttempts;
+    } else {
+      record.translateAttempts = attempts;
+    }
+    next[index] = record;
 
     await writeDramasInQueue(next);
-    return true;
+    return done;
   });
 }
 
