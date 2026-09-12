@@ -175,6 +175,10 @@
     button.type = 'button';
     button.className = 'tab-group-chip';
     button.dataset.group = groupLayout.group;
+    // 点它即展开并选中代表站点，语义上仍是一个（未选中的）tab，
+    // 这样容器的 role="tablist" 不会被非 tab 子元素破坏
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-selected', 'false');
     button.setAttribute('aria-expanded', 'false');
 
     const label = `${groupLayout.name}（${groupLayout.sites.length} 个站点）`;
@@ -223,6 +227,8 @@
       const expandable = groupLayout.sites.length > 1;
       group.className = expandable ? 'tab-group is-open' : 'tab-group';
       group.dataset.group = groupLayout.group;
+      // 纯视觉包装，不参与无障碍树——组内的 tab 仍视作 tablist 的直接子元素
+      group.setAttribute('role', 'presentation');
       if (expandable) group.title = `${groupLayout.name}（${groupLayout.sites.length} 个站点）`;
 
       for (const site of groupLayout.sites) {
