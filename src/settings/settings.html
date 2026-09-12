@@ -252,6 +252,77 @@
       gap: 8px;
     }
 
+    /* 分组分割标题：与弹窗头部折叠分组同一套定义（短剧 / 影视 / 游戏·网文） */
+    .subscription-divider {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
+      margin-top: 6px;
+    }
+
+    .subscription-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    /* 分组代表图标的固定项 */
+    .group-pin-rows {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .group-pin-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .group-pin-name {
+      min-width: 76px;
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .group-pin-option {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .group-pin-option:hover {
+      border-color: var(--primary);
+    }
+
+    .group-pin-option input[type="radio"] {
+      accent-color: var(--primary);
+      cursor: pointer;
+    }
+
+    .group-pin-option img {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+    }
+
+    .group-pin-option.is-pinned {
+      border-color: var(--primary);
+      color: var(--text);
+    }
+
     .subscription-group-header {
       display: flex;
       align-items: center;
@@ -487,6 +558,16 @@
       </section>
 
       <section class="tab-panel" id="tab-subscriptions">
+        <div class="section">
+          <div class="section-header">
+            <div>
+              <div class="section-title"><span>🗂️</span> 分组图标</div>
+              <p class="help-text">弹窗头部的站点图标按分组折叠，同一时间只展开一组；收起的分组压成一枚「‹ 图标 ›」胶囊。这里指定每组收起时显示哪个站点的图标——选「自动」则显示该组内最近有更新的站点。选中即保存，仅本机生效，不写入配置文件。</p>
+            </div>
+          </div>
+          <div class="group-pin-rows" id="groupPinRows"></div>
+        </div>
+
         <div class="section">
           <div class="section-header">
             <div>

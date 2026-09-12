@@ -14,8 +14,9 @@
   const SUBSCRIPTION_CATALOG_FILE = 'config/tag.example.json';
 
   // tag = 该站点在订阅 tags 里的站点自身标签，页面上隐藏不显示（仅展示层，保存数据不变）。
-  // 站点清单/显示名从 site-registry.js 派生（label 与 tag 历来同值，icon 按 site 命名）
-  const SUBSCRIPTION_SITE_GROUPS = SiteRegistry.CATEGORY_SOURCES.map(site => ({
+  // 站点清单/显示名从 site-registry.js 派生（label 与 tag 历来同值，icon 按 site 命名）；
+  // v1.5.11 起顺序按 SITE_GROUPS（短剧组在最前），与弹窗头部的分组顺序一致
+  const SUBSCRIPTION_SITE_GROUPS = SiteRegistry.SITE_GROUPS.flatMap(group => group.sites).map(site => ({
     site,
     label: SiteRegistry.SOURCE_NAMES[site],
     tag: SiteRegistry.SOURCE_NAMES[site],
@@ -28,6 +29,8 @@
     urlTags: [],
     subscriptionCatalog: [],
     legacyUrlTags: [],
+    // 分组代表图标的固定项 { [group]: site }；缺席＝自动（该组最近有更新的站点）
+    groupPins: {},
     scheduleConfig: { ...ScheduleConfig.DEFAULT_CONFIG },
     translateConfig: { ...DEFAULT_TRANSLATE_CONFIG },
     larkConfig: { ...Lark.DEFAULT_CONFIG },
@@ -70,6 +73,7 @@
     };
 
     elements.configSummary = document.getElementById('configSummary');
+    elements.groupPinRows = document.getElementById('groupPinRows');
     elements.subscriptionList = document.getElementById('subscriptionList');
     elements.subscriptionEmpty = document.getElementById('subscriptionEmpty');
     elements.subscriptionCount = document.getElementById('subscriptionCount');
@@ -192,9 +196,11 @@
     try {
       const [subscriptionCatalog, result] = await Promise.all([
         loadSubscriptionCatalog(),
-        chrome.storage.local.get(['urlTags', 'scheduleConfig', 'translateConfig', 'larkConfig'])
+        chrome.storage.local.get(['urlTags', 'scheduleConfig', 'translateConfig', 'larkConfig', 'siteTabPrefs'])
       ]);
       state.subscriptionCatalog = subscriptionCatalog;
+      // 纯本地 UI 偏好，无配置文件兜底，缺席即全「自动」
+      state.groupPins = (result.siteTabPrefs || {}).pins || {};
       let urlTags = normalizeUrlTags(result.urlTags || []);
       let scheduleConfig = ScheduleConfig.normalizeConfig(result.scheduleConfig || {});
       let translateConfig = normalizeTranslateConfig(result.translateConfig || {});
@@ -364,9 +370,82 @@
   function renderAll() {
     renderConfigSummary();
     renderScheduleForm();
+    renderGroupPins();
     renderSubscriptions();
     renderTranslateForm();
     renderLarkForm();
+  }
+
+  // —— 分组代表图标（v1.5.11）：纯本地 UI 偏好，只写 storage 不落配置文件，
+  //    弹窗经 storage.onChanged 即时生效；与 activeSource 共用 siteTabPrefs 键 ——
+
+  function renderGroupPins() {
+    const container = elements.groupPinRows;
+    if (!container) return;
+    container.innerHTML = '';
+
+    SiteRegistry.SITE_GROUPS.forEach(groupEntry => {
+      const row = document.createElement('div');
+      row.className = 'group-pin-row';
+
+      const name = document.createElement('span');
+      name.className = 'group-pin-name';
+      name.textContent = groupEntry.name;
+      row.appendChild(name);
+
+      const pinned = state.groupPins[groupEntry.group] || '';
+      row.appendChild(createGroupPinOption(groupEntry.group, '', '自动', '', pinned === ''));
+      groupEntry.sites.forEach(site => {
+        row.appendChild(createGroupPinOption(
+          groupEntry.group, site, SiteRegistry.SOURCE_NAMES[site],
+          `assets/icons/site-${site}.png`, pinned === site
+        ));
+      });
+
+      container.appendChild(row);
+    });
+  }
+
+  function createGroupPinOption(group, site, label, icon, checked) {
+    const option = document.createElement('label');
+    option.className = `group-pin-option${checked ? ' is-pinned' : ''}`;
+
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = `group-pin-${group}`;
+    radio.value = site;
+    radio.checked = checked;
+    radio.addEventListener('change', () => { if (radio.checked) saveGroupPin(group, site); });
+    option.appendChild(radio);
+
+    if (icon) {
+      const img = document.createElement('img');
+      img.src = chrome.runtime.getURL(icon);
+      img.alt = '';
+      option.appendChild(img);
+    }
+
+    option.appendChild(document.createTextNode(label));
+    return option;
+  }
+
+  async function saveGroupPin(group, site) {
+    const pins = Object.assign({}, state.groupPins);
+    if (site) pins[group] = site;
+    else delete pins[group];
+    state.groupPins = pins;
+
+    try {
+      // 读改写：activeSource 由弹窗写入同一个键，别把它冲掉
+      const result = await chrome.storage.local.get(['siteTabPrefs']);
+      const prefs = result.siteTabPrefs || {};
+      await chrome.storage.local.set({ siteTabPrefs: Object.assign({}, prefs, { pins }) });
+      renderGroupPins();
+      showStatus(site ? `已固定「${SiteRegistry.SOURCE_NAMES[site]}」为该分组图标` : '该分组图标已改为自动', true);
+    } catch (e) {
+      console.error('[ShortScraping] 保存分组图标失败:', e);
+      showStatus(`保存分组图标失败：${e.message}`, false);
+    }
   }
 
   // —— 定时任务编辑器（B-8）：校验与预览全部本地完成（schedule-config.js 已进设置页） ——
@@ -591,11 +670,20 @@
     const catalogUrlSet = new Set(catalog.map(item => normalizeUrlForMatch(item.urlPattern)));
     state.legacyUrlTags = state.urlTags.filter(item => !catalogUrlSet.has(normalizeUrlForMatch(item.urlPattern)));
 
-    SUBSCRIPTION_SITE_GROUPS.forEach(group => {
-      const entries = catalog
-        .map((item, index) => ({ item, index }))
-        .filter(entry => siteOfUrl(entry.item.urlPattern) === group.site);
-      appendSubscriptionGroup(group.label, group.icon, entries, 'catalog', checkedUrlSet, group.tag);
+    // 按弹窗头部的同一套分组走：每组先插一条分割标题，组内再逐站点列规则
+    SiteRegistry.SITE_GROUPS.forEach(groupEntry => {
+      const sections = groupEntry.sites.map(site => ({
+        group: SUBSCRIPTION_SITE_GROUPS.find(g => g.site === site),
+        entries: catalog
+          .map((item, index) => ({ item, index }))
+          .filter(entry => siteOfUrl(entry.item.urlPattern) === site)
+      })).filter(section => section.entries.length > 0);
+
+      if (sections.length === 0) return;
+      appendSubscriptionDivider(groupEntry.name);
+      sections.forEach(({ group, entries }) => {
+        appendSubscriptionGroup(group.label, group.icon, entries, 'catalog', checkedUrlSet, group.tag);
+      });
     });
 
     const knownSites = new Set(SUBSCRIPTION_SITE_GROUPS.map(group => group.site));
@@ -610,6 +698,14 @@
     elements.subscriptionEmpty.style.display =
       catalog.length === 0 && state.legacyUrlTags.length === 0 ? 'block' : 'none';
     updateSubscriptionCount();
+  }
+
+  /** 分组分割标题（短剧 / 影视 / 游戏·网文），与弹窗头部的折叠分组同一套定义。 */
+  function appendSubscriptionDivider(name) {
+    const divider = document.createElement('div');
+    divider.className = 'subscription-divider';
+    divider.textContent = name;
+    elements.subscriptionList.appendChild(divider);
   }
 
   function appendSubscriptionGroup(label, icon, entries, kind, checkedUrlSet, hiddenTag) {

@@ -27,22 +27,23 @@ check('T1c hostBySource 字面量（含键序）',
   deepEq(SiteRegistry.hostBySource, { imdb: 'imdb.com', netflix: 'netflix.com', appletv: 'tv.apple.com', steam: 'store.steampowered.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com', royalroad: 'royalroad.com' }),
   JSON.stringify(SiteRegistry.hostBySource));
 
-// settings.js 派生的订阅分组与旧字面量 deep-equal（label===tag、icon 按 site 命名）
-const derivedGroups = SiteRegistry.CATEGORY_SOURCES.map(site => ({
+// settings.js 派生的订阅分组（label===tag、icon 按 site 命名）。
+// v1.5.11 起顺序改由 SITE_GROUPS 决定（短剧组在最前），与弹窗头部折叠分组一致
+const derivedGroups = SiteRegistry.SITE_GROUPS.flatMap(group => group.sites).map(site => ({
   site, label: SiteRegistry.SOURCE_NAMES[site], tag: SiteRegistry.SOURCE_NAMES[site], icon: `assets/icons/site-${site}.png`
 }));
-const legacyGroups = [
-  { site: 'imdb', label: 'IMDB', tag: 'IMDB', icon: 'assets/icons/site-imdb.png' },
-  { site: 'netflix', label: 'Netflix', tag: 'Netflix', icon: 'assets/icons/site-netflix.png' },
-  { site: 'appletv', label: 'AppleTV', tag: 'AppleTV', icon: 'assets/icons/site-appletv.png' },
-  { site: 'steam', label: 'Steam', tag: 'Steam', icon: 'assets/icons/site-steam.png' },
+const expectedGroups = [
   { site: 'mydrama', label: 'MyDrama', tag: 'MyDrama', icon: 'assets/icons/site-mydrama.png' },
   { site: 'reelshort', label: 'ReelShort', tag: 'ReelShort', icon: 'assets/icons/site-reelshort.png' },
   { site: 'dramashorts', label: 'DramaShorts', tag: 'DramaShorts', icon: 'assets/icons/site-dramashorts.png' },
   { site: 'netshort', label: 'NetShort', tag: 'NetShort', icon: 'assets/icons/site-netshort.png' },
+  { site: 'imdb', label: 'IMDB', tag: 'IMDB', icon: 'assets/icons/site-imdb.png' },
+  { site: 'netflix', label: 'Netflix', tag: 'Netflix', icon: 'assets/icons/site-netflix.png' },
+  { site: 'appletv', label: 'AppleTV', tag: 'AppleTV', icon: 'assets/icons/site-appletv.png' },
+  { site: 'steam', label: 'Steam', tag: 'Steam', icon: 'assets/icons/site-steam.png' },
   { site: 'royalroad', label: 'RoyalRoad', tag: 'RoyalRoad', icon: 'assets/icons/site-royalroad.png' }
 ];
-check('T1d 设置页订阅分组派生结果与旧字面量全等', deepEq(derivedGroups, legacyGroups), JSON.stringify(derivedGroups));
+check('T1d 设置页订阅分组派生结果（按 SITE_GROUPS 顺序）', deepEq(derivedGroups, expectedGroups), JSON.stringify(derivedGroups));
 
 // ---------- T2 匹配行为矩阵（含历史怪癖保真） ----------
 const cases = [
