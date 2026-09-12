@@ -2,7 +2,8 @@
  * 站点注册表：全部站点元数据的单一真源（收敛自四处 hostname if 链、
  * 两处显示名映射、hostBySource 反向映射与设置页订阅分组常量，2026-08-01）。
  *
- * 新增站点只改本文件的 SITES 一处；顺序即弹窗/共享页分类图标与设置页分组的展示序。
+ * 新增站点只改本文件的 SITES 一处，并把它归入 SITE_GROUPS 的某一组
+ * （分组决定弹窗/共享页头部与设置页订阅列表的展示序，v1.5.11 起）。
  *
  * host 匹配语义（与收敛前逐字保真）：
  *   suffix = hostname.endsWith(host)——裸后缀匹配，不做点边界校验
@@ -33,7 +34,31 @@
     { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix' }
   ];
 
+  // 弹窗/共享页头部的折叠分组（2026-09-12 用户定）。数组顺序即展示顺序：
+  // 短剧组排最前且默认展开，另两组收起成「‹ 代表 logo ›」胶囊，同一时间只展开一组。
+  // 组内顺序沿用 SITES 的相对顺序。展平后必须与 CATEGORY_SOURCES 互为排列
+  // （无重无漏），由 tests/unit-site-tabs.mjs 守住——新增站点忘了归组会直接 RED。
+  // 注意 SITES 顺序本身不受此影响：manifest 推导、siteOfHostname 匹配优先级
+  // 仍按 SITES，分组只管头部与设置页的展示序。
+  const SITE_GROUPS = [
+    { group: 'shortdrama', name: '短剧', sites: ['mydrama', 'reelshort', 'dramashorts', 'netshort'] },
+    { group: 'video', name: '影视', sites: ['imdb', 'netflix', 'appletv'] },
+    { group: 'game', name: '游戏 · 网文', sites: ['steam', 'royalroad'] }
+  ];
+
+  // 零状态时默认展开的组
+  const DEFAULT_GROUP = 'shortdrama';
+
   const CATEGORY_SOURCES = SITES.map(entry => entry.site);
+
+  const groupBySite = {};
+  for (const entry of SITE_GROUPS) {
+    for (const site of entry.sites) groupBySite[site] = entry.group;
+  }
+
+  function groupOfSite(site) {
+    return groupBySite[site] || null;
+  }
 
   const SOURCE_NAMES = {};
   const hostBySource = {};
@@ -70,7 +95,10 @@
     return SITES.map(entry => `*://${entry.match === 'exact' ? '' : '*.'}${entry.host}${entry.path || '/*'}`);
   }
 
-  const api = { SITES, CATEGORY_SOURCES, SOURCE_NAMES, hostBySource, siteOfHostname, siteOfUrl, contentScriptMatches };
+  const api = {
+    SITES, SITE_GROUPS, DEFAULT_GROUP, CATEGORY_SOURCES, SOURCE_NAMES, hostBySource,
+    groupOfSite, siteOfHostname, siteOfUrl, contentScriptMatches
+  };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
