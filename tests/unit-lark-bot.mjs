@@ -62,6 +62,13 @@ if (card) {
   check('C6e 用 v2 schema 且正文挂在 body.elements 下',
     card.card.schema === '2.0' && Array.isArray(card.card.body?.elements)
     && card.card.elements === undefined, JSON.stringify(card.card.schema));
+  // v2 的 markdown 走严格 CommonMark：闭合 ** 前是标点「：」、后面若紧跟字母，
+  // 右侧界定符判定不通过，加粗不生效、星号原样漏出（v1 的 lark_md 不挑，切 v2 才暴露）
+  check('C6f 加粗标签闭合 ** 后留空格（否则 CommonMark 下加粗失效）',
+    /\*\*来源：\*\* \S/.test(mdOf(card, 1)) && /\*\*类别：\*\* \S/.test(mdOf(card, 1)),
+    JSON.stringify(mdOf(card, 1)));
+  check('C6g 正文里不出现「**紧跟非空白」的写法',
+    !/\*\*[^\s*][^*]*\*\*[^\s*]/.test(mdOf(card, 0) + '\n' + mdOf(card, 1)), mdOf(card, 1));
   check('C7 尾部按钮文案「去瞅瞅」并指向原页',
     json.includes('"去瞅瞅"') && json.includes('https://www.netflix.com/title/12345')
     && json.includes('"tag":"button"'), '');
@@ -96,13 +103,13 @@ if (card) {
   check('C12 非 http(s) 的 url 不渲染按钮', !JSON.stringify(badUrl).includes('"tag":"button"'), '');
   const bare = Lark.buildBotCard({});
   check('C13 空条目也能组装出合法卡片', bare?.msg_type === 'interactive' && Boolean(bare?.card?.header), '');
-  // 裁剪上限 200（2026-09-12 用户定）。刻意断言「被裁那一段的长度」而不是整卡
+  // 裁剪上限 240（2026-09-12 用户三轮验收后定稿：160→240→200→240）。刻意断言「被裁那一段的长度」而不是整卡
   // JSON 总长——后者是随版式浮动的魔数，改版式就得跟着调，挡不住真回归
-  const LIMIT = 200;
+  const LIMIT = 240;
   const longDesc = Lark.buildBotCard({
     ...FULL, descriptionZh: '很长'.repeat(400), description: 'x'.repeat(900)
   });
-  check('C14a 超长中文简介裁到 200 字 + 省略号',
+  check('C14a 超长中文简介裁到 240 字 + 省略号',
     mdOf(longDesc, 0).length === LIMIT + 1 && mdOf(longDesc, 0).endsWith('…'),
     `len=${mdOf(longDesc, 0).length}`);
   const longEn = Lark.buildBotCard({ ...FULL, descriptionZh: '', description: 'x'.repeat(900) });
@@ -110,7 +117,7 @@ if (card) {
     && mdOf(longEn, 0).endsWith('…') && !mdOf(longEn, 0).startsWith('*'),
     `len=${mdOf(longEn, 0).length}`);
 
-  const exact = '刚好'.repeat(LIMIT / 2);      // 恰好 200 字
+  const exact = '刚好'.repeat(LIMIT / 2);      // 恰好 240 字
   const atLimit = Lark.buildBotCard({ ...FULL, descriptionZh: exact });
   check('C14c 恰好等于上限时不裁、不加省略号',
     mdOf(atLimit, 0) === exact && !mdOf(atLimit, 0).endsWith('…'), `len=${mdOf(atLimit, 0).length}`);

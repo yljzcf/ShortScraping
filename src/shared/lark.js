@@ -249,7 +249,7 @@
    * 所以卡片只有标题/来源/类型/简介/跳转按钮，封面进不来（与 Base 表「封面只能
    * 是链接」同一个根因）。unit-lark-bot C8/C9 守着。
    */
-  const BOT_SUMMARY_LIMIT = 200;
+  const BOT_SUMMARY_LIMIT = 240;
 
   function clipText(value, limit) {
     const text = asText(value).replace(/\s+/g, ' ');
@@ -277,9 +277,13 @@
 
     // 来源与类别合成一块：独立元素天然与上文隔开一行，两行本身要贴在一起
     // （tags 自带平台名，不再另外拼 SOURCE_NAMES，否则「NetShort · NetShort」重复）
+    // 闭合的 ** 后面**必须留一个空格**：v2 的 markdown 走严格 CommonMark，而
+    // `**来源：**RoyalRoad` 里闭合 ** 前是标点「：」、后面紧跟字母，右侧界定符
+    // 判定不通过 → 不当作加粗结束 → 星号原样漏在卡片上（v1 的 lark_md 是飞书
+    // 自家宽松解析器，同样写法没问题，切 v2 后才暴露）。unit-lark-bot C6f 守着。
     const meta = [];
-    if (tags.length) meta.push(`**来源：**${tags.join(' / ')}`);
-    if (genres.length) meta.push(`**类别：**${genres.join(' / ')}`);
+    if (tags.length) meta.push(`**来源：** ${tags.join(' / ')}`);
+    if (genres.length) meta.push(`**类别：** ${genres.join(' / ')}`);
     if (meta.length) elements.push({ tag: 'markdown', content: meta.join('\n') });
 
     // 按钮靠右只有这一种走法（2026-09-12 逐个实测）：v1 的 column 不收 action
