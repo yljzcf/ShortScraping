@@ -16,6 +16,9 @@
     lastScrape: null,
     isLoading: false,
     activeSource: null,
+    // 分组代表 logo 的固定项（设置页写入）：{ [group]: site|null }
+    groupPins: {},
+    refreshingSite: null,
     lanUrls: [],
     syncServerDir: null
   };
@@ -41,6 +44,13 @@
       // 翻译按钮状态机独立分支，不触碰下面的卡片渲染逻辑
       if (changes.translateRunState) {
         handleTranslateRunStateChange(changes.translateRunState.newValue);
+      }
+
+      // 设置页改了分组固定 logo：只重画标签条，不动卡片
+      if (changes.siteTabPrefs) {
+        const prefs = changes.siteTabPrefs.newValue || {};
+        state.groupPins = prefs.pins || {};
+        renderCategoryTabs();
       }
 
       if (changes.urlTags) {
@@ -109,7 +119,9 @@
       qrUrl: document.getElementById('lanQrUrl')
     };
 
-    elements.categoryTabs = Array.from(document.querySelectorAll('.category-tab'));
+    // 标签条内容由 SiteTabs 动态渲染，这里只缓存容器
+    elements.categoryTabs = document.getElementById('categoryTabs');
+    elements.content = document.querySelector('.content');
   }
 
   /**
@@ -165,17 +177,6 @@
         popover.classList.add('hidden');
         qrBtn.focus();
       }
-    });
-
-    elements.categoryTabs.forEach(tab => {
-      tab.addEventListener('click', () => {
-        const source = tab.dataset.source;
-        if (source === state.activeSource) {
-          refreshActiveSource(tab);
-        } else {
-          setActiveCategory(source);
-        }
-      });
     });
 
     elements.buttons.goScrape.addEventListener('click', () => {
@@ -579,12 +580,17 @@
     showLoading(true);
 
     try {
-      const result = await chrome.storage.local.get(['dramas', 'urlTags', 'lastScrape', 'syncServerDir']);
+      const result = await chrome.storage.local.get(['dramas', 'urlTags', 'lastScrape', 'syncServerDir', 'siteTabPrefs']);
 
       state.urlTags = result.urlTags || [];
       state.dramas = filterDramasByConfiguredUrls(result.dramas || []);
       state.lastScrape = result.lastScrape;
       state.syncServerDir = result.syncServerDir || state.syncServerDir;
+
+      // 上次看的站点与分组固定项；首帧之后 activeSource 只由用户操作改写
+      const prefs = result.siteTabPrefs || {};
+      state.groupPins = prefs.pins || {};
+      if (state.activeSource === null) state.activeSource = prefs.activeSource || null;
 
       renderNow(); // 弹窗打开首帧不经去抖
     } catch (e) {
@@ -642,13 +648,16 @@
   }
 
   /**
-   * 再次点击已激活的站点标签：只抓取该站点的订阅 URL
+   * 再次点击已激活的站点标签：只抓取该站点的订阅 URL。
+   * 转圈状态记在 state 里由标签条渲染读取——抓取期间卡片陆续入库会重建整条
+   * 标签栏，直接给 DOM 节点加 class 会被下一次重建抹掉。
    */
-  async function refreshActiveSource(tab) {
-    const source = state.activeSource;
-    if (!source || tab.classList.contains('is-refreshing')) return;
+  async function refreshActiveSource(site) {
+    const source = site || state.activeSource;
+    if (!source || state.refreshingSite) return;
 
-    tab.classList.add('is-refreshing');
+    state.refreshingSite = source;
+    renderCategoryTabs();
 
     try {
       console.log(`[ShortScraping] 手动触发站点抓取: ${source}`);
@@ -665,7 +674,8 @@
       console.error('[ShortScraping] 站点刷新失败:', e);
       showToast(`刷新失败：${e.message}`, { type: 'error' });
     } finally {
-      tab.classList.remove('is-refreshing');
+      state.refreshingSite = null;
+      renderCategoryTabs();
     }
   }
 
@@ -953,35 +963,81 @@
   }
 
   /**
-   * 在已订阅站点中挑默认活动站点：按 CATEGORY_SOURCES 顺序优先选有数据的，
-   * 否则第一个已订阅的；零订阅返回 null（无图标 + 空状态）。
+   * 折叠标签条的输入参数。展开的组由 activeSource 推导（SiteTabs 的核心不变量），
+   * 所以这里不传也不存 expandedGroup。
    */
-  function pickActiveSource() {
-    const subscribed = getSubscribedSites();
-    if (subscribed.size === 0) return null;
-    const withData = TimelineRender.CATEGORY_SOURCES.find(
-      s => subscribed.has(s) && state.dramas.some(d => TimelineRender.dramaSource(d) === s)
-    );
-    return withData || TimelineRender.CATEGORY_SOURCES.find(s => subscribed.has(s)) || null;
+  function siteTabsInput() {
+    return {
+      visibleSites: getSubscribedSites(),
+      activeSource: state.activeSource,
+      pins: state.groupPins,
+      // 代表 logo 的「最近有更新」口径：各站点条目 scrapedAt 的最大值
+      latestBySite: SiteTabs.latestUpdateBySite(state.dramas)
+    };
   }
 
-  function updateCategoryTabs() {
-    const subscribed = getSubscribedSites();
-    elements.categoryTabs.forEach(tab => {
-      const site = tab.dataset.source;
-      const visible = subscribed.has(site);
-      const active = visible && site === state.activeSource;
-      tab.classList.toggle('hidden', !visible);
-      tab.classList.toggle('active', active);
-      tab.setAttribute('aria-selected', String(active));
+  /**
+   * 重画标签条。SiteTabs 会顺带把失效的 activeSource（站点已退订等）
+   * 归正到默认短剧组的代表站点，这里把归正结果写回 state。
+   */
+  function renderCategoryTabs() {
+    const layout = SiteTabs.resolveLayout(siteTabsInput());
+    state.activeSource = layout.activeSource;
+
+    SiteTabs.render(elements.categoryTabs, layout, {
+      assetsBase: '../../assets/icons',
+      onSelectSite: setActiveCategory,
+      onExpandGroup: (group, representative) => setActiveCategory(representative),
+      onRefreshSite: refreshActiveSource,
+      refreshingSite: state.refreshingSite
     });
+    return layout;
   }
 
   function setActiveCategory(source) {
-    if (!TimelineRender.CATEGORY_SOURCES.includes(source)) return;
+    if (!TimelineRender.CATEGORY_SOURCES.includes(source) || source === state.activeSource) return;
     state.activeSource = source;
-    updateCategoryTabs();
-    renderNow(); // 手动切站点即时反馈，不经去抖
+    persistActiveSource(source);
+    renderNow(); // 手动切站点即时反馈，不经去抖（内部会重画标签条）
+  }
+
+  /**
+   * 跨弹窗开关记住上次看的站点（展开组由它推导，故只存这一个字段，
+   * 不会出现「展开组」与「活动站点」互相矛盾的状态）。与设置页的分组
+   * 固定项共用 siteTabPrefs 键，读改写保住对方的字段。
+   */
+  async function persistActiveSource(source) {
+    try {
+      const result = await chrome.storage.local.get(['siteTabPrefs']);
+      const prefs = result.siteTabPrefs || {};
+      if (prefs.activeSource === source) return;
+      await chrome.storage.local.set({
+        siteTabPrefs: Object.assign({}, prefs, { activeSource: source })
+      });
+    } catch (e) {
+      // 存储失败只影响下次打开的落点，不打断当前浏览
+      console.warn('[ShortScraping] 记忆活动站点失败:', e);
+    }
+  }
+
+  // —— 每个站点各自的滚动位置（弹窗本次打开期间有效）。滚动容器是 main.content；
+  // 时间线每次重渲染都整树重建，不记的话后台抓取一来就把正在看的位置弹回顶部 ——
+  const scrollBySource = new Map();
+  // 当前 DOM 里渲染的是哪个站点。切站时 state.activeSource 先于渲染改掉，
+  // 存位置必须认这个「已渲染」的站点，否则会把上一站的位置记到新站头上
+  let renderedSource = null;
+
+  function rememberScroll() {
+    if (renderedSource && elements.content) {
+      scrollBySource.set(renderedSource, elements.content.scrollTop);
+    }
+  }
+
+  function restoreScroll() {
+    if (!elements.content) return;
+    // 内容变短时浏览器会自动夹取，无需自行 clamp
+    elements.content.scrollTop = state.activeSource ? (scrollBySource.get(state.activeSource) || 0) : 0;
+    renderedSource = state.activeSource;
   }
 
   // —— onChanged 渲染去抖：trailing 250ms 合并变更风暴；首个挂起变更起算 1s
@@ -1019,12 +1075,10 @@
   }
 
   function renderTimeline() {
-    // 活动站点必须落在已订阅集合内；为空或已退订则在订阅站点里重挑（可能为 null）
-    const subscribed = getSubscribedSites();
-    if (!state.activeSource || !subscribed.has(state.activeSource)) {
-      state.activeSource = pickActiveSource();
-    }
-    updateCategoryTabs();
+    // 整树重建会丢滚动位置，重建前后自存自取（同站点重渲染也保住位置）
+    rememberScroll();
+    // 活动站点必须落在已订阅集合内；为空或已退订由 SiteTabs 在此归正（可能为 null）
+    renderCategoryTabs();
 
     const hasData = TimelineRender.renderTimeline(elements.containers.timeline, getVisibleDramas(), {
       source: state.activeSource || 'imdb',
@@ -1035,6 +1089,7 @@
       onOpenUrl: (url) => chrome.tabs.create({ url })
     });
     elements.states.empty.classList.toggle('hidden', hasData);
+    restoreScroll();
   }
 
   function getConfiguredScrapeUrls() {

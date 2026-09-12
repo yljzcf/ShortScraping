@@ -141,6 +141,10 @@
     // 激活态再次点击＝只抓该站点的订阅（仅弹窗传 onRefreshSite）
     button.title = active && opts.onRefreshSite ? `${name}：再次点击只刷新该站点` : name;
 
+    // 抓取进行中的转圈是数据驱动的：抓取期间卡片陆续入库会触发整条标签栏重建，
+    // 只靠 DOM 上的 class 会被重建抹掉
+    if (site === opts.refreshingSite) button.classList.add('is-refreshing');
+
     const img = document.createElement('img');
     img.src = `${opts.assetsBase}/site-${site}.png`;
     img.alt = '';
@@ -148,7 +152,7 @@
 
     button.addEventListener('click', () => {
       if (site === opts.activeSource && opts.onRefreshSite) {
-        opts.onRefreshSite(site, button);
+        opts.onRefreshSite(site);
         return;
       }
       if (opts.onSelectSite) opts.onSelectSite(site);
@@ -196,6 +200,10 @@
   /**
    * 整条标签条重建。容器为 .category-tabs，内部结构完全由本函数产出，
    * 调用方不再手写任何 <button>（顺序与分组都只来自注册表）。
+   *
+   * opts: assetsBase / onSelectSite(site) / onExpandGroup(group, representative) /
+   *       onRefreshSite(site)（弹窗独有，共享页不传） /
+   *       refreshingSite（正在抓取的站点，图标转圈）
    */
   function render(container, layout, opts) {
     const options = Object.assign({ assetsBase: '../../assets/icons' }, opts, {
