@@ -43,6 +43,8 @@
     cacheElements();
     bindEvents();
     renderPruneSites();
+    renderLarkExportSites();
+    refreshLarkExportHint();
     loadCurrentConfig();
     checkSyncServiceStatus();
   }
@@ -123,7 +125,12 @@
       pruneBeforeDate: document.getElementById('pruneBeforeDate'),
       prunePreview: document.getElementById('btnPrunePreview'),
       pruneConfirm: document.getElementById('btnPruneConfirm'),
-      pruneResult: document.getElementById('pruneResult')
+      pruneResult: document.getElementById('pruneResult'),
+      larkExportSiteList: document.getElementById('larkExportSiteList'),
+      larkExportSinceDate: document.getElementById('larkExportSinceDate'),
+      larkExportCopy: document.getElementById('btnLarkExportCopy'),
+      larkExportUndo: document.getElementById('btnLarkExportUndo'),
+      larkExportHint: document.getElementById('larkExportHint')
     };
   }
 
@@ -167,6 +174,8 @@
     if (elements.archive.pruneBeforeDate) {
       elements.archive.pruneBeforeDate.addEventListener('input', resetPruneConfirm);
     }
+    bindClick(elements.archive.larkExportCopy, handleLarkExportCopy);
+    bindClick(elements.archive.larkExportUndo, handleLarkExportUndo);
 
     // 翻译模式切换时只显示当前模式的配置区（隐藏区块的值保留，切回即恢复）
     if (elements.translateForm?.mode) {
@@ -1173,6 +1182,129 @@
     }
     resetPruneConfirm();
     showStatus(`已清理 ${resp.removed} 条，时间线与 CSV 将自动同步`, true);
+  }
+
+  // —— 导出到多维表格：增量复制成 TSV，切到 Base 粘贴追加 ——
+  //
+  // 为什么不走 webhook 批量推：触发器按「1 条记录＝1 次工作流运行」计费，
+  // 每月约 1400 条的增量远超免费额度。
+  //
+  // 水位线存的是「上次复制的精确时刻」而不是日期：按日期取整会让当天 0 点到
+  // 复制时刻之间抓到的条目下次被重复导出（Base 侧不去重，重复即多出行）。
+  // 日期框留空＝用水位线，填了＝显式覆盖（也是重导历史区间的入口）。
+  const LARK_EXPORT_STATE_KEY = 'larkExportState';
+
+  /**
+   * 与 popup.js 的 copyTextToClipboard 同款（见 src/popup/popup.js）：无用户激活时
+   * navigator.clipboard.writeText 会无声挂起而不是拒绝，必须靠超时竞速兜到
+   * execCommand 分支。两页不共享模块，此处照搬而非新起一个共享模块。
+   */
+  async function copyTextToClipboard(text) {
+    try {
+      await Promise.race([
+        navigator.clipboard.writeText(text),
+        new Promise((resolve, reject) => setTimeout(() => reject(new Error('clipboard timeout')), 600))
+      ]);
+    } catch (e) {
+      const input = document.createElement('textarea');
+      input.value = text;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      input.remove();
+    }
+  }
+
+  function renderLarkExportSites() {
+    const container = elements.archive.larkExportSiteList;
+    if (!container) return;
+    container.innerHTML = '';
+    for (const site of SiteRegistry.CATEGORY_SOURCES) {
+      const label = document.createElement('label');
+      label.className = 'subscription-option';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = site;
+      const text = document.createElement('span');
+      text.textContent = SiteRegistry.SOURCE_NAMES[site];
+      label.appendChild(checkbox);
+      label.appendChild(text);
+      container.appendChild(label);
+    }
+  }
+
+  async function readLarkExportState() {
+    const stored = await chrome.storage.local.get(LARK_EXPORT_STATE_KEY);
+    const state = stored?.[LARK_EXPORT_STATE_KEY];
+    return {
+      lastCopiedAt: typeof state?.lastCopiedAt === 'string' ? state.lastCopiedAt : '',
+      previousCopiedAt: typeof state?.previousCopiedAt === 'string' ? state.previousCopiedAt : ''
+    };
+  }
+
+  function formatLocalStamp(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  async function refreshLarkExportHint() {
+    const hint = elements.archive.larkExportHint;
+    if (!hint) return;
+    const { lastCopiedAt, previousCopiedAt } = await readLarkExportState();
+    hint.textContent = lastCopiedAt
+      ? `上次复制：${formatLocalStamp(lastCopiedAt)}——留空日期即只导这之后新抓到的条目。`
+      : '还没复制过：留空日期＝导出全部条目（首次建表建议走 npm run export-lark 出文件）。';
+    if (elements.archive.larkExportUndo) {
+      elements.archive.larkExportUndo.disabled = !previousCopiedAt && !lastCopiedAt;
+    }
+  }
+
+  async function handleLarkExportCopy() {
+    const sites = Array.from(elements.archive.larkExportSiteList.querySelectorAll('input:checked'))
+      .map(input => input.value);
+    const dateValue = elements.archive.larkExportSinceDate.value; // yyyy-mm-dd
+    const { lastCopiedAt } = await readLarkExportState();
+    // 日期框语义＝该日本地 0 点起（与「按条件清理」同口径）；留空退回水位线
+    const since = dateValue ? new Date(`${dateValue}T00:00:00`).toISOString() : lastCopiedAt;
+
+    const { dramas = [] } = await chrome.storage.local.get('dramas');
+    const rows = Lark.buildTableRows(dramas, { since, sources: sites });
+    if (rows.length === 0) {
+      showStatus(since ? `${formatLocalStamp(since)} 之后没有新条目` : '时间线为空，没有可导出的条目', false);
+      return;
+    }
+
+    const copiedAt = new Date().toISOString();
+    try {
+      await copyTextToClipboard(Lark.toTsv(rows));
+    } catch (e) {
+      showStatus(`写入剪贴板失败：${e.message}——可改用 npm run export-lark 出文件`, false);
+      return;
+    }
+
+    // 水位线只在复制确实成功后推进：失败时推进会让这批条目永远漏出去
+    await chrome.storage.local.set({
+      [LARK_EXPORT_STATE_KEY]: { lastCopiedAt: copiedAt, previousCopiedAt: since }
+    });
+    await refreshLarkExportHint();
+
+    const stuck = rows.filter(row => row.poster && /[,%]/.test(row.poster)).length;
+    showStatus(`已复制 ${rows.length} 条到剪贴板，切到多维表格选中表末空行首格粘贴${stuck ? `（其中 ${stuck} 条封面链接含逗号或百分号编码，转不了附件）` : ''}`, true);
+  }
+
+  async function handleLarkExportUndo() {
+    const { lastCopiedAt, previousCopiedAt } = await readLarkExportState();
+    if (!lastCopiedAt && !previousCopiedAt) return;
+    await chrome.storage.local.set({
+      [LARK_EXPORT_STATE_KEY]: { lastCopiedAt: previousCopiedAt, previousCopiedAt: '' }
+    });
+    await refreshLarkExportHint();
+    showStatus(previousCopiedAt
+      ? `已退回到 ${formatLocalStamp(previousCopiedAt)}，再点「复制」会重来上一批`
+      : '已清空上次复制时间，再点「复制」会导出全部条目', true);
   }
 
   async function checkSyncServiceStatus() {
