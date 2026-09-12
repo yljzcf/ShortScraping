@@ -226,6 +226,8 @@ async function loadConfigFromJsonFiles() {
     await chrome.storage.local.set({ scheduleConfig, translateConfig, larkConfig });
   }
 
+  await syncBotWatermark(larkConfig);
+
   await runLegacyDramaMigrations();
   await dropCompanyField();
   await resetPartialTranslations();
@@ -391,6 +393,14 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
 
   if (changes.dramas) {
     scheduleCsvSync();
+  }
+
+  // 设置页一保存就把机器人水位线定在「此刻」，而不是等第一条卡来触发——
+  // 否则开启后的第一条新卡会因为 scrapedAt 早于水位线被跳过
+  if (changes.larkConfig) {
+    syncBotWatermark(Lark.normalizeConfig(changes.larkConfig.newValue)).catch(error => {
+      console.warn('[ShortScraping] 群机器人水位线更新失败:', error.message);
+    });
   }
 });
 
@@ -914,8 +924,15 @@ async function performTranslateOnce(source) {
           && (!needDesc || Boolean(result.desc) || Boolean(drama.descriptionZh));
         const updated = await updateSingleDramaTranslation(drama.id, result, { fillOnly: true, complete });
         progressedCount++;
-        if (updated) translatedCount++;
-        else console.warn(`[ShortScraping] 翻译只补到一半，保持待翻译状态下轮重试: ${drama.title}`);
+        if (updated) {
+          translatedCount++;
+          // 触发点①：翻完一条即推（队列外，失败只记日志）。读回落库后的那条，
+          // 卡片里才有刚写进去的译文。
+          const saved = (await getDramasSnapshot()).find(d => d.id === drama.id);
+          await maybeBotPush(saved);
+        } else {
+          console.warn(`[ShortScraping] 翻译只补到一半，保持待翻译状态下轮重试: ${drama.title}`);
+        }
       } else {
         console.warn(`[ShortScraping] 翻译结果为空，保持待翻译状态: ${drama.title}`);
       }
@@ -1350,6 +1367,61 @@ async function syncTimelineToCsv() {
   console.log(`[ShortScraping] CSV 同步完成：${result.count} 条 -> ${result.csvPath}`);
 }
 
+/* —— Lark 群机器人：有新内容即时推一张卡到群（v1.5.14） ——————————————
+ *
+ * 与 Base 工作流那条并存、互不影响：机器人免费无月度额度，管「实时知道」；
+ * 工作流按「1 条记录＝1 次运行」计费，管「写进表」。
+ *
+ * 两个触发点互斥，所以**不需要持久的「已推送」标记**（沿用单卡推送的 YAGNI 边界）：
+ *   ① 翻译线把一条从 new 补成 trans（走 AI 翻译的站点）；
+ *   ② 抓取入库时该卡已是 trans（平台自带中文齐全，压根不进翻译线）。
+ *
+ * **启用水位线是必需品不是优化**：库里几千条存量会陆续走完翻译线（尤其
+ * resetPartialTranslations 刚退回队列的那批），没有水位线一开机器人就在群里
+ * 刷屏。只推 scrapedAt 晚于「启用时刻」的卡；关闭开关即清水位线，下次开启重新计时。
+ */
+async function syncBotWatermark(config) {
+  const { larkBotState } = await chrome.storage.local.get('larkBotState');
+  const state = larkBotState && typeof larkBotState === 'object' ? larkBotState : {};
+
+  if (!Lark.botReadiness(config).ok) {
+    if (state.enabledAt) await chrome.storage.local.set({ larkBotState: {} });
+    return '';
+  }
+  if (!state.enabledAt) {
+    const enabledAt = new Date().toISOString();
+    await chrome.storage.local.set({ larkBotState: { enabledAt } });
+    console.log(`[ShortScraping] 群机器人已启用，水位线 ${enabledAt}（更早抓到的存量不推送）`);
+    return enabledAt;
+  }
+  return state.enabledAt;
+}
+
+/**
+ * 条件满足才推一张卡。任何失败只记日志——推送是旁路，绝不能影响翻译/入库落库。
+ */
+async function maybeBotPush(drama) {
+  try {
+    if (!drama || drama.status !== 'trans') return false;
+
+    const { larkConfig } = await chrome.storage.local.get('larkConfig');
+    const config = Lark.normalizeConfig(larkConfig);
+    if (!Lark.botReadiness(config).ok) return false;
+
+    const enabledAt = await syncBotWatermark(config);
+    if (!enabledAt) return false;
+    // 无 scrapedAt 的条目保守不推（判不出是存量还是新卡）
+    if (!drama.scrapedAt || drama.scrapedAt < enabledAt) return false;
+
+    await Lark.pushBotCard(config, drama);
+    console.log(`[ShortScraping] 群机器人已推送: ${drama.titleZh || drama.title}`);
+    return true;
+  } catch (e) {
+    console.warn('[ShortScraping] 群机器人推送失败（不影响入库）:', e.message);
+    return false;
+  }
+}
+
 // —— Lark 推送：多维表格工作流 webhook 触发器（实现见 src/shared/lark.js） ——
 
 // 时间线为空时「发送测试」用的内置样例（无封面/链接，顺带验证空值降级路径）
@@ -1420,6 +1492,32 @@ async function handleLarkTestSend(draftConfig) {
     return { success: true, sampleTitle: drama.title };
   } catch (e) {
     console.warn('[ShortScraping] Lark 测试发送失败:', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * 设置页「发送机器人测试」：表单草稿不落库，发时间线最新一条／内置样例。
+ * 与 handleLarkTestSend 同款姿势，只是走机器人卡片那条通道。
+ */
+async function handleLarkBotTestSend(draftConfig) {
+  const config = draftConfig && typeof draftConfig === 'object'
+    ? Lark.normalizeConfig(draftConfig)
+    : Lark.normalizeConfig((await chrome.storage.local.get('larkConfig')).larkConfig);
+
+  if (!Lark.botReadiness(config).ok) {
+    return { success: false, notConfigured: true, error: '请先填写群机器人 webhook 地址并启用' };
+  }
+
+  const dramas = await getDramasSnapshot();
+  const drama = dramas[0] || SAMPLE_LARK_DRAMA;
+
+  try {
+    await Lark.pushBotCard(config, drama);
+    console.log(`[ShortScraping] 群机器人测试发送成功: ${drama.title}`);
+    return { success: true, sampleTitle: drama.titleZh || drama.title };
+  } catch (e) {
+    console.warn('[ShortScraping] 群机器人测试发送失败:', e.message);
     return { success: false, error: e.message };
   }
 }
@@ -1540,6 +1638,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'saveDrama') {
     saveDramaRecord(request.drama).then((saved) => {
       sendResponse({ success: true, saved });
+      // 触发点②：平台自带中文齐全的新卡入库即 trans，压根不进翻译线，
+      // 只能在这里推。去重命中（saved=false）不推，避免每轮重复。
+      if (saved) maybeBotPush(request.drama);
     }).catch((error) => {
       sendResponse({ success: false, error: error.message });
     });
@@ -1581,6 +1682,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'larkPush') {
     handleLarkPush(request.dramaId).then(sendResponse).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'larkBotTestSend') {
+    handleLarkBotTestSend(request.config).then(sendResponse).catch((error) => {
       sendResponse({ success: false, error: error.message });
     });
     return true;

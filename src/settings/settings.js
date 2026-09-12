@@ -71,6 +71,7 @@
       saveLark: document.getElementById('btnSaveLark'),
       openLarkFromLark: document.getElementById('btnOpenLarkFromLark'),
       larkTestSend: document.getElementById('btnLarkTestSend'),
+      larkBotTestSend: document.getElementById('btnLarkBotTestSend'),
       checkSync: document.getElementById('btnCheckSync')
     };
 
@@ -95,7 +96,10 @@
     };
     elements.larkForm = {
       webhookUrl: document.getElementById('larkWebhookUrl'),
-      requestTimeoutSec: document.getElementById('larkRequestTimeoutSec')
+      requestTimeoutSec: document.getElementById('larkRequestTimeoutSec'),
+      botWebhookUrl: document.getElementById('larkBotWebhookUrl'),
+      botEnabled: document.getElementById('larkBotEnabled'),
+      botHint: document.getElementById('larkBotHint')
     };
     elements.scheduleForm = {
       mode: document.getElementById('scheduleModeSelect'),
@@ -156,6 +160,10 @@
     bindClick(elements.buttons.saveLark, saveLarkConfig);
     bindClick(elements.buttons.openLarkFromLark, () => openConfigFile('config/lark.json'));
     bindClick(elements.buttons.larkTestSend, handleLarkTestSend);
+    bindClick(elements.buttons.larkBotTestSend, handleLarkBotTestSend);
+    if (elements.larkForm?.botEnabled) {
+      elements.larkForm.botEnabled.addEventListener('change', refreshBotHint);
+    }
     bindClick(elements.buttons.checkSync, checkSyncServiceStatus);
 
     // 数据存档：导出/导入/两段式清理
@@ -651,14 +659,35 @@
     const config = Lark.normalizeConfig(state.larkConfig);
     form.webhookUrl.value = config.webhookUrl;
     form.requestTimeoutSec.value = String(config.requestTimeoutSec);
+    if (form.botWebhookUrl) form.botWebhookUrl.value = config.botWebhookUrl;
+    if (form.botEnabled) form.botEnabled.checked = config.botEnabled;
+    refreshBotHint();
   }
 
   function readLarkConfigFromForm() {
     const form = elements.larkForm;
     return {
       webhookUrl: form.webhookUrl.value.trim(),
-      requestTimeoutSec: Number(form.requestTimeoutSec.value)
+      requestTimeoutSec: Number(form.requestTimeoutSec.value),
+      botWebhookUrl: form.botWebhookUrl ? form.botWebhookUrl.value.trim() : '',
+      botEnabled: form.botEnabled ? form.botEnabled.checked : false
     };
+  }
+
+  /** 回显当前水位线：让用户一眼看出「从什么时候起的新内容才会被推」。 */
+  async function refreshBotHint() {
+    const hint = elements.larkForm?.botHint;
+    if (!hint) return;
+    const enabled = elements.larkForm.botEnabled?.checked;
+    if (!enabled) {
+      hint.textContent = '当前未开启；开启并保存后，从那一刻起新抓到的条目会在翻译完成时自动推送。';
+      return;
+    }
+    const { larkBotState } = await chrome.storage.local.get('larkBotState');
+    const at = larkBotState?.enabledAt;
+    hint.textContent = at
+      ? `已启用，水位线 ${formatLocalStamp(at)}——只推这之后抓到的条目。`
+      : '已勾选，保存后由后台记下水位线（下次后台唤醒时生效）。';
   }
 
   function createSummaryCard(label, value) {
@@ -928,6 +957,34 @@
    * 发送测试：用当前表单草稿（不落库）经后台真实推送一条样例数据，
    * 让飞书触发器捕获参数结构。测试路径与卡片按钮共用后台同一实现。
    */
+  async function handleLarkBotTestSend() {
+    const draft = Lark.normalizeConfig(readLarkConfigFromForm());
+    // 测试只要地址合法即可，不强制先勾开关——让用户能「先试通再开自动推送」
+    if (!/^https?:\/\//i.test(draft.botWebhookUrl)) {
+      showStatus('请先填写群机器人 Webhook 地址（http/https）', false);
+      return;
+    }
+
+    const btn = elements.buttons.larkBotTestSend;
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = '发送中…';
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        action: 'larkBotTestSend',
+        config: { ...draft, botEnabled: true }
+      });
+      if (!response?.success) throw new Error(response?.error || '后台推送失败');
+      showStatus(`测试卡片已发到群（${response.sampleTitle || '内置样例'}）`, true);
+    } catch (e) {
+      showStatus(`群机器人测试失败：${e.message}`, false);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  }
+
   async function handleLarkTestSend() {
     const draft = Lark.normalizeConfig(readLarkConfigFromForm());
     if (!Lark.configReadiness(draft).ok) {

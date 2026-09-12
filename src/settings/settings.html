@@ -765,6 +765,30 @@
           </div>
           <p class="help-text">说明：保存时会先更新扩展本地配置，并尝试通过本地同步服务写回 <code>config/lark.json</code>；若同步服务未启动，会提示仅本地临时生效。「发送测试」使用当前表单草稿（无需先保存），发送时间线最新一条卡片数据，时间线为空时发送内置样例。</p>
         </div>
+
+        <div class="section">
+          <div class="section-header">
+            <div>
+              <div class="section-title"><span>🤖</span> 群机器人实时推送</div>
+              <p class="help-text">另一条<strong>独立且免费</strong>的通道：新内容翻译完成后自动推一张卡片到群，<strong>不消耗多维表格工作流的每月运行次数</strong>（只有频率限流）。在目标群「设置 → 群机器人 → 添加自定义机器人」拿到 Webhook 地址填入即可，安全设置留空或按需配置。<br>推的是群消息不是表格记录，两条通道各管各的：表格数据仍走卡片上的 🕊 按钮与「数据存档」里的批量导出。<strong>卡片内无法显示封面图</strong>——飞书卡片的图片要经开放平台上传拿 img_key，需自建应用，卡片里只有标题、来源、类型、简介与跳转按钮。</p>
+            </div>
+          </div>
+
+          <div class="form-field">
+            <label>群机器人 Webhook 地址</label>
+            <input type="url" id="larkBotWebhookUrl" placeholder="https://open.larksuite.com/open-apis/bot/v2/hook/…">
+          </div>
+          <label class="subscription-option" style="margin-top: 12px; max-width: 420px;">
+            <input type="checkbox" id="larkBotEnabled">
+            <span>开启自动推送（新内容翻译完成后即时发送）</span>
+          </label>
+          <p class="help-text" id="larkBotHint" style="margin-top: 10px;"></p>
+
+          <div class="actions">
+            <button class="btn btn-secondary" id="btnLarkBotTestSend">发送机器人测试</button>
+          </div>
+          <p class="help-text"><strong>启用水位线：</strong>开启开关的那一刻会记下时间，<strong>只推这之后新抓到的条目</strong>——否则库里几千条存量陆续翻译完会在群里刷屏。关闭开关即清除水位线，下次开启重新计时。推送失败只记日志，不重试、不排队，绝不影响抓取与翻译落库。</p>
+        </div>
       </section>
 
       <section class="tab-panel" id="tab-archive">

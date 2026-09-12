@@ -21,6 +21,11 @@
 
   const DEFAULT_CONFIG = {
     webhookUrl: '',
+    // 群机器人（自定义机器人 webhook）：与上面的多维表格工作流触发器是两条独立
+    // 通道。机器人免费、无每月运行次数额度（只有频率限流），用于「有新内容实时
+    // 知道」；工作流那条按「1 条记录＝1 次运行」计费，用于把数据写进表。
+    botWebhookUrl: '',
+    botEnabled: false,
     requestTimeoutSec: 15
   };
 
@@ -41,6 +46,8 @@
 
     return {
       webhookUrl: String(config.webhookUrl || '').trim(),
+      botWebhookUrl: String(config.botWebhookUrl || '').trim(),
+      botEnabled: Boolean(config.botEnabled),
       requestTimeoutSec: Number.isInteger(timeout) && timeout > 0 ? timeout : DEFAULT_CONFIG.requestTimeoutSec
     };
   }
@@ -52,6 +59,15 @@
       return { ok: false, missing: ['webhookUrl'] };
     }
     return { ok: true, missing: [] };
+  }
+
+  // 机器人就绪闸门：地址合法 **且** 开关打开（自动推送要能一键停，不能只靠清地址）
+  function botReadiness(rawConfig) {
+    const config = normalizeConfig(rawConfig);
+    const missing = [];
+    if (!/^https?:\/\//i.test(config.botWebhookUrl)) missing.push('botWebhookUrl');
+    if (!config.botEnabled) missing.push('botEnabled');
+    return { ok: missing.length === 0, missing };
   }
 
   function asText(value) {
@@ -224,6 +240,65 @@
     return CSV_BOM + [TABLE_HEADERS.map(quote).join(','), ...body].join('\r\n') + '\r\n';
   }
 
+  /* ——— 群机器人卡片 ———————————————————————————————————————————
+   * 自定义机器人 webhook 的消息体，与 Base 工作流那条的扁平 payload 完全不同形态。
+   *
+   * **绝不能放 img 元素**：飞书卡片的图片要 img_key，而 img_key 只能经开放平台
+   * 上传接口获得、需自建应用凭据。2026-09-12 实测拿外链 URL 当 img_key 会被整条
+   * 拒收——`ErrCode: 11310; the card contains images but no imagekey is passed in`。
+   * 所以卡片只有标题/来源/类型/简介/跳转按钮，封面进不来（与 Base 表「封面只能
+   * 是链接」同一个根因）。unit-lark-bot C8/C9 守着。
+   */
+  const BOT_SUMMARY_LIMIT = 160;
+
+  function clipText(value, limit) {
+    const text = asText(value).replace(/\s+/g, ' ');
+    return text.length > limit ? `${text.slice(0, limit)}…` : text;
+  }
+
+  function buildBotCard(drama) {
+    const d = drama || {};
+    const title = asText(d.title);
+    const titleZh = asText(d.titleZh);
+    const display = titleZh ? `${titleZh}（${title}）` : title;
+    const sourceName = SOURCE_NAMES[d.source] || asText(d.source);
+    const tags = (Array.isArray(d.tags) ? d.tags : []).map(asText).filter(Boolean);
+    const genres = (Array.isArray(d.genres) ? d.genres : []).map(asText).filter(Boolean);
+    const summary = asText(d.descriptionZh) || asText(d.description);
+    const url = asText(d.url);
+
+    const meta = [];
+    if (sourceName || tags.length) {
+      meta.push(`**来源**　${sourceName}${tags.length ? ` · ${tags.join(' / ')}` : ''}`);
+    }
+    if (genres.length) meta.push(`**类型**　${genres.join(' / ')}`);
+    if (summary) meta.push(`**简介**　${clipText(summary, BOT_SUMMARY_LIMIT)}`);
+
+    const elements = [{
+      tag: 'div',
+      text: { tag: 'lark_md', content: `**${display || '（无标题）'}**` }
+    }];
+    if (meta.length) elements.push({ tag: 'div', text: { tag: 'lark_md', content: meta.join('\n') } });
+    if (/^https?:\/\//i.test(url)) {
+      elements.push({
+        tag: 'action',
+        actions: [{ tag: 'button', text: { tag: 'plain_text', content: '查看原页' }, url, type: 'primary' }]
+      });
+    }
+
+    return {
+      msg_type: 'interactive',
+      card: {
+        config: { wide_screen_mode: true },
+        header: {
+          template: 'blue',
+          title: { tag: 'plain_text', content: `🎬 ${sourceName ? `${sourceName} ` : ''}新增` }
+        },
+        elements
+      }
+    };
+  }
+
   /**
    * 带超时的 fetch（与 translator.js 同款 AbortController 模式；translator
    * 刻意只导出翻译方法，不改它）。
@@ -299,6 +374,45 @@
     return { success: true };
   }
 
+  /**
+   * 推送一张卡片到群机器人。与 pushDrama 同为效果层、只允许在后台 SW 调用。
+   * 成功返回 {success:true}；失败抛 Error（文案面向用户），未就绪时带
+   * notConfigured 标记。机器人响应形如 {"StatusCode":0,"code":0,"msg":"success"}，
+   * 业务错误照 extractErrorDetail 透传（如 11310 图片无 img_key、9499 频率限流）。
+   */
+  async function pushBotCard(rawConfig, drama) {
+    const config = normalizeConfig(rawConfig);
+    if (!botReadiness(config).ok) {
+      const error = new Error('群机器人未配置或未启用');
+      error.notConfigured = true;
+      throw error;
+    }
+
+    const response = await fetchWithTimeout(config.botWebhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildBotCard(drama))
+    }, config.requestTimeoutSec);
+
+    const bodyText = await response.text().catch(() => '');
+    let body = null;
+    try {
+      body = bodyText ? JSON.parse(bodyText) : null;
+    } catch (e) {
+      // 非 JSON 响应按 HTTP 状态判定
+    }
+
+    if (!response.ok) {
+      const detail = extractErrorDetail(body) || asText(bodyText).slice(0, 120);
+      throw new Error(`群机器人推送失败（HTTP ${response.status}${detail ? `：${detail}` : ''}）`);
+    }
+
+    const detail = extractErrorDetail(body);
+    if (detail) throw new Error(`群机器人返回错误：${detail}`);
+
+    return { success: true };
+  }
+
   const api = {
     DEFAULT_CONFIG,
     SOURCE_NAMES,
@@ -306,8 +420,11 @@
     TABLE_HEADERS,
     normalizeConfig,
     configReadiness,
+    botReadiness,
     posterForPayload,
     buildPayload,
+    buildBotCard,
+    pushBotCard,
     buildTableRows,
     toTsv,
     toCsv,

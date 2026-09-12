@@ -1,4 +1,6 @@
 {
   "webhookUrl": "https://www.feishu.cn/flow/api/trigger-webhook/xxxxxxxxxxxxxxxxxxxx",
+  "botWebhookUrl": "https://open.larksuite.com/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "botEnabled": false,
   "requestTimeoutSec": 15
 }
