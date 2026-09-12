@@ -85,9 +85,39 @@ if (card) {
   check('C12 非 http(s) 的 url 不渲染按钮', !JSON.stringify(badUrl).includes('"tag":"button"'), '');
   const bare = Lark.buildBotCard({});
   check('C13 空条目也能组装出合法卡片', bare?.msg_type === 'interactive' && Boolean(bare?.card?.header), '');
-  const longDesc = Lark.buildBotCard({ ...FULL, descriptionZh: '很长'.repeat(400) });
-  check('C14 超长简介被裁剪（群里不刷屏）', JSON.stringify(longDesc).length < 1800,
-    String(JSON.stringify(longDesc).length));
+  // 裁剪上限 240（2026-09-12 用户定，中英两段共用）。刻意断言「被裁那一段的长度」
+  // 而不是整卡 JSON 总长——后者是随版式浮动的魔数，改版式就得跟着调，挡不住真回归
+  const LIMIT = 240;
+  const longDesc = Lark.buildBotCard({
+    ...FULL, descriptionZh: '很长'.repeat(400), description: 'x'.repeat(900)
+  });
+  check('C14a 超长中文简介裁到 240 字 + 省略号',
+    mdOf(longDesc, 0).length === LIMIT + 1 && mdOf(longDesc, 0).endsWith('…'),
+    `len=${mdOf(longDesc, 0).length}`);
+  check('C14b 超长英文原文同上限（斜体星号不计入正文）',
+    mdOf(longDesc, 1).length === LIMIT + 3 && mdOf(longDesc, 1).startsWith('*')
+    && mdOf(longDesc, 1).endsWith('…*'), `len=${mdOf(longDesc, 1).length}`);
+
+  const exact = '刚好'.repeat(LIMIT / 2);      // 恰好 240 字
+  const atLimit = Lark.buildBotCard({ ...FULL, descriptionZh: exact });
+  check('C14c 恰好等于上限时不裁、不加省略号',
+    mdOf(atLimit, 0) === exact && !mdOf(atLimit, 0).endsWith('…'), `len=${mdOf(atLimit, 0).length}`);
+
+  const shortZh = Lark.buildBotCard({ ...FULL, descriptionZh: '短简介。' });
+  check('C14d 未超限的简介原样输出', mdOf(shortZh, 0) === '短简介。', mdOf(shortZh, 0));
+}
+
+// ---------- B 组：按钮对齐（2026-09-12 实测结论，别再重复试） ----------
+// 飞书 v1 卡片的 action 元素只有 bisected/trisection/flow 三种布局，都不含右对齐；
+// 想用 column_set 分栏把它挤到右边也不行——实测直接被拒：
+//   ErrCode: 200410; action components are not allowed in the column
+// 故按钮固定铺在卡片底部（左对齐）。要右对齐只能整卡切 card v2 schema，不值当。
+{
+  const el = card?.card?.elements || [];
+  const last = el[el.length - 1];
+  check('B1 按钮是顶层 action 元素、不套分栏（分栏放 action 会被飞书拒收）',
+    last?.tag === 'action' && Array.isArray(last?.actions)
+    && !JSON.stringify(el).includes('column_set'), JSON.stringify(last));
 }
 
 // ---------- R 组：就绪判据 ----------

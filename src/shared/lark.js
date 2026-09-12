@@ -249,7 +249,7 @@
    * 所以卡片只有标题/来源/类型/简介/跳转按钮，封面进不来（与 Base 表「封面只能
    * 是链接」同一个根因）。unit-lark-bot C8/C9 守着。
    */
-  const BOT_SUMMARY_LIMIT = 160;
+  const BOT_SUMMARY_LIMIT = 240;
 
   function clipText(value, limit) {
     const text = asText(value).replace(/\s+/g, ' ');
