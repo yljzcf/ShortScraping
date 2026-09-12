@@ -26,8 +26,17 @@
     // 知道」；工作流那条按「1 条记录＝1 次运行」计费，用于把数据写进表。
     botWebhookUrl: '',
     botEnabled: false,
+    // 飞书开放平台自建应用凭据，**只用于上传封面拿 img_key，不是第二条推送通道**。
+    // 推送目标由上面的 botWebhookUrl 决定（本项目用户填的是 Lark 国际版群机器人）：
+    // img_key 跨云可用——飞书租户上传的图推到 Lark 群里能正常渲染（2026-09-12 实测）。
+    // 两个字段即开关：都填才带图，缺一就发无图卡。
+    feishuAppId: '',
+    feishuAppSecret: '',
     requestTimeoutSec: 15
   };
+
+  const FEISHU_TOKEN_API = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
+  const FEISHU_IMAGE_API = 'https://open.feishu.cn/open-apis/im/v1/images';
 
   // 站点显示名单一真源在 site-registry.js；导出契约 Lark.SOURCE_NAMES 保留（sync-server 消费）
   const SOURCE_NAMES = (typeof module !== 'undefined' && module.exports)
@@ -48,6 +57,8 @@
       webhookUrl: String(config.webhookUrl || '').trim(),
       botWebhookUrl: String(config.botWebhookUrl || '').trim(),
       botEnabled: Boolean(config.botEnabled),
+      feishuAppId: String(config.feishuAppId || '').trim(),
+      feishuAppSecret: String(config.feishuAppSecret || '').trim(),
       requestTimeoutSec: Number.isInteger(timeout) && timeout > 0 ? timeout : DEFAULT_CONFIG.requestTimeoutSec
     };
   }
@@ -67,6 +78,16 @@
     const missing = [];
     if (!/^https?:\/\//i.test(config.botWebhookUrl)) missing.push('botWebhookUrl');
     if (!config.botEnabled) missing.push('botEnabled');
+    return { ok: missing.length === 0, missing };
+  }
+
+  // 图床就绪闸门：两个凭据都填才带封面图。刻意不另设勾选框——botEnabled 已是推送总开关，
+  // 再加一个会让「关的是图还是推送」变模糊；字段本身即开关。
+  function imageReadiness(rawConfig) {
+    const config = normalizeConfig(rawConfig);
+    const missing = [];
+    if (!config.feishuAppId) missing.push('feishuAppId');
+    if (!config.feishuAppSecret) missing.push('feishuAppSecret');
     return { ok: missing.length === 0, missing };
   }
 
@@ -243,11 +264,13 @@
   /* ——— 群机器人卡片 ———————————————————————————————————————————
    * 自定义机器人 webhook 的消息体，与 Base 工作流那条的扁平 payload 完全不同形态。
    *
-   * **绝不能放 img 元素**：飞书卡片的图片要 img_key，而 img_key 只能经开放平台
-   * 上传接口获得、需自建应用凭据。2026-09-12 实测拿外链 URL 当 img_key 会被整条
-   * 拒收——`ErrCode: 11310; the card contains images but no imagekey is passed in`。
-   * 所以卡片只有标题/来源/类型/简介/跳转按钮，封面进不来（与 Base 表「封面只能
-   * 是链接」同一个根因）。unit-lark-bot C8/C9 守着。
+   * **图片只能经 img_key 进卡，URL 进不去**：2026-09-12 实测拿外链 URL 当 img_key
+   * 会被整条拒收——`ErrCode: 11310; the card contains images but no imagekey is
+   * passed in`。当晚翻案了一半：11310 的语义是「你没给真 img_key」而不是「机器人
+   * 不许放图」，用自建应用上传拿到的 img_key 塞进来能正常渲染，且**跨云可用**
+   * （飞书租户上传 → Lark 国际版群里照样显示）。故 buildBotCard 接受可选 imgKey：
+   * 拿到了就带图（版式 V1：图在最上、满宽原样，不裁不缩——2026-09-12 用户三选一后定），
+   * 拿不到就照旧发无图卡。unit-lark-bot C8/I 组守着。
    */
   const BOT_SUMMARY_LIMIT = 240;
 
@@ -256,8 +279,9 @@
     return text.length > limit ? `${text.slice(0, limit)}…` : text;
   }
 
-  function buildBotCard(drama) {
+  function buildBotCard(drama, options) {
     const d = drama || {};
+    const imgKey = asText(options && options.imgKey);
     const title = asText(d.title);
     const titleZh = asText(d.titleZh);
     const tags = (Array.isArray(d.tags) ? d.tags : []).map(asText).filter(Boolean);
@@ -273,6 +297,8 @@
     const heading = titleZh && title ? `${titleZh}（${title}）` : (titleZh || title || '（无标题）');
 
     const elements = [];
+    // 封面真图排最前、满宽原样（不给 size/scale_type——那会把竖版海报裁掉大半）
+    if (imgKey) elements.push({ tag: 'img', img_key: imgKey, alt: { tag: 'plain_text', content: '封面' } });
     if (summary) elements.push({ tag: 'markdown', content: summary });
 
     // 来源与类别合成一块：独立元素天然与上文隔开一行，两行本身要贴在一起
@@ -360,6 +386,87 @@
     return `[${code}] ${msg}`;
   }
 
+  /* ——— 封面图上传（飞书自建应用当图床） —————————————————————————
+   * 卡片里的图必须是 img_key，只能经开放平台上传接口拿。本层把「拉封面 → 上传」
+   * 封装成一个**绝不抛异常**的函数：任何一步失败都返回 null，调用方降级发无图卡。
+   * 推送本身比封面重要得多，图挂了不能把整条推送带走。
+   *
+   * token 缓存刻意只放模块内存、不落 chrome.storage：本文件至今零 chrome API
+   * 依赖（纯函数 + fetch 两层，四端共用），为省一次约 200ms 的请求去破这个边界
+   * 不划算；SW 重启后重取一次即可，token 接口限额宽松。
+   */
+  let tokenCache = null;   // { appId, token, expiresAt }
+
+  function __resetTokenCache() {
+    tokenCache = null;
+  }
+
+  async function readJsonBody(response) {
+    const text = await response.text().catch(() => '');
+    try {
+      return text ? JSON.parse(text) : null;
+    } catch (e) {
+      return null;   // 非 JSON 响应交给调用方按 HTTP 状态判定
+    }
+  }
+
+  async function getTenantAccessToken(config) {
+    const now = Date.now();
+    if (tokenCache && tokenCache.appId === config.feishuAppId && tokenCache.expiresAt > now) {
+      return tokenCache.token;
+    }
+
+    const response = await fetchWithTimeout(FEISHU_TOKEN_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: config.feishuAppId, app_secret: config.feishuAppSecret })
+    }, config.requestTimeoutSec);
+
+    const body = await readJsonBody(response);
+    if (!response.ok || extractErrorDetail(body) || !body || !body.tenant_access_token) return null;
+
+    // 提前 5 分钟过期，避免卡在边界上拿到刚失效的 token
+    const ttl = Math.max(60, Number(body.expire) || 7200) - 300;
+    tokenCache = { appId: config.feishuAppId, token: body.tenant_access_token, expiresAt: now + ttl * 1000 };
+    return tokenCache.token;
+  }
+
+  /**
+   * 拉封面并上传到飞书，返回 image_key；任一步失败返回 null（不抛）。
+   * 封面取 drama.poster **原值**（榜单页缩略图，56KB 级），不走 posterForPayload
+   * ——那个是为多维表格「链接转附件」放大到 1.5MB 的形态，卡片显示用不着。
+   */
+  async function uploadCoverImage(rawConfig, posterUrl) {
+    const config = normalizeConfig(rawConfig);
+    if (!imageReadiness(config).ok) return null;
+    if (!/^https?:\/\//i.test(asText(posterUrl))) return null;
+
+    try {
+      const token = await getTenantAccessToken(config);
+      if (!token) return null;
+
+      const imageResponse = await fetchWithTimeout(posterUrl, {}, config.requestTimeoutSec);
+      if (!imageResponse.ok) return null;
+
+      const form = new FormData();
+      form.append('image_type', 'message');
+      form.append('image', await imageResponse.blob(), 'cover.jpg');
+
+      // 不手动设 Content-Type：multipart 的 boundary 要由 fetch 自己生成
+      const response = await fetchWithTimeout(FEISHU_IMAGE_API, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form
+      }, config.requestTimeoutSec);
+
+      const body = await readJsonBody(response);
+      if (!response.ok || extractErrorDetail(body)) return null;
+      return (body && body.data && body.data.image_key) || null;
+    } catch (e) {
+      return null;   // 网络异常/超时同样降级，不向上抛
+    }
+  }
+
   /**
    * 推送一条卡片到飞书工作流 webhook。成功返回 {success:true}；
    * 失败抛 Error（文案面向用户），未配置时错误对象带 notConfigured 标记。
@@ -413,10 +520,13 @@
       throw error;
     }
 
+    // 封面上传对调用方不可见：拿到 img_key 就带图，拿不到就发无图卡
+    const imgKey = await uploadCoverImage(config, drama && drama.poster);
+
     const response = await fetchWithTimeout(config.botWebhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildBotCard(drama))
+      body: JSON.stringify(buildBotCard(drama, { imgKey }))
     }, config.requestTimeoutSec);
 
     const bodyText = await response.text().catch(() => '');
@@ -446,10 +556,13 @@
     normalizeConfig,
     configReadiness,
     botReadiness,
+    imageReadiness,
     posterForPayload,
     buildPayload,
     buildBotCard,
+    uploadCoverImage,
     pushBotCard,
+    __resetTokenCache,
     buildTableRows,
     toTsv,
     toCsv,

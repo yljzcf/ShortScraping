@@ -363,6 +363,13 @@ async function rescheduleCronTask(name) {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   console.log(`[ShortScraping] 闹钟触发: ${alarm.name}`);
 
+  // 机器人重试队列：与抓取/翻译无关，处理完直接返回，别落进下面的 cron 续排分支
+  if (alarm.name === BOT_RETRY_ALARM_NAME) {
+    await processBotRetryQueue().catch(e =>
+      console.warn('[ShortScraping] 群机器人重试队列处理失败:', e?.message || e));
+    return;
+  }
+
   if (alarm.name === WATCHDOG_ALARM_NAME) {
     // 补回缺失/过期/形状不符的 alarm，保留健康任务的原定执行时间，避免间隔任务被推迟。
     await setupAlarms().catch(e =>
@@ -1390,15 +1397,100 @@ async function syncBotWatermark(config) {
   }
   if (!state.enabledAt) {
     const enabledAt = new Date().toISOString();
-    await chrome.storage.local.set({ larkBotState: { enabledAt } });
+    await chrome.storage.local.set({ larkBotState: { ...state, enabledAt } });
     console.log(`[ShortScraping] 群机器人已启用，水位线 ${enabledAt}（更早抓到的存量不推送）`);
     return enabledAt;
   }
   return state.enabledAt;
 }
 
+/* —— 发送节流与失败重试（v1.6.0） ————————————————————————————
+ *
+ * 节流：飞书自定义机器人限流「单租户单机器人 100 次/分钟、5 次/秒」，超限回 11232。
+ * 每分钟那条安全（实测一批翻译 9.5~34 秒 ≈ 35 条/分钟），但**翻译线一批 10 条跑完
+ * 一起回填**，10 次推送会在同一个循环里连发，很容易打满「5 次/秒」。250ms 间隔
+ * ＝ ≤4 次/秒，成本可忽略。
+ *
+ * 重试：推翻 v1.5.14「失败只记日志、不重试不排队」的边界（2026-09-12 用户要求）。
+ * **不能用 setTimeout**——MV3 的 SW 空闲约 30 秒即被回收，跨 1 分钟的定时器活不到；
+ * 唯一可靠做法是 chrome.alarms（允许的最小间隔正好 1 分钟）+ storage 持久队列。
+ * 队列只存 id 与已失败次数（对齐 handleLarkPush 只传 id 的惯例），重试时按 id
+ * 重新读卡；条目已被清理就丢弃。队列空必须清掉闹钟，否则扩展永远每分钟醒一次。
+ */
+const BOT_RETRY_ALARM_NAME = 'larkBotRetry';
+const MAX_BOT_RETRIES = 3;              // 首发失败后最多再试 3 次（共 4 次请求）
+const BOT_RETRY_QUEUE_LIMIT = 50;       // 防 webhook 失效时队列无限膨胀
+const BOT_PUSH_MIN_INTERVAL_MS = 250;
+let lastBotPushAt = 0;
+
+async function throttleBotPush() {
+  const wait = BOT_PUSH_MIN_INTERVAL_MS - (Date.now() - lastBotPushAt);
+  if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+  lastBotPushAt = Date.now();
+}
+
+async function readBotState() {
+  const { larkBotState } = await chrome.storage.local.get('larkBotState');
+  return larkBotState && typeof larkBotState === 'object' ? larkBotState : {};
+}
+
+async function writeBotRetryQueue(queue) {
+  const state = await readBotState();
+  await chrome.storage.local.set({ larkBotState: { ...state, retryQueue: queue } });
+  if (queue.length) chrome.alarms.create(BOT_RETRY_ALARM_NAME, { delayInMinutes: 1 });
+  else await chrome.alarms.clear(BOT_RETRY_ALARM_NAME);
+}
+
+async function enqueueBotRetry(dramaId, attempts) {
+  const state = await readBotState();
+  const queue = (Array.isArray(state.retryQueue) ? state.retryQueue : [])
+    .filter(entry => entry && entry.dramaId !== dramaId);
+  queue.push({ dramaId, attempts });
+  while (queue.length > BOT_RETRY_QUEUE_LIMIT) queue.shift();   // 超限丢最老的
+  await writeBotRetryQueue(queue);
+}
+
+async function processBotRetryQueue() {
+  const state = await readBotState();
+  const queue = Array.isArray(state.retryQueue) ? [...state.retryQueue] : [];
+  if (!queue.length) {
+    await chrome.alarms.clear(BOT_RETRY_ALARM_NAME);
+    return;
+  }
+
+  const { larkConfig } = await chrome.storage.local.get('larkConfig');
+  const config = Lark.normalizeConfig(larkConfig);
+  // 开关已关或地址已清：整队作废，别留着每分钟醒一次
+  if (!Lark.botReadiness(config).ok) {
+    await writeBotRetryQueue([]);
+    return;
+  }
+
+  const dramas = await getDramasSnapshot();
+  const remaining = [];
+  for (const entry of queue) {
+    const drama = dramas.find(d => d.id === entry.dramaId || d.itemId === entry.dramaId);
+    if (!drama) continue;   // 已被「按条件清理」删掉 → 丢弃，不白发请求
+    try {
+      await throttleBotPush();
+      await Lark.pushBotCard(config, drama);
+      console.log(`[ShortScraping] 群机器人重试成功: ${drama.titleZh || drama.title}`);
+    } catch (e) {
+      const attempts = (Number(entry.attempts) || 1) + 1;
+      if (attempts > MAX_BOT_RETRIES) {
+        console.warn(`[ShortScraping] 群机器人推送放弃（已试 ${attempts} 次）: ${entry.dramaId} - ${e.message}`);
+        continue;
+      }
+      remaining.push({ dramaId: entry.dramaId, attempts });
+    }
+  }
+
+  await writeBotRetryQueue(remaining);
+}
+
 /**
- * 条件满足才推一张卡。任何失败只记日志——推送是旁路，绝不能影响翻译/入库落库。
+ * 条件满足才推一张卡。任何失败只记日志——推送是旁路，绝不能影响翻译/入库落库；
+ * 推送请求本身失败则进重试队列（图片上传失败不算，那条路降级发无图卡）。
  */
 async function maybeBotPush(drama) {
   try {
@@ -1413,11 +1505,18 @@ async function maybeBotPush(drama) {
     // 无 scrapedAt 的条目保守不推（判不出是存量还是新卡）
     if (!drama.scrapedAt || drama.scrapedAt < enabledAt) return false;
 
-    await Lark.pushBotCard(config, drama);
+    try {
+      await throttleBotPush();
+      await Lark.pushBotCard(config, drama);
+    } catch (e) {
+      console.warn('[ShortScraping] 群机器人推送失败（不影响入库）:', e.message);
+      if (drama.id) await enqueueBotRetry(drama.id, 1);
+      return false;
+    }
     console.log(`[ShortScraping] 群机器人已推送: ${drama.titleZh || drama.title}`);
     return true;
   } catch (e) {
-    console.warn('[ShortScraping] 群机器人推送失败（不影响入库）:', e.message);
+    console.warn('[ShortScraping] 群机器人推送流程异常（不影响入库）:', e.message);
     return false;
   }
 }

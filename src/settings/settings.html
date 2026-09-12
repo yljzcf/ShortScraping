@@ -770,13 +770,13 @@
           <div class="section-header">
             <div>
               <div class="section-title"><span>🤖</span> 群机器人实时推送</div>
-              <p class="help-text">另一条<strong>独立且免费</strong>的通道：新内容翻译完成后自动推一张卡片到群，<strong>不消耗多维表格工作流的每月运行次数</strong>（只有频率限流）。在目标群「设置 → 群机器人 → 添加自定义机器人」拿到 Webhook 地址填入即可，安全设置留空或按需配置。<br>推的是群消息不是表格记录，两条通道各管各的：表格数据仍走卡片上的 🕊 按钮与「数据存档」里的批量导出。<strong>卡片内无法显示封面图</strong>——飞书卡片的图片要经开放平台上传拿 img_key，需自建应用，卡片里只有标题、来源、类型、简介与跳转按钮。</p>
+              <p class="help-text">另一条<strong>独立且免费</strong>的通道：新内容翻译完成后自动推一张卡片到群，<strong>不消耗多维表格工作流的每月运行次数</strong>（只有频率限流：单机器人 100 次/分钟、5 次/秒，扩展已按 250ms 间隔自动节流）。在目标群「设置 → 群机器人 → 添加自定义机器人」拿到 Webhook 地址填入即可，安全设置留空或按需配置。<br>推的是群消息不是表格记录，两条通道各管各的：表格数据仍走卡片上的 🕊 按钮与「数据存档」里的批量导出。<strong>推送失败会自动重试</strong>：先推完同批次其他卡，之后最多重试 3 次、每次间隔 1 分钟，仍失败则丢弃并记日志，全程不影响抓取与翻译落库。</p>
             </div>
           </div>
 
           <div class="form-field">
             <label>群机器人 Webhook 地址</label>
-            <input type="url" id="larkBotWebhookUrl" placeholder="https://open.larksuite.com/open-apis/bot/v2/hook/…">
+            <input type="url" id="larkBotWebhookUrl" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/… 或 open.larksuite.com/…">
           </div>
           <label class="subscription-option" style="margin-top: 12px; max-width: 420px;">
             <input type="checkbox" id="larkBotEnabled">
@@ -784,10 +784,25 @@
           </label>
           <p class="help-text" id="larkBotHint" style="margin-top: 10px;"></p>
 
+          <div class="section" style="margin-top: 14px; margin-bottom: 0;">
+            <div class="section-title"><span>🖼️</span> 封面图上传（飞书开放平台凭据）</div>
+            <p class="help-text">卡片里的图必须是 <code>img_key</code>，外链 URL 塞不进去（会被整条拒收，<code>ErrCode 11310</code>）。填入<strong>飞书自建应用</strong>的凭据后，扩展会在推送前把封面上传到飞书换取 <code>img_key</code>，卡片即可带真封面图（满宽原样，不裁不缩）。<br><strong>这不是第二条推送通道</strong>——推送目标仍由上面的 Webhook 地址决定；<strong>img_key 跨云可用</strong>，在飞书租户上传的图推到 Lark 国际版群里也能正常显示（2026-09-12 实测）。<br>两个字段都填才带图，留空就发无图卡。应用需在<a href="https://open.feishu.cn/app" target="_blank" rel="noopener">开放平台</a>创建并开通 <code>im:resource</code>（上传图片）权限后发布版本。上传失败会自动降级发无图卡，不会因此丢掉推送。</p>
+            <div class="grid" style="margin-top: 10px;">
+              <div class="form-field">
+                <label>App ID</label>
+                <input type="text" id="larkFeishuAppId" placeholder="cli_…">
+              </div>
+              <div class="form-field">
+                <label>App Secret</label>
+                <input type="password" id="larkFeishuAppSecret" placeholder="留空则不带封面图">
+              </div>
+            </div>
+          </div>
+
           <div class="actions">
             <button class="btn btn-secondary" id="btnLarkBotTestSend">发送机器人测试</button>
           </div>
-          <p class="help-text"><strong>启用水位线：</strong>开启开关的那一刻会记下时间，<strong>只推这之后新抓到的条目</strong>——否则库里几千条存量陆续翻译完会在群里刷屏。关闭开关即清除水位线，下次开启重新计时。推送失败只记日志，不重试、不排队，绝不影响抓取与翻译落库。</p>
+          <p class="help-text"><strong>启用水位线：</strong>开启开关的那一刻会记下时间，<strong>只推这之后新抓到的条目</strong>——否则库里几千条存量陆续翻译完会在群里刷屏。关闭开关即清除水位线，下次开启重新计时。推送失败会自动重试（最多 3 次、每次间隔 1 分钟；队列存在本地，用扩展闹钟驱动，浏览器关闭期间暂停、重开后继续），仍失败则丢弃并记日志；全程不影响抓取与翻译落库。</p>
         </div>
       </section>
 

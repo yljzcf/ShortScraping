@@ -99,7 +99,9 @@
       requestTimeoutSec: document.getElementById('larkRequestTimeoutSec'),
       botWebhookUrl: document.getElementById('larkBotWebhookUrl'),
       botEnabled: document.getElementById('larkBotEnabled'),
-      botHint: document.getElementById('larkBotHint')
+      botHint: document.getElementById('larkBotHint'),
+      feishuAppId: document.getElementById('larkFeishuAppId'),
+      feishuAppSecret: document.getElementById('larkFeishuAppSecret')
     };
     elements.scheduleForm = {
       mode: document.getElementById('scheduleModeSelect'),
@@ -661,6 +663,8 @@
     form.requestTimeoutSec.value = String(config.requestTimeoutSec);
     if (form.botWebhookUrl) form.botWebhookUrl.value = config.botWebhookUrl;
     if (form.botEnabled) form.botEnabled.checked = config.botEnabled;
+    if (form.feishuAppId) form.feishuAppId.value = config.feishuAppId;
+    if (form.feishuAppSecret) form.feishuAppSecret.value = config.feishuAppSecret;
     refreshBotHint();
   }
 
@@ -670,7 +674,10 @@
       webhookUrl: form.webhookUrl.value.trim(),
       requestTimeoutSec: Number(form.requestTimeoutSec.value),
       botWebhookUrl: form.botWebhookUrl ? form.botWebhookUrl.value.trim() : '',
-      botEnabled: form.botEnabled ? form.botEnabled.checked : false
+      botEnabled: form.botEnabled ? form.botEnabled.checked : false,
+      // 飞书自建应用凭据：只用于上传封面拿 img_key，不是第二条推送通道
+      feishuAppId: form.feishuAppId ? form.feishuAppId.value.trim() : '',
+      feishuAppSecret: form.feishuAppSecret ? form.feishuAppSecret.value.trim() : ''
     };
   }
 

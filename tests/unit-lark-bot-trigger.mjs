@@ -14,6 +14,9 @@ import fs from 'node:fs';
 const rawStore = {};
 let failNextSet = false;
 const botPosts = [];          // 捕获发往机器人的请求
+const botPostTimes = [];      // 每次请求的时刻（S 组测节流）
+const alarmStore = new Map();
+let botFailCount = 0;         // 还需失败多少次（Q 组制造推送失败）
 
 function pickKeys(keys) {
   const wanted = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys ?? rawStore);
@@ -48,7 +51,14 @@ const chromeStub = {
     },
     lastError: null
   },
-  alarms: { async getAll() { return []; }, async clear() { return true; }, create() {}, onAlarm: { addListener() {} } },
+  // 闹钟用真存储：Q 组要断言重试闹钟被建/被清，noop 桩测不了
+  alarms: {
+    async getAll() { return [...alarmStore.values()]; },
+    async get(name) { return alarmStore.get(name) || null; },
+    async clear(name) { return alarmStore.delete(name); },
+    create(name, info) { alarmStore.set(name, { name, ...info }); },
+    onAlarm: { addListener(fn) { chromeStub.__onAlarm = fn; } }
+  },
   tabs: { create() {}, onUpdated: { addListener() {}, removeListener() {} } },
   notifications: { create() {} },
   scripting: { async executeScript() { return []; } }
@@ -67,6 +77,8 @@ const BOT_HOOK = 'https://open.larksuite.com/open-apis/bot/v2/hook/unit-test';
 globalThis.fetch = async (url, options) => {
   if (String(url) === BOT_HOOK) {
     botPosts.push(JSON.parse(options?.body || '{}'));
+    botPostTimes.push(Date.now());
+    if (botFailCount > 0) { botFailCount -= 1; throw new Error('unit stub: 机器人不可达'); }
     return { ok: true, status: 200, async text() { return JSON.stringify({ code: 0, msg: 'success' }); } };
   }
   throw new TypeError('unit stub: no network');
@@ -215,6 +227,109 @@ check('O3 推送失败不影响翻译落库',
   (rawStore.dramas || [])[0]?.status === 'trans' && (rawStore.dramas || [])[0]?.titleZh === '中·T-failpush',
   JSON.stringify(rawStore.dramas?.[0]));
 globalThis.fetch = origFetch;
+
+// ---------- Q 组：推送失败重试队列（v1.6.0，推翻 v1.5.14 的「不重试不排队」） ----------
+// 用户定：失败先推完同批次其他卡（现有实现天然如此，逐条 try/catch），
+// 之后最多重试 3 次、间隔 1 分钟，全失败则丢弃。
+// **不能用 setTimeout**：MV3 的 SW 空闲约 30 秒即回收，跨 1 分钟的定时器活不到，
+// 只能靠 chrome.alarms（允许的最小间隔正好 1 分钟）+ storage 持久队列。
+const RETRY_ALARM = 'larkBotRetry';
+const queueOf = () => rawStore.larkBotState?.retryQueue || [];
+const fireRetryAlarm = async () => {
+  await chromeStub.__onAlarm?.({ name: RETRY_ALARM });
+  await sleep(400);
+};
+const pushTrans = async (id, over = {}) => {
+  await chromeStub.runtime.sendMessage({
+    action: 'saveDrama',
+    drama: { ...mk(id), status: 'trans', titleZh: `中·${id}`, descriptionZh: '中文简介', translatedAt: AFTER, ...over }
+  });
+  await sleep(400);
+};
+
+await resetDramasCache(); await setupBot();
+botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botFailCount = 99;                                  // 一直失败
+await pushTrans('retry1');
+check('Q1 首次推送失败后进入重试队列', queueOf().length === 1
+  && queueOf()[0]?.dramaId === 'retry1', JSON.stringify(rawStore.larkBotState));
+check('Q2 队列只存 id 与已失败次数，不存卡片数据',
+  queueOf()[0]?.attempts === 1 && !('card' in (queueOf()[0] || {})) && !('drama' in (queueOf()[0] || {})),
+  JSON.stringify(queueOf()[0]));
+check('Q3 入队即建 1 分钟后的重试闹钟',
+  alarmStore.get(RETRY_ALARM)?.delayInMinutes === 1, JSON.stringify(alarmStore.get(RETRY_ALARM)));
+
+botFailCount = 0;                                   // 这次会成功
+botPosts.length = 0;
+await fireRetryAlarm();
+check('Q4 闹钟触发时按 id 重新读卡并重推', botPosts.length === 1
+  && JSON.stringify(botPosts[0]).includes('中·retry1'), `posts=${botPosts.length}`);
+check('Q5 重推成功后出队', queueOf().length === 0, JSON.stringify(queueOf()));
+check('Q6 队列空即清除闹钟（否则扩展永远每分钟醒一次）',
+  !alarmStore.has(RETRY_ALARM), JSON.stringify([...alarmStore.keys()]));
+
+// 满 3 次重试就丢弃：总请求 = 首发 1 + 重试 3 = 4
+await resetDramasCache(); await setupBot();
+botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botFailCount = 99;
+await pushTrans('deadcard');
+for (let i = 0; i < 3; i++) await fireRetryAlarm();
+check('Q7 首发 1 次 + 重试 3 次 = 共 4 次请求后放弃', botPosts.length === 4, `posts=${botPosts.length}`);
+check('Q8 放弃后出队且闹钟清除',
+  queueOf().length === 0 && !alarmStore.has(RETRY_ALARM),
+  `queue=${JSON.stringify(queueOf())} alarms=${JSON.stringify([...alarmStore.keys()])}`);
+botPosts.length = 0;
+await fireRetryAlarm();
+check('Q9 放弃之后不再重试', botPosts.length === 0, `posts=${botPosts.length}`);
+
+// 条目已被清理 → 直接丢弃，不白发请求
+await resetDramasCache(); await setupBot();
+botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botFailCount = 99;
+await pushTrans('gonecard');
+// 模拟「按条件清理」删掉了它：直改 rawStore 绕不过队列缓存，必须先让缓存失效
+await resetDramasCache();
+rawStore.dramas = [];
+botPosts.length = 0;
+await fireRetryAlarm();
+check('Q10 卡已从库中删除时出队丢弃、零请求',
+  botPosts.length === 0 && queueOf().length === 0, `posts=${botPosts.length} queue=${queueOf().length}`);
+
+// 队列上限：防 webhook 失效时无限膨胀
+await resetDramasCache(); await setupBot();
+botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+rawStore.larkBotState = {
+  enabledAt: ENABLED_AT,
+  retryQueue: Array.from({ length: 50 }, (_, i) => ({ dramaId: `old${i}`, attempts: 1 }))
+};
+botFailCount = 99;
+await pushTrans('overflow');
+check('Q11 队列上限 50，超出丢最老的',
+  queueOf().length === 50 && !queueOf().some(e => e.dramaId === 'old0')
+  && queueOf().some(e => e.dramaId === 'overflow'),
+  `len=${queueOf().length} first=${queueOf()[0]?.dramaId}`);
+
+// 成功推送不该留下任何队列痕迹
+await resetDramasCache(); await setupBot();
+botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botFailCount = 0;
+await pushTrans('okcard');
+check('Q12 推送成功不入队、不建闹钟',
+  queueOf().length === 0 && !alarmStore.has(RETRY_ALARM),
+  `queue=${JSON.stringify(queueOf())}`);
+
+// ---------- S 组：发送节流（飞书自定义机器人 5 次/秒、100 次/分钟，超限 11232） ----------
+// 翻译线一批 10 条跑完一起回填，10 次推送会在同一个循环里连发，很容易打满「5 次/秒」。
+await resetDramasCache(); await setupBot();
+botPosts.length = 0; botPostTimes.length = 0; alarmStore.clear();
+botFailCount = 0;
+globalThis.Translator = { async translateTitleAndDesc(title) { return { title: `中·${title}`, desc: '中文简介' }; } };
+rawStore.dramas = [mk('thr1'), mk('thr2'), mk('thr3')];
+await runTranslateRound();
+const gaps = botPostTimes.slice(1).map((t, i) => t - botPostTimes[i]);
+check('S1 同批多条推送之间有节流间隔（≥240ms，即 ≤4 次/秒）',
+  botPostTimes.length === 3 && gaps.every(g => g >= 240),
+  `times=${botPostTimes.length} gaps=${JSON.stringify(gaps)}`);
 
 console.log = origLog; console.warn = origWarn; console.error = origError;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

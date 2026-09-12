@@ -72,10 +72,12 @@ if (card) {
   check('C7 尾部按钮文案「去瞅瞅」并指向原页',
     json.includes('"去瞅瞅"') && json.includes('https://www.netflix.com/title/12345')
     && json.includes('"tag":"button"'), '');
-  // 硬限制：卡片里不能出现 img 元素，否则飞书整条拒收（ErrCode 11310）
-  check('C8 不含 img 元素（img_key 需自建应用，实测会被拒收）',
+  // 不传 imgKey 就不带图：ErrCode 11310 的语义是「你没给真 img_key」，塞个空值
+  // 或外链 URL 都会被整条拒收，所以宁可发无图卡（见 I 组）
+  check('C8 不传 imgKey 时不含 img 元素',
     !json.includes('"tag":"img"') && !json.includes('img_key'), '');
-  check('C9 封面链接不出现在卡片里', !json.includes('nflximg'), '');
+  check('C9 封面链接不出现在卡片里（图只能经 img_key 进卡，URL 进不去）',
+    !json.includes('nflximg'), '');
 }
 
 // 退化面
@@ -163,6 +165,160 @@ if (card) {
   check('R7 Base webhook 就绪判据不受 bot 字段影响',
     Lark.configReadiness({ webhookUrl: 'https://base/hook' }).ok === true
     && Lark.configReadiness({ botWebhookUrl: 'https://bot/hook', botEnabled: true }).ok === false, '');
+}
+
+// ---------- I 组：封面真图（v1.6.0） ----------
+// 2026-09-12 晚实测翻案：11310 的语义是「你没给真 img_key」，不是「机器人不许放图」。
+// 自建应用上传拿到的 img_key 塞进卡片能正常渲染，且**跨云可用**——飞书租户上传的图
+// 推到 Lark 国际版群里照样显示（用户肉眼验收）。故本项目形态是：
+// 推送目标＝Lark 群，飞书自建应用只当图床。
+{
+  const withImg = Lark.buildBotCard(FULL, { imgKey: 'img_v3_unit_test' });
+  const first = elsOf(withImg)[0];
+  check('I1 传入 imgKey 时正文最前插 img 元素',
+    first?.tag === 'img' && first?.img_key === 'img_v3_unit_test', JSON.stringify(first));
+  check('I2 img 带 alt（飞书要求图片元素有 alt 结构）',
+    first?.alt?.tag === 'plain_text', JSON.stringify(first?.alt));
+  // 版式 V1：图在最上、满宽原样，不裁不缩（2026-09-12 用户三选一后定）
+  check('I3 带图后其余版式顺序不变（简介→来源类别→按钮）',
+    elsOf(withImg)[1]?.content === '一段中文简介。'
+    && String(elsOf(withImg)[2]?.content).includes('**来源：**')
+    && elsOf(withImg)[3]?.tag === 'column_set', elsOf(withImg).map(e => e.tag).join(','));
+  check('I4 img 上不带 size/scale_type（V1 满宽原样）',
+    first && !('size' in first) && !('scale_type' in first), JSON.stringify(Object.keys(first || {})));
+
+  for (const [label, opts] of [['无 options', undefined], ['空 imgKey', { imgKey: '' }], ['null', { imgKey: null }]]) {
+    const c = Lark.buildBotCard(FULL, opts);
+    check(`I5 ${label} 时不插 img 元素`, !JSON.stringify(c).includes('"tag":"img"'), label);
+  }
+}
+
+// ---------- G 组：飞书图床凭据（配置层） ----------
+{
+  check('G1 DEFAULT_CONFIG 含飞书应用凭据两字段且默认空',
+    Lark.DEFAULT_CONFIG.feishuAppId === '' && Lark.DEFAULT_CONFIG.feishuAppSecret === '',
+    JSON.stringify(Lark.DEFAULT_CONFIG));
+  const norm = Lark.normalizeConfig({ feishuAppId: '  cli_x  ', feishuAppSecret: ' s3cret ' });
+  check('G2 normalizeConfig 归一化凭据（trim）',
+    norm.feishuAppId === 'cli_x' && norm.feishuAppSecret === 's3cret', JSON.stringify(norm));
+  // 两个字段即开关：都填才带图，缺一就发无图卡（不另设勾选框，否则「关的是图还是推送」会混）
+  check('G3 两个凭据齐全 → 图床就绪',
+    Lark.imageReadiness({ feishuAppId: 'cli_x', feishuAppSecret: 's' }).ok === true, '');
+  check('G4 只填 appId → 不就绪',
+    Lark.imageReadiness({ feishuAppId: 'cli_x' }).ok === false, '');
+  check('G5 只填 secret → 不就绪',
+    Lark.imageReadiness({ feishuAppSecret: 's' }).ok === false, '');
+  check('G6 都不填 → 不就绪（现状：无图卡）', Lark.imageReadiness({}).ok === false, '');
+  check('G7 图床就绪与机器人就绪互不影响',
+    Lark.botReadiness({ botWebhookUrl: 'https://x/y', botEnabled: true, feishuAppId: '' }).ok === true, '');
+}
+
+// ---------- U 组：封面上传（效果层，桩掉 fetch） ----------
+const TOKEN_API = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
+const IMAGE_API = 'https://open.feishu.cn/open-apis/im/v1/images';
+const POSTER = 'https://dnm.nflximg.net/x.jpg';
+const CRED = { feishuAppId: 'cli_x', feishuAppSecret: 's3cret', requestTimeoutSec: 5 };
+
+let calls = [];
+const jsonRes = (body, ok = true) => ({
+  ok, status: ok ? 200 : 500, async text() { return JSON.stringify(body); }, async json() { return body; }
+});
+function installFetch(handlers = {}) {
+  calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const u = String(url);
+    calls.push({ url: u, method: options.method || 'GET', headers: options.headers || {}, body: options.body });
+    if (u === TOKEN_API) return handlers.token ? handlers.token() : jsonRes({ code: 0, tenant_access_token: 't-1', expire: 7200 });
+    if (u === IMAGE_API) return handlers.image ? handlers.image() : jsonRes({ code: 0, data: { image_key: 'img_v3_ok' } });
+    if (u === POSTER) return handlers.poster ? handlers.poster() : { ok: true, status: 200, async blob() { return new Blob([new Uint8Array([1, 2, 3])]); } };
+    if (u.includes('/open-apis/bot/')) return jsonRes({ code: 0, msg: 'success' });
+    throw new TypeError(`unit stub: 未预期的请求 ${u}`);
+  };
+}
+
+{
+  installFetch();
+  Lark.__resetTokenCache();
+  const key = await Lark.uploadCoverImage(CRED, POSTER);
+  check('U1 上传成功返回 image_key', key === 'img_v3_ok', String(key));
+  check('U2 顺序＝取 token → 拉图 → 上传',
+    calls.map(c => c.url).join('|') === [TOKEN_API, POSTER, IMAGE_API].join('|'),
+    calls.map(c => c.url).join('|'));
+  const upload = calls.find(c => c.url === IMAGE_API);
+  check('U3 上传带 Bearer token 且是 POST',
+    upload?.method === 'POST' && upload?.headers?.Authorization === 'Bearer t-1',
+    JSON.stringify(upload?.headers));
+  check('U4 上传用 multipart（body 是 FormData，image_type=message）',
+    upload?.body instanceof FormData && upload.body.get('image_type') === 'message',
+    String(upload?.body?.constructor?.name));
+
+  // token 缓存：第二次上传不该再取 token（SW 内存缓存，提前 5 分钟过期）
+  installFetch();
+  const key2 = await Lark.uploadCoverImage(CRED, POSTER);
+  check('U5 token 命中缓存时不重复取', key2 === 'img_v3_ok'
+    && !calls.some(c => c.url === TOKEN_API), calls.map(c => c.url).join('|'));
+
+  // 换 appId 视为不同凭据，必须重新取
+  installFetch();
+  await Lark.uploadCoverImage({ ...CRED, feishuAppId: 'cli_other' }, POSTER);
+  check('U6 换 appId 后重新取 token', calls.some(c => c.url === TOKEN_API), calls.map(c => c.url).join('|'));
+}
+
+// 失败面：一律返回 null（由调用方降级发无图卡），绝不抛
+{
+  installFetch(); Lark.__resetTokenCache();
+  check('U7 凭据不全时零请求直接返回 null',
+    await Lark.uploadCoverImage({ feishuAppId: 'cli_x' }, POSTER) === null && calls.length === 0,
+    `calls=${calls.length}`);
+
+  installFetch(); Lark.__resetTokenCache();
+  check('U8 封面 URL 非 http(s) 时零请求返回 null',
+    await Lark.uploadCoverImage(CRED, '') === null && calls.length === 0, `calls=${calls.length}`);
+
+  installFetch({ token: () => jsonRes({ code: 99991663, msg: 'app not enabled' }) }); Lark.__resetTokenCache();
+  check('U9 token 接口业务错误 → null', await Lark.uploadCoverImage(CRED, POSTER) === null, '');
+
+  installFetch({ poster: () => ({ ok: false, status: 404, async blob() { return new Blob([]); } }) }); Lark.__resetTokenCache();
+  check('U10 封面下载失败 → null', await Lark.uploadCoverImage(CRED, POSTER) === null, '');
+
+  installFetch({ image: () => jsonRes({ code: 99991672, msg: 'permission denied' }) }); Lark.__resetTokenCache();
+  check('U11 上传接口业务错误 → null（缺 im:resource 权限的典型形态）',
+    await Lark.uploadCoverImage(CRED, POSTER) === null, '');
+
+  installFetch({ image: () => { throw new Error('network down'); } }); Lark.__resetTokenCache();
+  check('U12 网络异常被吞成 null，不向上抛',
+    await Lark.uploadCoverImage(CRED, POSTER).then(v => v === null, () => 'THREW') === true, '');
+}
+
+// ---------- P 组：pushBotCard 串接（上传对调用方不可见） ----------
+{
+  const BOT = 'https://open.larksuite.com/open-apis/bot/v2/hook/unit';
+  const botCfg = { ...CRED, botWebhookUrl: BOT, botEnabled: true };
+
+  installFetch(); Lark.__resetTokenCache();
+  await Lark.pushBotCard(botCfg, { ...FULL, poster: POSTER });
+  const sent = JSON.parse(calls.find(c => c.url === BOT)?.body || '{}');
+  check('P1 有凭据有封面时推带图卡',
+    sent.card?.body?.elements?.[0]?.img_key === 'img_v3_ok', JSON.stringify(sent.card?.body?.elements?.[0]));
+
+  // 降级：上传挂了照样把卡推出去，绝不因为图没上传成而丢推送
+  installFetch({ image: () => jsonRes({ code: 1, msg: 'boom' }) }); Lark.__resetTokenCache();
+  await Lark.pushBotCard(botCfg, { ...FULL, poster: POSTER });
+  const degraded = JSON.parse(calls.find(c => c.url === BOT)?.body || '{}');
+  check('P2 上传失败时降级推无图卡（推送不能丢）',
+    Boolean(calls.find(c => c.url === BOT)) && !JSON.stringify(degraded).includes('img_key'), '');
+
+  installFetch(); Lark.__resetTokenCache();
+  await Lark.pushBotCard({ botWebhookUrl: BOT, botEnabled: true }, { ...FULL, poster: POSTER });
+  check('P3 无凭据时不碰上传接口，直接推无图卡',
+    !calls.some(c => c.url === TOKEN_API || c.url === IMAGE_API)
+    && Boolean(calls.find(c => c.url === BOT)), calls.map(c => c.url).join('|'));
+
+  installFetch(); Lark.__resetTokenCache();
+  await Lark.pushBotCard(botCfg, { ...FULL, poster: '' });
+  check('P4 条目无封面时不碰上传接口（IMDB 有 37 条无封面）',
+    !calls.some(c => c.url === IMAGE_API) && Boolean(calls.find(c => c.url === BOT)),
+    calls.map(c => c.url).join('|'));
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
