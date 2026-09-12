@@ -260,29 +260,31 @@
     const d = drama || {};
     const title = asText(d.title);
     const titleZh = asText(d.titleZh);
-    const display = titleZh ? `${titleZh}（${title}）` : title;
-    const sourceName = SOURCE_NAMES[d.source] || asText(d.source);
     const tags = (Array.isArray(d.tags) ? d.tags : []).map(asText).filter(Boolean);
     const genres = (Array.isArray(d.genres) ? d.genres : []).map(asText).filter(Boolean);
-    const summary = asText(d.descriptionZh) || asText(d.description);
+    const summaryZh = clipText(d.descriptionZh, BOT_SUMMARY_LIMIT);
+    const summaryEn = clipText(d.description, BOT_SUMMARY_LIMIT);
     const url = asText(d.url);
 
-    const meta = [];
-    if (sourceName || tags.length) {
-      meta.push(`**来源**　${sourceName}${tags.length ? ` · ${tags.join(' / ')}` : ''}`);
-    }
-    if (genres.length) meta.push(`**类型**　${genres.join(' / ')}`);
-    if (summary) meta.push(`**简介**　${clipText(summary, BOT_SUMMARY_LIMIT)}`);
+    // 标题栏＝中文译名（英文原名）；缺哪边就只留另一边
+    const heading = titleZh && title ? `${titleZh}（${title}）` : (titleZh || title || '（无标题）');
 
-    const elements = [{
-      tag: 'div',
-      text: { tag: 'lark_md', content: `**${display || '（无标题）'}**` }
-    }];
+    const elements = [];
+    if (summaryZh) elements.push({ tag: 'div', text: { tag: 'lark_md', content: summaryZh } });
+    // 英文原文走斜体，与中文译文在视觉上分层
+    if (summaryEn) elements.push({ tag: 'div', text: { tag: 'lark_md', content: `*${summaryEn}*` } });
+
+    // 来源与类别合成一块：独立 div 天然与上文隔开一行，两行本身要贴在一起
+    // （tags 自带平台名，不再另外拼 SOURCE_NAMES，否则「NetShort · NetShort」重复）
+    const meta = [];
+    if (tags.length) meta.push(`**来源：**${tags.join(' / ')}`);
+    if (genres.length) meta.push(`**类别：**${genres.join(' / ')}`);
     if (meta.length) elements.push({ tag: 'div', text: { tag: 'lark_md', content: meta.join('\n') } });
+
     if (/^https?:\/\//i.test(url)) {
       elements.push({
         tag: 'action',
-        actions: [{ tag: 'button', text: { tag: 'plain_text', content: '查看原页' }, url, type: 'primary' }]
+        actions: [{ tag: 'button', text: { tag: 'plain_text', content: '去瞅瞅' }, url, type: 'primary' }]
       });
     }
 
@@ -290,10 +292,7 @@
       msg_type: 'interactive',
       card: {
         config: { wide_screen_mode: true },
-        header: {
-          template: 'blue',
-          title: { tag: 'plain_text', content: `🎬 ${sourceName ? `${sourceName} ` : ''}新增` }
-        },
+        header: { template: 'blue', title: { tag: 'plain_text', content: heading } },
         elements
       }
     };

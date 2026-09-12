@@ -33,14 +33,28 @@ const FULL = {
 const card = Lark.buildBotCard ? Lark.buildBotCard(FULL) : null;
 check('C1 buildBotCard 已导出', typeof Lark.buildBotCard === 'function', typeof Lark.buildBotCard);
 
+// 卡片版式（2026-09-12 用户定，顺序固定）：
+//   标题栏＝中文译名（英文译名）／正文①中文简介 ②斜体英文原文
+//   ③空行后「**来源：**」+tags ④「**类别：**」+genres ⑤按钮「去瞅瞅」
+const mdOf = (c, i) => c?.card?.elements?.[i]?.text?.content || '';
+
 if (card) {
   const json = JSON.stringify(card);
+  const header = card.card?.header?.title?.content || '';
   check('C2 msg_type=interactive 且带 card 根', card.msg_type === 'interactive' && Boolean(card.card), json.slice(0, 80));
-  check('C3 标题含中英文对照', json.includes('低语者') && json.includes('The Whisper Man'), '');
-  check('C4 含来源站点显示名', json.includes('Netflix'), '');
-  check('C5 含类型标签', json.includes('Thrillers'), '');
-  check('C6 中文简介优先于英文', json.includes('一段中文简介') && !json.includes('An English synopsis'), '');
-  check('C7 带跳转按钮指向原页', json.includes('https://www.netflix.com/title/12345')
+  check('C3 标题栏＝中文译名（英文译名），不带「新增」字样',
+    header === '低语者（The Whisper Man）' && !header.includes('新增'), header);
+  check('C4 正文第一段是中文简介', mdOf(card, 0) === '一段中文简介。', mdOf(card, 0));
+  check('C5 第二段是斜体英文原文', mdOf(card, 1) === '*An English synopsis.*', mdOf(card, 1));
+  check('C6 来源行加粗且列 tags（tags 自带平台名）',
+    mdOf(card, 2).includes('**来源：**') && mdOf(card, 2).includes('Netflix')
+    && mdOf(card, 2).includes('Movie') && mdOf(card, 2).includes('Global'), mdOf(card, 2));
+  check('C6b 类别行列 genres', mdOf(card, 2).includes('**类别：**')
+    && mdOf(card, 2).includes('Thrillers') && mdOf(card, 2).includes('Mysteries'), mdOf(card, 2));
+  check('C6c 来源在类别之前',
+    mdOf(card, 2).indexOf('**来源：**') < mdOf(card, 2).indexOf('**类别：**'), mdOf(card, 2));
+  check('C7 尾部按钮文案「去瞅瞅」并指向原页',
+    json.includes('"去瞅瞅"') && json.includes('https://www.netflix.com/title/12345')
     && json.includes('"tag":"button"'), '');
   // 硬限制：卡片里不能出现 img 元素，否则飞书整条拒收（ErrCode 11310）
   check('C8 不含 img 元素（img_key 需自建应用，实测会被拒收）',
@@ -51,17 +65,28 @@ if (card) {
 // 退化面
 {
   const noZh = Lark.buildBotCard({ ...FULL, titleZh: '', descriptionZh: '' });
-  const s = JSON.stringify(noZh);
-  check('C10 无中文时退回英文标题与简介',
-    s.includes('The Whisper Man') && s.includes('An English synopsis'), '');
+  check('C10a 无中文标题时标题栏只留英文原名',
+    noZh.card.header.title.content === 'The Whisper Man', noZh.card.header.title.content);
+  check('C10b 无中文简介时正文首段直接是斜体英文（不留空段）',
+    mdOf(noZh, 0) === '*An English synopsis.*', mdOf(noZh, 0));
+  const noEn = Lark.buildBotCard({ ...FULL, description: '' });
+  check('C10c 无英文原文时不渲染斜体段（第二段直接是来源/类别）',
+    mdOf(noEn, 0) === '一段中文简介。' && mdOf(noEn, 1).includes('**来源：**'), mdOf(noEn, 1));
+  const noMeta = Lark.buildBotCard({ ...FULL, tags: [], genres: [] });
+  check('C10d 无 tags/genres 时不渲染来源与类别行',
+    !JSON.stringify(noMeta).includes('来源：') && !JSON.stringify(noMeta).includes('类别：'), '');
+  const onlyTags = Lark.buildBotCard({ ...FULL, genres: [] });
+  check('C10e 只有 tags 时仍渲染来源行、不渲染类别行',
+    JSON.stringify(onlyTags).includes('来源：') && !JSON.stringify(onlyTags).includes('类别：'), '');
+
   const noUrl = Lark.buildBotCard({ ...FULL, url: '' });
   check('C11 无合法 url 时不渲染按钮', !JSON.stringify(noUrl).includes('"tag":"button"'), '');
   const badUrl = Lark.buildBotCard({ ...FULL, url: 'javascript:alert(1)' });
   check('C12 非 http(s) 的 url 不渲染按钮', !JSON.stringify(badUrl).includes('"tag":"button"'), '');
   const bare = Lark.buildBotCard({});
-  check('C13 空条目也能组装出合法卡片', bare?.msg_type === 'interactive' && Boolean(bare?.card?.elements?.length), '');
+  check('C13 空条目也能组装出合法卡片', bare?.msg_type === 'interactive' && Boolean(bare?.card?.header), '');
   const longDesc = Lark.buildBotCard({ ...FULL, descriptionZh: '很长'.repeat(400) });
-  check('C14 超长简介被裁剪（群里不刷屏）', JSON.stringify(longDesc).length < 1500,
+  check('C14 超长简介被裁剪（群里不刷屏）', JSON.stringify(longDesc).length < 1800,
     String(JSON.stringify(longDesc).length));
 }
 
