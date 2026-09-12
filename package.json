@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node tests/run.mjs",
     "update-sites": "node scripts/update-site-matches.mjs",
+    "export-lark": "node scripts/export-lark-csv.mjs",
     "sync": "node server/sync-server.js",
     "start": "node server/sync-server.js",
     "stop": "node server/tools/stop.js",
