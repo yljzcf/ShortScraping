@@ -269,8 +269,11 @@
    * passed in`。当晚翻案了一半：11310 的语义是「你没给真 img_key」而不是「机器人
    * 不许放图」，用自建应用上传拿到的 img_key 塞进来能正常渲染，且**跨云可用**
    * （飞书租户上传 → Lark 国际版群里照样显示）。故 buildBotCard 接受可选 imgKey：
-   * 拿到了就带图（版式 V1：图在最上、满宽原样，不裁不缩——2026-09-12 用户三选一后定），
-   * 拿不到就照旧发无图卡。unit-lark-bot C8/I 组守着。
+   * 拿到了就带图，拿不到就照旧发无图卡。unit-lark-bot C8/I 组守着。
+   *
+   * 版式（2026-09-12 用户定稿）：简介 → 来源/类别 → 按钮 → **封面图**。
+   * 图满宽原样、不裁不缩（用户在满宽/60%靠左/60%居中/左图右文/裁横版五选一后定），
+   * 位置恒在最底（初版在最上方，中间试过「文字之后、按钮之前」，都是看过实卡后改的）。
    */
   const BOT_SUMMARY_LIMIT = 240;
 
@@ -297,19 +300,17 @@
     const heading = titleZh && title ? `${titleZh}（${title}）` : (titleZh || title || '（无标题）');
 
     const elements = [];
-    // 封面真图排最前、满宽原样（不给 size/scale_type——那会把竖版海报裁掉大半）
-    if (imgKey) elements.push({ tag: 'img', img_key: imgKey, alt: { tag: 'plain_text', content: '封面' } });
     if (summary) elements.push({ tag: 'markdown', content: summary });
 
     // 来源与类别合成一块：独立元素天然与上文隔开一行，两行本身要贴在一起
     // （tags 自带平台名，不再另外拼 SOURCE_NAMES，否则「NetShort · NetShort」重复）
     // 闭合的 ** 后面**必须留一个空格**：v2 的 markdown 走严格 CommonMark，而
-    // `**来源：**RoyalRoad` 里闭合 ** 前是标点「：」、后面紧跟字母，右侧界定符
+    // `**来源**RoyalRoad` 里闭合 ** 前是标点「：」、后面紧跟字母，右侧界定符
     // 判定不通过 → 不当作加粗结束 → 星号原样漏在卡片上（v1 的 lark_md 是飞书
     // 自家宽松解析器，同样写法没问题，切 v2 后才暴露）。unit-lark-bot C6f 守着。
     const meta = [];
-    if (tags.length) meta.push(`**来源：** ${tags.join(' / ')}`);
-    if (genres.length) meta.push(`**类别：** ${genres.join(' / ')}`);
+    if (tags.length) meta.push(`**来源** ${tags.join(' / ')}`);
+    if (genres.length) meta.push(`**类别** ${genres.join(' / ')}`);
     if (meta.length) elements.push({ tag: 'markdown', content: meta.join('\n') });
 
     // 按钮靠右只有这一种走法（2026-09-12 逐个实测）：v1 的 column 不收 action
@@ -334,6 +335,11 @@
         }]
       });
     }
+
+    // 封面真图垫在整张卡最底下、按钮在它上方（2026-09-12 用户看过实卡后定；
+    // 初版在最上方，中间还试过「文字之后、按钮之前」）。满宽原样，不给
+    // size/scale_type——那会把竖版海报裁掉大半。unit-lark-bot I3/I3b 守着。
+    if (imgKey) elements.push({ tag: 'img', img_key: imgKey, alt: { tag: 'plain_text', content: '封面' } });
 
     return {
       msg_type: 'interactive',

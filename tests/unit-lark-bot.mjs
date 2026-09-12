@@ -35,7 +35,7 @@ check('C1 buildBotCard 已导出', typeof Lark.buildBotCard === 'function', type
 
 // 卡片版式（2026-09-12 用户定，顺序固定）：
 //   标题栏＝中文译名（英文译名）／正文①简介（中文优先，**不再单列斜体英文原文**）
-//   ②空行后「**来源：**」+tags 与「**类别：**」+genres ③按钮「去瞅瞅」
+//   ②空行后「**来源**」+tags 与「**类别**」+genres ③按钮「去瞅瞅」
 // v2 schema：正文在 card.body.elements，文本元素是 markdown、内容在 content
 const elsOf = (c) => c?.card?.body?.elements || [];
 const mdOf = (c, i) => elsOf(c)[i]?.content || '';
@@ -50,12 +50,12 @@ if (card) {
   check('C5 有中文简介时不再渲染英文原文段',
     !json.includes('An English synopsis') && !json.includes('*An'), json.slice(0, 200));
   check('C6 来源行加粗且列 tags（tags 自带平台名）',
-    mdOf(card, 1).includes('**来源：**') && mdOf(card, 1).includes('Netflix')
+    mdOf(card, 1).includes('**来源**') && mdOf(card, 1).includes('Netflix')
     && mdOf(card, 1).includes('Movie') && mdOf(card, 1).includes('Global'), mdOf(card, 1));
-  check('C6b 类别行列 genres', mdOf(card, 1).includes('**类别：**')
+  check('C6b 类别行列 genres', mdOf(card, 1).includes('**类别**')
     && mdOf(card, 1).includes('Thrillers') && mdOf(card, 1).includes('Mysteries'), mdOf(card, 1));
   check('C6c 来源在类别之前',
-    mdOf(card, 1).indexOf('**来源：**') < mdOf(card, 1).indexOf('**类别：**'), mdOf(card, 1));
+    mdOf(card, 1).indexOf('**来源**') < mdOf(card, 1).indexOf('**类别**'), mdOf(card, 1));
   check('C6d 正文只有简介与来源类别两段（无多余段落）',
     elsOf(card).filter(e => e.tag === 'markdown').length === 2,
     String(elsOf(card).filter(e => e.tag === 'markdown').length));
@@ -65,7 +65,7 @@ if (card) {
   // v2 的 markdown 走严格 CommonMark：闭合 ** 前是标点「：」、后面若紧跟字母，
   // 右侧界定符判定不通过，加粗不生效、星号原样漏出（v1 的 lark_md 不挑，切 v2 才暴露）
   check('C6f 加粗标签闭合 ** 后留空格（否则 CommonMark 下加粗失效）',
-    /\*\*来源：\*\* \S/.test(mdOf(card, 1)) && /\*\*类别：\*\* \S/.test(mdOf(card, 1)),
+    /\*\*来源\*\* \S/.test(mdOf(card, 1)) && /\*\*类别\*\* \S/.test(mdOf(card, 1)),
     JSON.stringify(mdOf(card, 1)));
   check('C6g 正文里不出现「**紧跟非空白」的写法',
     !/\*\*[^\s*][^*]*\*\*[^\s*]/.test(mdOf(card, 0) + '\n' + mdOf(card, 1)), mdOf(card, 1));
@@ -91,13 +91,13 @@ if (card) {
     mdOf(noZh, 0) === 'An English synopsis.', mdOf(noZh, 0));
   const noAny = Lark.buildBotCard({ ...FULL, descriptionZh: '', description: '' });
   check('C10c 中英简介都没有时不渲染简介段（首段直接是来源/类别）',
-    mdOf(noAny, 0).includes('**来源：**'), mdOf(noAny, 0));
+    mdOf(noAny, 0).includes('**来源**'), mdOf(noAny, 0));
   const noMeta = Lark.buildBotCard({ ...FULL, tags: [], genres: [] });
   check('C10d 无 tags/genres 时不渲染来源与类别行',
-    !JSON.stringify(noMeta).includes('来源：') && !JSON.stringify(noMeta).includes('类别：'), '');
+    !JSON.stringify(noMeta).includes('**来源**') && !JSON.stringify(noMeta).includes('**类别**'), '');
   const onlyTags = Lark.buildBotCard({ ...FULL, genres: [] });
   check('C10e 只有 tags 时仍渲染来源行、不渲染类别行',
-    JSON.stringify(onlyTags).includes('来源：') && !JSON.stringify(onlyTags).includes('类别：'), '');
+    JSON.stringify(onlyTags).includes('**来源**') && !JSON.stringify(onlyTags).includes('**类别**'), '');
 
   const noUrl = Lark.buildBotCard({ ...FULL, url: '' });
   check('C11 无合法 url 时不渲染按钮', !JSON.stringify(noUrl).includes('"tag":"button"'), '');
@@ -174,18 +174,35 @@ if (card) {
 // 推送目标＝Lark 群，飞书自建应用只当图床。
 {
   const withImg = Lark.buildBotCard(FULL, { imgKey: 'img_v3_unit_test' });
-  const first = elsOf(withImg)[0];
-  check('I1 传入 imgKey 时正文最前插 img 元素',
-    first?.tag === 'img' && first?.img_key === 'img_v3_unit_test', JSON.stringify(first));
+  const els = elsOf(withImg);
+  const img = els.find(e => e.tag === 'img');
+  check('I1 传入 imgKey 时插入 img 元素',
+    img?.img_key === 'img_v3_unit_test', JSON.stringify(img));
   check('I2 img 带 alt（飞书要求图片元素有 alt 结构）',
-    first?.alt?.tag === 'plain_text', JSON.stringify(first?.alt));
-  // 版式 V1：图在最上、满宽原样，不裁不缩（2026-09-12 用户三选一后定）
-  check('I3 带图后其余版式顺序不变（简介→来源类别→按钮）',
-    elsOf(withImg)[1]?.content === '一段中文简介。'
-    && String(elsOf(withImg)[2]?.content).includes('**来源：**')
-    && elsOf(withImg)[3]?.tag === 'column_set', elsOf(withImg).map(e => e.tag).join(','));
-  check('I4 img 上不带 size/scale_type（V1 满宽原样）',
-    first && !('size' in first) && !('scale_type' in first), JSON.stringify(Object.keys(first || {})));
+    img?.alt?.tag === 'plain_text', JSON.stringify(img?.alt));
+  // 版式（2026-09-12 用户定稿）：简介 → 来源/类别 → 按钮 → **封面图**。
+  // 图垫在整张卡最底下、按钮在它上方；满宽原样，不裁不缩。
+  check('I3 版式顺序＝简介 → 来源类别 → 按钮 → 图',
+    els.map(e => e.tag).join(',') === 'markdown,markdown,column_set,img',
+    els.map(e => e.tag).join(','));
+  check('I3b 图恒为最后一个元素', els[els.length - 1]?.tag === 'img',
+    els.map(e => e.tag).join(','));
+  check('I4 img 上不带 size/scale_type（满宽原样）',
+    img && !('size' in img) && !('scale_type' in img), JSON.stringify(Object.keys(img || {})));
+
+  // 退化面：上面缺内容时图也不能跑上去，恒在最底
+  const imgNoMeta = Lark.buildBotCard({ ...FULL, tags: [], genres: [] }, { imgKey: 'k' });
+  check('I4b 无来源/类别时顺序＝简介 → 按钮 → 图',
+    elsOf(imgNoMeta).map(e => e.tag).join(',') === 'markdown,column_set,img',
+    elsOf(imgNoMeta).map(e => e.tag).join(','));
+  const imgNoText = Lark.buildBotCard({ ...FULL, descriptionZh: '', description: '', tags: [], genres: [] }, { imgKey: 'k' });
+  check('I4c 完全无文字时只剩按钮与图',
+    elsOf(imgNoText).map(e => e.tag).join(',') === 'column_set,img',
+    elsOf(imgNoText).map(e => e.tag).join(','));
+  const imgNoUrl = Lark.buildBotCard({ ...FULL, url: '' }, { imgKey: 'k' });
+  check('I4d 无按钮时图仍在最后',
+    elsOf(imgNoUrl).map(e => e.tag).join(',') === 'markdown,markdown,img',
+    elsOf(imgNoUrl).map(e => e.tag).join(','));
 
   for (const [label, opts] of [['无 options', undefined], ['空 imgKey', { imgKey: '' }], ['null', { imgKey: null }]]) {
     const c = Lark.buildBotCard(FULL, opts);
@@ -298,8 +315,11 @@ function installFetch(handlers = {}) {
   installFetch(); Lark.__resetTokenCache();
   await Lark.pushBotCard(botCfg, { ...FULL, poster: POSTER });
   const sent = JSON.parse(calls.find(c => c.url === BOT)?.body || '{}');
-  check('P1 有凭据有封面时推带图卡',
-    sent.card?.body?.elements?.[0]?.img_key === 'img_v3_ok', JSON.stringify(sent.card?.body?.elements?.[0]));
+  const sentImg = (sent.card?.body?.elements || []).find(e => e.tag === 'img');
+  check('P1 有凭据有封面时推带图卡（图垫在最底）',
+    sentImg?.img_key === 'img_v3_ok'
+    && (sent.card?.body?.elements || []).map(e => e.tag).join(',') === 'markdown,markdown,column_set,img',
+    JSON.stringify((sent.card?.body?.elements || []).map(e => e.tag)));
 
   // 降级：上传挂了照样把卡推出去，绝不因为图没上传成而丢推送
   installFetch({ image: () => jsonRes({ code: 1, msg: 'boom' }) }); Lark.__resetTokenCache();
