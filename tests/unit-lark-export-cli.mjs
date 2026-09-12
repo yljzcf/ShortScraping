@@ -10,10 +10,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 
 const worktreeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(worktreeRoot, 'scripts/export-lark-csv.mjs');
+const Lark = createRequire(import.meta.url)(path.join(worktreeRoot, 'src/shared/lark.js'));
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-export-'));
 const INPUT = path.join(workDir, 'timeline.json');
 const OUT = path.join(workDir, 'out');
@@ -78,6 +80,10 @@ reset();
 r = run(['--format=xlsx']);
 check('F5 非法 format 拒绝', r.code === 1 && r.out.includes('--format 只能是'), r.out.trim().slice(0, 60));
 reset();
+r = run(['--header=en']);
+check('F5b 表头已固定中文，--header 不再是可选项', r.code === 1 && r.out.includes('无法识别的参数'),
+  r.out.trim().slice(0, 60));
+reset();
 r = run(['--since=2030-01-01']);
 check('F6 零命中不建文件、不报错', r.code === 0 && r.out.includes('没有可导出的条目') && outFiles().length === 0,
   `code=${r.code} files=${outFiles().length}`);
@@ -88,8 +94,9 @@ run([]);
 let files = outFiles();
 check('O1 不分批时产单个 csv', files.length === 1 && /^lark-import-\d{8}\.csv$/.test(files[0]), files.join(','));
 let text = fs.readFileSync(path.join(OUT, files[0]), 'utf8');
-check('O2 BOM + CRLF + 16 列英文表头', text.startsWith('﻿')
-  && text.split('\r\n')[0].replace('﻿', '').split(',').length === 16, text.split('\r\n')[0].slice(0, 60));
+check('O2 BOM + CRLF + 16 列中文表头', text.startsWith('﻿')
+  && text.split('\r\n')[0].replace('﻿', '') === Lark.TABLE_HEADERS.map(h => `"${h}"`).join(','),
+  text.split('\r\n')[0].slice(0, 80));
 check('O3 poster 已改写（IMDB 去逗号变换段、mydrama 归一 %20/%3A）',
   text.includes('AAA@._V1_.jpg') && text.includes('Make+Me+Yours/en/2025-12-15+16:24:39')
   && !/_V1_QL75/.test(text) && !text.includes('%20'), '');
@@ -100,26 +107,21 @@ run(['--chunk=2']);
 files = outFiles();
 check('O5 分批切文件并带两位序号', files.length === 2
   && files[0].endsWith('-01.csv') && files[1].endsWith('-02.csv'), files.join(','));
-check('O6 每批各带表头、条数正确',
-  files.every(f => fs.readFileSync(path.join(OUT, f), 'utf8').startsWith('﻿id,'))
+check('O6 每批各带中文表头、条数正确',
+  files.every(f => fs.readFileSync(path.join(OUT, f), 'utf8').startsWith('﻿"记录ID",'))
   && fs.readFileSync(path.join(OUT, files[0]), 'utf8').trimEnd().split('\r\n').length === 3, '');
 
 reset();
 run(['--format=tsv']);
 files = outFiles();
 text = fs.readFileSync(path.join(OUT, files[0]), 'utf8');
-check('O7 tsv 扩展名 + 制表符表头 + 无 BOM 无 CRLF', files[0].endsWith('.tsv')
+// TSV 是粘贴追加用的，不带表头——带上会在表末多出一行垃圾记录
+check('O7 tsv 扩展名 + 无表头无 BOM 无 CRLF', files[0].endsWith('.tsv')
   && !text.startsWith('﻿') && !text.includes('\r')
-  && text.split('\n')[0].split('\t')[1] === 'itemId',
+  && text.split('\n')[0].split('\t')[1] === 'tt0001',
   `${files[0]} | ${JSON.stringify(text.slice(0, 40))}`);
-check('O8 tsv 每行 16 格', text.split('\n').every(line => line.split('\t').length === 16),
-  text.split('\n').map(l => l.split('\t').length).join(','));
-
-reset();
-run(['--header=zh']);
-text = fs.readFileSync(path.join(OUT, outFiles()[0]), 'utf8');
-check('O9 中文表头替换首行、数据行不动', text.split('\r\n')[0].includes('"条目ID"')
-  && text.split('\r\n')[0].split(',').length === 16 && text.includes('"Alpha"'), text.split('\r\n')[0].slice(0, 50));
+check('O8 tsv 每行 16 格且行数＝记录数', text.split('\n').every(line => line.split('\t').length === 16)
+  && text.split('\n').length === 4, text.split('\n').map(l => l.split('\t').length).join(','));
 
 reset();
 r = run(['--input=' + path.join(workDir, 'nope.json')]);

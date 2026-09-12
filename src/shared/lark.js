@@ -155,11 +155,19 @@
    * 2. 不加 CSV 公式前缀——Base 文本字段不执行公式，加前缀只会让以 - / + 开头的
    *    正常简介（全量实测 4 条）平白多出撇号。
    *
-   * CSV 与 TSV 的单元格内容完全一致，只差传输形态：CSV 给「导入」建表，
-   * TSV 给剪贴板粘贴追加（Base 粘贴按制表符分列）。
+   * CSV 与 TSV 的单元格内容完全一致，只差传输形态与表头：
+   * - CSV 给「导入」建表——表头即字段名，固定中文（2026-09-12 用户定）；
+   * - TSV 给剪贴板粘贴追加——**不带表头**。Base 粘贴不会把首行认成字段名，
+   *   带上只会在表末平白多出一行「id / itemId / title…」的垃圾记录。
    */
   const CSV_BOM = '﻿';
   const TABLE_COLUMNS = TimelineCsv.CSV_COLUMNS;
+  // 与 TABLE_COLUMNS 同序一一对应；改列必须同步改这里（unit-lark-table T1b 守着）
+  const TABLE_HEADERS = [
+    '记录ID', '条目ID', '标题', '中文标题', '来源标签',
+    '简介', '中文简介', '出品方/作者', '站点', '翻译状态',
+    '条目链接', '订阅来源', '封面链接', '抓取时间', '翻译时间', '内容类型'
+  ];
 
   /** 单元格归一：数组竖线连接、制表符/换行折成空格（TSV 粘贴不错位的前提）。 */
   function tableCell(value) {
@@ -200,17 +208,19 @@
     return rows;
   }
 
-  /** 行数组 → 制表符分隔文本（剪贴板粘贴用，无 BOM、无引号包裹）。 */
+  /** 行数组 → 制表符分隔文本（剪贴板粘贴追加用：无表头、无 BOM、无引号包裹）。 */
   function toTsv(rows) {
-    const body = (rows || []).map(row => TABLE_COLUMNS.map(column => tableCell(row[column])).join('\t'));
-    return [TABLE_COLUMNS.join('\t'), ...body].join('\n');
+    return (rows || [])
+      .map(row => TABLE_COLUMNS.map(column => tableCell(row[column])).join('\t'))
+      .join('\n');
   }
 
-  /** 行数组 → CSV 文本（导入建表用，BOM + CRLF，与 TimelineCsv 同款引号转义）。 */
+  /** 行数组 → CSV 文本（导入建表用：BOM + CRLF + 中文表头，与 TimelineCsv 同款引号转义）。 */
   function toCsv(rows) {
+    const quote = (text) => `"${text.replace(/"/g, '""')}"`;
     const body = (rows || []).map(row => TABLE_COLUMNS
-      .map(column => `"${tableCell(row[column]).replace(/"/g, '""')}"`).join(','));
-    return CSV_BOM + [TABLE_COLUMNS.join(','), ...body].join('\r\n') + '\r\n';
+      .map(column => quote(tableCell(row[column]))).join(','));
+    return CSV_BOM + [TABLE_HEADERS.map(quote).join(','), ...body].join('\r\n') + '\r\n';
   }
 
   /**
@@ -292,6 +302,7 @@
     DEFAULT_CONFIG,
     SOURCE_NAMES,
     TABLE_COLUMNS,
+    TABLE_HEADERS,
     normalizeConfig,
     configReadiness,
     posterForPayload,

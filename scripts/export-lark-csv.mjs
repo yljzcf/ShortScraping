@@ -13,8 +13,9 @@
 //   npm run export-lark -- --source=imdb --source=steam
 //   npm run export-lark -- --chunk=1000          每 1000 条切一个文件
 //   npm run export-lark -- --format=tsv          产 TSV（粘贴用；日常增量建议走设置页按钮）
-//   npm run export-lark -- --header=zh           表头用中文字段名
 //   npm run export-lark -- --input=<path> --outDir=<dir>
+//
+// 表头固定中文（2026-09-12 用户定），不提供切换；TSV 按粘贴追加语义不带表头。
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -25,16 +26,8 @@ const SiteRegistry = require('../src/shared/site-registry.js');
 
 const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 
-// 中文表头只换第一行的字面量，列序与数据行一律不变
-const ZH_HEADERS = {
-  id: '记录ID', itemId: '条目ID', title: '标题', titleZh: '中文标题', tags: '来源标签',
-  description: '简介', descriptionZh: '中文简介', company: '出品方/作者', source: '站点',
-  status: '翻译状态', url: '条目链接', sourceListUrl: '订阅来源', poster: '封面链接',
-  scrapedAt: '抓取时间', translatedAt: '翻译时间', genres: '内容类型'
-};
-
 function parseArgs(argv) {
-  const options = { sources: [], format: 'csv', header: 'en', chunk: 0, since: '', input: '', outDir: '' };
+  const options = { sources: [], format: 'csv', chunk: 0, since: '', input: '', outDir: '' };
   for (const arg of argv) {
     const match = /^--([a-zA-Z]+)(?:=(.*))?$/.exec(arg);
     if (!match) throw new Error(`无法识别的参数：${arg}`);
@@ -44,7 +37,6 @@ function parseArgs(argv) {
       case 'source': options.sources.push(value); break;
       case 'since': options.since = value; break;
       case 'format': options.format = value.toLowerCase(); break;
-      case 'header': options.header = value.toLowerCase(); break;
       case 'chunk': options.chunk = Number(value); break;
       case 'input': options.input = value; break;
       case 'outDir': options.outDir = value; break;
@@ -53,7 +45,6 @@ function parseArgs(argv) {
   }
 
   if (!['csv', 'tsv'].includes(options.format)) throw new Error('--format 只能是 csv 或 tsv');
-  if (!['en', 'zh'].includes(options.header)) throw new Error('--header 只能是 en 或 zh');
   if (!Number.isInteger(options.chunk) || options.chunk < 0) throw new Error('--chunk 必须是非负整数');
 
   const unknown = options.sources.filter(s => !SiteRegistry.CATEGORY_SOURCES.includes(s));
@@ -88,17 +79,6 @@ function readDramas(inputPath) {
   return dramas;
 }
 
-function applyZhHeader(text, separator) {
-  const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const index = text.indexOf(eol);
-  const bom = text.startsWith('﻿') ? '﻿' : '';
-  const cells = Lark.TABLE_COLUMNS.map(column => ZH_HEADERS[column]);
-  const header = separator === ','
-    ? cells.map(cell => `"${cell}"`).join(',')
-    : cells.join('\t');
-  return bom + header + text.slice(index);
-}
-
 function main() {
   const options = parseArgs(process.argv.slice(2));
   const inputPath = options.input ? path.resolve(options.input) : path.join(projectRoot, 'db/timeline.json');
@@ -113,7 +93,6 @@ function main() {
   }
 
   const serialize = options.format === 'tsv' ? Lark.toTsv : Lark.toCsv;
-  const separator = options.format === 'tsv' ? '\t' : ',';
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const batches = options.chunk > 0
     ? Array.from({ length: Math.ceil(rows.length / options.chunk) },
@@ -125,8 +104,7 @@ function main() {
   batches.forEach((batch, index) => {
     const suffix = batches.length > 1 ? `-${String(index + 1).padStart(2, '0')}` : '';
     const file = path.join(outDir, `lark-import-${stamp}${suffix}.${options.format}`);
-    let text = serialize(batch);
-    if (options.header === 'zh') text = applyZhHeader(text, separator);
+    const text = serialize(batch);
     fs.writeFileSync(file, text);
     written.push({ file, count: batch.length, bytes: Buffer.byteLength(text) });
   });

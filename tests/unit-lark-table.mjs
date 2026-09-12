@@ -97,6 +97,11 @@ const FIXTURE = [
 check('T1 TABLE_COLUMNS 与 TimelineCsv.CSV_COLUMNS 严格一致',
   deepEq(Lark.TABLE_COLUMNS, TimelineCsv.CSV_COLUMNS) && Lark.TABLE_COLUMNS.length === 16,
   `${(Lark.TABLE_COLUMNS || []).length} 列`);
+check('T1b TABLE_HEADERS 为中文名、与列一一对应且无空缺',
+  Array.isArray(Lark.TABLE_HEADERS) && Lark.TABLE_HEADERS.length === Lark.TABLE_COLUMNS.length
+  && Lark.TABLE_HEADERS.every(h => typeof h === 'string' && h.trim() && !/^[a-zA-Z]+$/.test(h))
+  && new Set(Lark.TABLE_HEADERS).size === Lark.TABLE_HEADERS.length,
+  JSON.stringify(Lark.TABLE_HEADERS));
 
 const rows = Lark.buildTableRows ? Lark.buildTableRows(FIXTURE) : [];
 check('T2 itemId 去重 + 无键跳过（5 输入 → 3 行）', rows.length === 3, `rows=${rows.length}`);
@@ -119,8 +124,11 @@ check('T9 空输入返回空数组', deepEq(Lark.buildTableRows([]), []) && deep
 // ---------- S 组：序列化 ----------
 const tsv = Lark.toTsv(rows);
 const tsvLines = tsv.split('\n');
-check('S1 TSV 表头 + 每条一行', tsvLines.length === rows.length + 1, `lines=${tsvLines.length}`);
-check('S2 TSV 表头为 16 列制表符连接', tsvLines[0] === TimelineCsv.CSV_COLUMNS.join('\t'), tsvLines[0]);
+// TSV 是「粘到表末追加」用的，带表头会平白多出一行垃圾记录——Base 粘贴不会
+// 把首行认成字段名，字段名只在 CSV 导入建表时由表头确定
+check('S1 TSV 只有数据行、不带表头', tsvLines.length === rows.length
+  && !tsvLines[0].startsWith('id\t') && !tsvLines[0].includes('条目ID'), `lines=${tsvLines.length}`);
+check('S2 TSV 首行即第一条数据', tsvLines[0].split('\t')[2] === 'Alpha', tsvLines[0].slice(0, 60));
 check('S3 TSV 每行恰好 16 格（无制表符污染导致的错位）',
   tsvLines.every(line => line.split('\t').length === 16),
   tsvLines.map(l => l.split('\t').length).join(','));
@@ -131,15 +139,20 @@ check('S6 TSV 不做 CSV 引号包裹（逗号/引号原样进单元格）',
 check('S7 TSV tags/genres 竖线连接', tsv.includes('IMDB|micro-drama') && tsv.includes('Romance|Drama'), '');
 
 const csv = Lark.toCsv(rows);
-check('S8 CSV 带 BOM + CRLF + 同一表头', csv.startsWith('﻿')
-  && csv.includes('\r\n') && csv.split('\r\n')[0].replace('﻿', '') === TimelineCsv.CSV_COLUMNS.join(','), '');
+// CSV 是「导入建表」用的，表头即字段名——固定中文（2026-09-12 用户定）
+check('S8 CSV 带 BOM + CRLF + 中文表头', csv.startsWith('﻿') && csv.includes('\r\n')
+  && csv.split('\r\n')[0].replace('﻿', '') === Lark.TABLE_HEADERS.map(h => `"${h}"`).join(','),
+  csv.split('\r\n')[0].slice(0, 80));
 check('S9 CSV 行数 = 表头 + 记录数', csv.trimEnd().split('\r\n').length === rows.length + 1,
   `lines=${csv.trimEnd().split('\r\n').length}`);
 check('S10 CSV 引号转义生效', csv.includes('""引号""'), '');
 check('S11 CSV 同样不加公式前缀', !csv.includes("'- 以减号"), '');
-check('S12 CSV 与 TimelineCsv 产物不同（poster 已改写，证明没走错出口）',
+check('S12 CSV 与 TimelineCsv 产物不同（poster 已改写、表头已中文，证明没走错出口）',
   csv !== TimelineCsv.buildTimelineCsv(FIXTURE).content, '');
-check('S13 空行集只有表头', Lark.toTsv([]).split('\n').length === 1 && Lark.toCsv([]).trimEnd().split('\r\n').length === 1, '');
+check('S13 空输入：CSV 只剩表头、TSV 为空串', Lark.toTsv([]) === ''
+  && Lark.toCsv([]).trimEnd().split('\r\n').length === 1, JSON.stringify(Lark.toTsv([])));
+check('S14 CSV 数据行列数与表头一致', csv.trimEnd().split('\r\n').slice(1)
+  .every(line => (line.match(/","/g) || []).length + 1 === 16), '');
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
