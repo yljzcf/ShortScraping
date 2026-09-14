@@ -312,6 +312,18 @@ body {
   height: auto;
 }
 
+/* 占位图（封面加载失败时由 JS 加 poster-fallback）：本身不带信息，横版布局是
+   「封面在上、文字在下」，留着只会白占一整行把卡片撑高（与 popup.css 同款） */
+.drama-card.poster-fallback.card-landscape .card-poster {
+  display: none;
+}
+
+/* 占位图一藏，标题成了最上面的元素、会被右上按钮带压住（横版的 padding-right:0
+   本来靠「按钮压在封面上」成立）。让标题整行显示在按钮下方（与 popup.css 同款） */
+.drama-card.poster-fallback.card-landscape .card-title {
+  margin-top: 24px;
+}
+
 .drama-card.card-landscape .card-title {
   padding-right: 0;
 }
@@ -355,6 +367,15 @@ body {
 
   .timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-desc-zh.desc-zh-only {
     -webkit-line-clamp: 5;
+  }
+
+  /* 双列窄卡 + 竖版封面：标题让到右上按钮带下方整行显示（与 popup.css 同款，
+     见那边的长注释）。触发条件是 Steam 封面加载失败退到竖版占位图——真实
+     header.jpg 恒为 460×215 横版，正常都走 card-landscape。不让行时标题与
+     右上按钮带同行，窄列里只剩约 10px，被裁成一个字。 */
+  .timeline-container[data-source="steam"] .drama-card:not(.card-full):not(.card-landscape) .card-title {
+    padding-right: 0;
+    margin-top: 24px;
   }
 
   /* 双列窄卡：底部标签改两行，单行超长时横向滚动，不堆高 */

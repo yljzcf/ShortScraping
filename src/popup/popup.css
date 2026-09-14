@@ -545,6 +545,21 @@ body {
   height: auto;
 }
 
+/* 占位图（封面加载失败时由 JS 加 poster-fallback）：本身不带任何信息，而横版
+   布局是「封面在上、文字在下」，留着它就白占一整行——铺满整行是一大块灰底，
+   保持 90px 又在右侧留一大片空白，两种都只是把卡片撑高。直接不显示，整宽留给文字。
+   竖版卡（非 Steam）不受影响：那里占位图在左侧，本来就不挤标题。 */
+.drama-card.poster-fallback.card-landscape .card-poster {
+  display: none;
+}
+
+/* 占位图一藏，标题就成了卡片最上面的元素，会被右上按钮带压住——横版的
+   padding-right:0 本来是靠「按钮压在封面上」成立的。让标题整行显示在按钮
+   下方，比重新缩窄标题多留一倍的字。 */
+.drama-card.poster-fallback.card-landscape .card-title {
+  margin-top: 24px; /* 按钮 top:8 + 高 28 = 36px，减去 card-content 的 14px 内边距 */
+}
+
 .drama-card.card-landscape .card-title {
   padding-right: 0;
 }
@@ -587,6 +602,17 @@ body {
 
 .timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-desc-zh.desc-zh-only {
   -webkit-line-clamp: 5;
+}
+
+/* 双列窄卡 + 竖版封面：标题让到右上按钮带下方整行显示。
+   触发条件是 Steam 封面加载失败退到竖版占位图（离线/CDN 被挡/游戏下架时
+   整屏都会这样）——真实 header.jpg 恒为 460×215 横版，正常都走 card-landscape。
+   不让行的话：卡宽 224px，右上三槽位按钮从卡右缘算要占到约 112px，而
+   .card-main 被 90px 封面列挤到只剩 90px，标题实测只剩 10px，被裁成一个字。
+   这一行放不下是物理事实，缩封面/改 padding 都救不回来，只能让行。 */
+.timeline-container[data-source="steam"] .drama-card:not(.card-full):not(.card-landscape) .card-title {
+  padding-right: 0;
+  margin-top: 24px; /* 按钮 top:8 + 高 28 = 36px，减去 card-content 的 14px 内边距 */
 }
 
 /* 双列窄卡：底部标签改两行（标签行 / 厂商行），单行超长时横向滚动，不堆高 */

@@ -30,6 +30,23 @@
   // 群机器人卡片三处共用，见那边 titleDisplay 的注释）。须先加载该模块
   const titleDisplayOf = global.TranslateConfig.titleDisplay;
 
+  /**
+   * 由封面实际尺寸判定卡片是否走横版布局；返回 null＝**不改判**，保留按 source
+   * 定的初始猜测。
+   *
+   * `usedFallback` 是必需的一档：封面加载失败时会换成 default-poster.svg
+   * （200×300 竖版），而**占位图的比例跟真实封面毫无关系**。旧写法拿它重判，
+   * 于是 Steam 卡（真实 header.jpg 恒为 460×215 横版）在离线/CDN 被挡/游戏下架
+   * 时被摘掉 card-landscape，掉进双列窄版式——那里 .card-main 只有 90px，
+   * 而标题还要给右上三槽位按钮让出 80px，实测标题只剩 10px、被裁成一个字。
+   * 非 Steam 站点初始就不带 card-landscape，这一档对它们是无变化的。
+   */
+  function orientationFromPoster(naturalWidth, naturalHeight, usedFallback) {
+    if (usedFallback) return null;
+    if (!naturalWidth || !naturalHeight) return null;
+    return naturalWidth > naturalHeight;
+  }
+
   // 封面可点性闸门：条目 url 为 http(s) 时即为封面点击目标，否则封面不可点
   // （拦截缺 url 的历史条目与 javascript: 等异常值）
   function posterLinkUrl(drama) {
@@ -251,15 +268,18 @@
     if (posterImg) {
       // 扩展页 CSP 禁止内联 onerror 属性，海报加载失败的默认图回退用监听器实现；
       // once 兼防默认图自身也加载失败时的换源死循环
+      let usedFallback = false;
       posterImg.addEventListener('error', () => {
+        usedFallback = true;
+        card.classList.add('poster-fallback'); // 让 CSS 知道现在展示的是占位图
         posterImg.src = defaultPoster;
       }, { once: true });
       const applyOrientation = () => {
-        if (posterImg.naturalWidth && posterImg.naturalHeight) {
-          card.classList.toggle('card-landscape', posterImg.naturalWidth > posterImg.naturalHeight);
-          // 竖版空间预算取决于海报实际高度，横竖翻转又会改文字列宽，加载后必须重排
-          adjustCardDescription(card);
-        }
+        const landscape = orientationFromPoster(posterImg.naturalWidth, posterImg.naturalHeight, usedFallback);
+        if (landscape === null) return;
+        card.classList.toggle('card-landscape', landscape);
+        // 竖版空间预算取决于海报实际高度，横竖翻转又会改文字列宽，加载后必须重排
+        adjustCardDescription(card);
       };
       if (posterImg.complete) applyOrientation();
       else posterImg.addEventListener('load', applyOrientation);
@@ -439,6 +459,7 @@
     CATEGORY_SOURCES,
     dramaSource,
     titleDisplay: titleDisplayOf,
+    orientationFromPoster,
     pickDefaultSource,
     groupByDate,
     renderTimeline,
