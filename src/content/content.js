@@ -131,12 +131,15 @@
         return null;
       }
 
-      // 官方简体中文：仅当与英文不同（确有本地化）才作为中文译名采用
+      // 官方简体中文：与英文不同（确有本地化）**且确实是中文**才采用。
+      // 只查「与英文不同」会把开发商母语的名字当成中文译名——Steam 的中文档在
+      // 没做简体中文本地化时返回的就是母语名（实测韩/俄/西/法四种，弹窗上直接
+      // 显示成韩语标题）。判据见 TranslateConfig.hasChineseChars 的注释。
       const zh = await fetchSteamAppDetails(appId, 'schinese');
       const zhName = zh ? (zh.name || '').trim() : '';
       const zhDesc = zh ? decodeHtmlEntities(zh.short_description || '').trim() : '';
-      const titleZh = (zhName && zhName !== enName) ? zhName : '';
-      const descriptionZh = (zhDesc && zhDesc !== enDesc) ? zhDesc : '';
+      const titleZh = (zhName && zhName !== enName && TranslateConfig.hasChineseChars(zhName)) ? zhName : '';
+      const descriptionZh = (zhDesc && zhDesc !== enDesc && TranslateConfig.hasChineseChars(zhDesc)) ? zhDesc : '';
 
       if (enName) drama.title = enName;        // 英文原名（弹窗里的“（原名）”）
       drama.description = enDesc;
@@ -993,7 +996,7 @@
     const h3 = item.querySelector('h3');
     const listTitle = h3 ? h3.textContent.trim() : '';
     const title = extractMyDramaEnglishTitle(poster) || listTitle;
-    const titleZh = (listTitle && listTitle !== title && /[一-鿿]/.test(listTitle)) ? listTitle : '';
+    const titleZh = (listTitle && listTitle !== title && TranslateConfig.hasChineseChars(listTitle)) ? listTitle : '';
 
     // 悬停层唯一的 <p> 是简介；不用 extractParagraphText，它在 p 为空时会兜底返回整卡文本
     const descP = item.querySelector('p');
@@ -1086,7 +1089,7 @@
         if (!(drama.poster || '').includes('/convert/')) drama.poster = cover;
         const english = extractMyDramaEnglishTitle(cover);
         if (english && drama.title !== english) {
-          if (!drama.titleZh && /[一-鿿]/.test(drama.title)) drama.titleZh = drama.title;
+          if (!drama.titleZh && TranslateConfig.hasChineseChars(drama.title)) drama.titleZh = drama.title;
           drama.title = english;
         }
       }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ShortScraping - 短剧监控助手",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "监控IMDB等平台的爆款短剧榜单，支持时间线展示和自动翻译",
   "permissions": [
     "storage",
@@ -40,7 +40,7 @@
         "*://*.netshort.com/*",
         "*://*.royalroad.com/*"
       ],
-      "js": ["src/shared/site-registry.js", "src/content/content.js"],
+      "js": ["src/shared/site-registry.js", "src/shared/translate-config.js", "src/content/content.js"],
       "css": ["src/content/content.css"],
       "run_at": "document_end"
     }

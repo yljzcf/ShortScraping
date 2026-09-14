@@ -88,12 +88,17 @@ for (const rel of filesToScan) {
 
 // ---------- T4 接线静态断言 ----------
 const manifest = JSON.parse(fs.readFileSync(path.join(worktreeRoot, 'manifest.json'), 'utf8'));
-check('T4a manifest content_scripts js 数组前置 site-registry',
-  deepEq(manifest.content_scripts[0].js, ['src/shared/site-registry.js', 'src/content/content.js']),
+// content.js 依赖的共享模块清单（v1.6.2 起含 translate-config：Steam 官方中文
+// 采用判据 hasChineseChars 在那里）。manifest 注入与后台强制注入必须逐字一致——
+// 兜底注入路径漏一个模块＝content.js 直接 ReferenceError，而那条路径正是后台
+// 节流标签页的常态入口
+const CONTENT_SCRIPT_FILES = ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/content/content.js'];
+check('T4a manifest content_scripts js 数组前置共享模块',
+  deepEq(manifest.content_scripts[0].js, CONTENT_SCRIPT_FILES),
   JSON.stringify(manifest.content_scripts[0].js));
 const bgSrc = fs.readFileSync(path.join(worktreeRoot, 'src/background/background.js'), 'utf8');
-check('T4b 强制注入 files 数组含 site-registry',
-  /files:\s*\['src\/shared\/site-registry\.js',\s*'src\/content\/content\.js'\]/.test(bgSrc), '');
+check('T4b 强制注入 files 数组与 manifest 逐字一致',
+  bgSrc.includes(`files: [${CONTENT_SCRIPT_FILES.map(f => `'${f}'`).join(', ')}]`), '');
 check('T4c 后台 importScripts 含 site-registry', bgSrc.includes("importScripts('../shared/site-registry.js')"), '');
 for (const [rel, needle] of [
   ['src/popup/popup.html', '../shared/site-registry.js'],
@@ -105,6 +110,21 @@ for (const [rel, needle] of [
 }
 const serverSrc = fs.readFileSync(path.join(worktreeRoot, 'server/sync-server.js'), 'utf8');
 check('T4e 共享页静态白名单含 site-registry', serverSrc.includes("'/shared/site-registry.js'"), '');
+
+// 标题文案单一真源（v1.6.2）：timeline-render.js 在**模块加载时**就取
+// TranslateConfig.titleDisplay，排在它后面＝弹窗/共享页加载即 TypeError 白屏。
+// 顺序断言必须逐页做，只查「引入了」拦不住这个坑
+for (const [rel, prefix] of [
+  ['src/popup/popup.html', '../shared/'],
+  ['server/public/share.html', '/shared/']
+]) {
+  const html = fs.readFileSync(path.join(worktreeRoot, rel), 'utf8');
+  const at = needle => html.indexOf(`src="${prefix}${needle}"`);
+  const cfgAt = at('translate-config.js'), renderAt = at('timeline-render.js');
+  check(`T4i ${rel} 的 translate-config 排在 timeline-render 之前`,
+    cfgAt >= 0 && renderAt >= 0 && cfgAt < renderAt, `cfg=${cfgAt} render=${renderAt}`);
+}
+check('T4j 共享页静态白名单含 translate-config', serverSrc.includes("'/shared/translate-config.js'"), '');
 
 // 折叠标签条（v1.5.11）：弹窗与共享页共用 site-tabs.js，且都不再手写站点按钮
 for (const [rel, needle] of [

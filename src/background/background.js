@@ -231,6 +231,7 @@ async function loadConfigFromJsonFiles() {
   await runLegacyDramaMigrations();
   await dropCompanyField();
   await resetPartialTranslations();
+  await resetNonChineseTitleZh();
   await migrateReelshortEpisodeUrls();
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
@@ -616,6 +617,45 @@ async function resetPartialTranslations() {
 }
 
 /**
+ * 存量「非中文译名」复位（v1.6.2）：把 titleZh 里压根没有汉字的条目清空译名、
+ * 退回 status='new'，让翻译线用英文原名重新翻。
+ *
+ * 成因见 TranslateConfig.hasChineseChars 的注释——Steam 中文档在开发商没做
+ * 简体中文本地化时返回的是**开发商母语**的名字，而适配器原判据只查「与英文
+ * 不同」。2026-09-14 全库实测 24 条（22 Steam + 2 IMDB），全部已是 status='trans'：
+ * 再抓取也不会自愈（去重命中分支只合并缺失的 genres），必须由本迁移兜。
+ *
+ * 复位是安全的：翻译线走 fillOnly，只补空缺，官方中文简介不会被冲掉；顺带清掉
+ * translateAttempts，让复位后的条目重新拿满重试额度。
+ * 独立标记理由同 companyFieldDropped——runLegacyDramaMigrations 早已置位。
+ */
+async function resetNonChineseTitleZh() {
+  const { nonChineseTitleZhReset } = await chrome.storage.local.get('nonChineseTitleZhReset');
+  if (nonChineseTitleZhReset) return;
+
+  await enqueueDramaWrite('非中文译名复位', async () => {
+    const dramas = await getDramasInQueue();
+    let changedCount = 0;
+
+    const reset = dramas.map(drama => {
+      if (!drama) return drama;
+      const titleZh = String(drama.titleZh || '').trim();
+      if (!titleZh || TranslateConfig.hasChineseChars(titleZh)) return drama;
+      changedCount++;
+      const { translateAttempts, ...rest } = drama;
+      return { ...rest, titleZh: '', status: 'new' };
+    });
+
+    if (changedCount > 0) {
+      await writeDramasInQueue(reset);
+      console.log(`[ShortScraping] 已把 ${changedCount} 条非中文译名退回待翻译队列`);
+    }
+  });
+
+  await chrome.storage.local.set({ nonChineseTitleZhReset: true });
+}
+
+/**
  * 存量数据显示标签迁移：历史条目 tags 中的 "RR" 统一改为 "RoyalRoad"。
  * 只碰 tags 显示标签，不碰去重键 itemId 的 rr 前缀。
  * 幂等：无变化时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
@@ -765,7 +805,9 @@ async function scrapeUrlInTab(url) {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         // 与 manifest content_scripts 的 js 数组保持一致：共享模块先于 content.js
-        files: ['src/shared/site-registry.js', 'src/content/content.js']
+        // （漏一个共享模块＝content.js 在兜底注入路径上直接 ReferenceError，
+        //  而这条路径正是后台节流标签页的常态入口。unit-site-registry T4a/T4b 守着）
+        files: ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/content/content.js']
       }).catch(err => console.warn(`[ShortScraping] 强制注入失败（继续轮询）: ${err.message}`));
       return await sendScrapeWhenReady(tab.id);
     }

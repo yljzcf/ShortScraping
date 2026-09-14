@@ -76,7 +76,7 @@ const resetDramasCache = async () => {
   failNextSet = false;
 };
 // 种入条数（条数断言一律由它推导，加夹具时不必再逐处改数字）
-const SEEDED = 7;
+const SEEDED = 9;
 const seedLegacy = async () => {
   await resetDramasCache();
   rawStore.dramas = [
@@ -90,12 +90,21 @@ const seedLegacy = async () => {
     { id: 'id-6', itemId: 'st002', title: 'No Desc Zh', description: 'en desc', titleZh: '官方中文名', descriptionZh: '',
       tags: ['T'], source: 'steam', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB },
     { id: 'id-7', itemId: 'st003', title: 'Complete', description: 'en desc', titleZh: '完整中文名', descriptionZh: '完整中文简介',
+      tags: ['T'], source: 'steam', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB },
+    // v1.6.2 非中文译名复位的两个面：韩语（Steam 中文档返回开发商母语）与拉丁系外语。
+    // 两条都「译文齐全」，故 resetPartialTranslations 不会碰，必须由新迁移兜住
+    { id: 'id-8', itemId: 'st004', title: 'Escape! House of Bonds', description: 'en desc',
+      titleZh: '탈출! 인연의 집', descriptionZh: '中文简介', translateAttempts: 2,
+      tags: ['T'], source: 'steam', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB },
+    { id: 'id-9', itemId: 'st005', title: 'The Mansion of Campanillas', description: 'en desc',
+      titleZh: 'La mansión de Campanillas', descriptionZh: '中文简介',
       tags: ['T'], source: 'steam', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB }
   ];
   delete rawStore.legacyDramaMigrated;
   delete rawStore.rsEpisodeUrlMigrated;
   delete rawStore.companyFieldDropped;
   delete rawStore.partialTranslationReset;
+  delete rawStore.nonChineseTitleZhReset;
   rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
 };
 await seedLegacy();
@@ -131,6 +140,17 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
     JSON.stringify(byId['id-7']));
   check('T1k partialTranslationReset 已置位', rawStore.partialTranslationReset === true,
     String(rawStore.partialTranslationReset));
+  // v1.6.2：非中文译名退回队列。判据与适配器守卫同一个 hasChineseChars
+  check('T1l 韩语译名已清空并退回 new（简介保留、重试计数清零）',
+    byId['id-8']?.status === 'new' && byId['id-8']?.titleZh === ''
+    && byId['id-8']?.descriptionZh === '中文简介' && !('translateAttempts' in (byId['id-8'] || {})),
+    JSON.stringify(byId['id-8']));
+  check('T1m 拉丁系外语译名同样复位（语种黑名单抓不到）',
+    byId['id-9']?.status === 'new' && byId['id-9']?.titleZh === '', JSON.stringify(byId['id-9']));
+  check('T1n 正常中文译名不被误动',
+    byId['id-7']?.titleZh === '完整中文名' && byId['id-7']?.status === 'trans', JSON.stringify(byId['id-7']));
+  check('T1o nonChineseTitleZhReset 已置位', rawStore.nonChineseTitleZhReset === true,
+    String(rawStore.nonChineseTitleZhReset));
 }
 
 // ---------- T2 二次唤醒：dramas 全表读恰 1 次（仅 prune，不可标记项） ----------

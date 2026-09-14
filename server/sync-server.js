@@ -317,7 +317,9 @@ const STATIC_ROUTES = {
   '/public/share.js': { file: path.join(PUBLIC_DIR, 'share.js'), type: 'text/javascript; charset=utf-8' },
   '/shared/timeline-render.js': { file: path.join(SHARED_DIR, 'timeline-render.js'), type: 'text/javascript; charset=utf-8' },
   '/shared/site-registry.js': { file: path.join(SHARED_DIR, 'site-registry.js'), type: 'text/javascript; charset=utf-8' },
-  '/shared/site-tabs.js': { file: path.join(SHARED_DIR, 'site-tabs.js'), type: 'text/javascript; charset=utf-8' }
+  '/shared/site-tabs.js': { file: path.join(SHARED_DIR, 'site-tabs.js'), type: 'text/javascript; charset=utf-8' },
+  // timeline-render 的标题文案单一真源（v1.6.2）；漏了这条共享页直接白屏
+  '/shared/translate-config.js': { file: path.join(SHARED_DIR, 'translate-config.js'), type: 'text/javascript; charset=utf-8' }
 };
 
 const ICON_TYPES = {

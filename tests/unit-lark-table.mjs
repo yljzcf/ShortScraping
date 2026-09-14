@@ -74,6 +74,24 @@ if (typeof pfp === 'function') {
     convertible(pfp(POSTERS.imdb)) && convertible(pfp(POSTERS.dramashorts)), '');
 }
 
+// ---------- D 组：buildPayload 的 title_display（与卡片/机器人同一份文案） ----------
+{
+  const disp = d => Lark.buildPayload(d).title_display;
+  check('D1 中英不同 → 「中文（英文）」',
+    disp({ title: 'Yandere Virus', titleZh: '病娇病毒' }) === '病娇病毒（Yandere Virus）',
+    disp({ title: 'Yandere Virus', titleZh: '病娇病毒' }));
+  // v1.6.2：中文开发商的 Steam 英文档名本身就是中文，AI 原样返回（全库 70 条）
+  check('D2 中英同名 → 不写成「X（X）」',
+    disp({ title: '骷髅传奇', titleZh: '骷髅传奇' }) === '骷髅传奇',
+    disp({ title: '骷髅传奇', titleZh: '骷髅传奇' }));
+  check('D3 仅差装饰性标点也视作同名', disp({ title: 'NBA 2K27', titleZh: '《NBA 2K27》' }) === '《NBA 2K27》',
+    disp({ title: 'NBA 2K27', titleZh: '《NBA 2K27》' }));
+  check('D4 无中文译名 → 只留英文', disp({ title: 'Solo English', titleZh: '' }) === 'Solo English',
+    disp({ title: 'Solo English', titleZh: '' }));
+  check('D5 title_zh 键本身不受折叠影响（表格列要的是原值）',
+    Lark.buildPayload({ title: '骷髅传奇', titleZh: '骷髅传奇' }).title_zh === '骷髅传奇', '');
+}
+
 // ---------- T 组：表格投影层 ----------
 const SUB = 'https://unit.test/list';
 const FIXTURE = [

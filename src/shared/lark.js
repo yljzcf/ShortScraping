@@ -43,6 +43,12 @@
     ? require('./site-registry.js').SOURCE_NAMES
     : global.SiteRegistry.SOURCE_NAMES;
 
+  // 标题文案（「中文（英文）」，同名只留一个）单一真源在 translate-config.js，
+  // 与弹窗/共享页卡片共用一份——本模块的 title_display 与机器人卡片标题都走它
+  const composeTitle = (typeof module !== 'undefined' && module.exports)
+    ? require('./translate-config.js').titleDisplay
+    : global.TranslateConfig.titleDisplay;
+
   // 列序/字段白名单同样不另立真源，取自 timeline-csv.js（后台 importScripts 与
   // 设置页 <script> 都已把它排在本模块之前）
   const TimelineCsv = (typeof module !== 'undefined' && module.exports)
@@ -163,7 +169,7 @@
       item_id: asText(d.itemId),
       title,
       title_zh: titleZh,
-      title_display: titleZh ? `${titleZh}（${title}）` : title,
+      title_display: composeTitle(d),
       description,
       description_zh: descriptionZh,
       summary: descriptionZh || description,
@@ -285,8 +291,6 @@
   function buildBotCard(drama, options) {
     const d = drama || {};
     const imgKey = asText(options && options.imgKey);
-    const title = asText(d.title);
-    const titleZh = asText(d.titleZh);
     const tags = (Array.isArray(d.tags) ? d.tags : []).map(asText).filter(Boolean);
     const genres = (Array.isArray(d.genres) ? d.genres : []).map(asText).filter(Boolean);
     // 只出一段简介，中文优先（2026-09-12 用户定：去掉原先那段斜体英文原文）。
@@ -296,8 +300,9 @@
       : clipText(d.description, BOT_SUMMARY_LIMIT);
     const url = asText(d.url);
 
-    // 标题栏＝中文译名（英文原名）；缺哪边就只留另一边
-    const heading = titleZh && title ? `${titleZh}（${title}）` : (titleZh || title || '（无标题）');
+    // 标题栏＝中文译名（英文原名）；缺哪边就只留另一边，两边其实是同一个名字
+    // （中文开发商的 Steam 英文档名本身就是中文）时也只留一个，不写成「X（X）」
+    const heading = composeTitle(d) || '（无标题）';
 
     const elements = [];
     if (summary) elements.push({ tag: 'markdown', content: summary });

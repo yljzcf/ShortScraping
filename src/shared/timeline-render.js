@@ -26,6 +26,10 @@
     return CATEGORY_SOURCES.includes(drama.source) ? drama.source : 'imdb';
   }
 
+  // 标题文案单一真源在 translate-config.js（弹窗/共享页卡片、多维表格 payload、
+  // 群机器人卡片三处共用，见那边 titleDisplay 的注释）。须先加载该模块
+  const titleDisplayOf = global.TranslateConfig.titleDisplay;
+
   // 封面可点性闸门：条目 url 为 http(s) 时即为封面点击目标，否则封面不可点
   // （拦截缺 url 的历史条目与 javascript: 等异常值）
   function posterLinkUrl(drama) {
@@ -182,11 +186,7 @@
     card.className = `drama-card ${drama.status === 'new' ? 'status-new' : ''} ${drama.source === 'steam' ? 'card-landscape' : ''}`;
     card.dataset.id = drama.id;
 
-    // 标题：中文（英文）或 英文；trim 防止仅含空白的字段渲染出空行
-    const titleZh = String(drama.titleZh || '').trim();
-    const titleDisplay = titleZh
-      ? `${titleZh}（${drama.title}）`
-      : drama.title;
+    const titleDisplay = titleDisplayOf(drama);
 
     // 简介
     const descZh = String(drama.descriptionZh || '').trim();
@@ -438,6 +438,7 @@
   global.TimelineRender = {
     CATEGORY_SOURCES,
     dramaSource,
+    titleDisplay: titleDisplayOf,
     pickDefaultSource,
     groupByDate,
     renderTimeline,

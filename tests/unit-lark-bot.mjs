@@ -85,6 +85,14 @@ if (card) {
   const noZh = Lark.buildBotCard({ ...FULL, titleZh: '', descriptionZh: '' });
   check('C10a 无中文标题时标题栏只留英文原名',
     noZh.card.header.title.content === 'The Whisper Man', noZh.card.header.title.content);
+  // v1.6.2：中英文名其实是同一个时只留一个，不推「骷髅传奇（骷髅传奇）」给群里。
+  // 成因＝中文开发商的 Steam 英文档名本身就是中文，AI 原样返回（全库 70 条）
+  const sameName = Lark.buildBotCard({ ...FULL, title: '骷髅传奇', titleZh: '骷髅传奇' });
+  check('C10d 中英同名时标题栏不写成「X（X）」',
+    sameName.card.header.title.content === '骷髅传奇', sameName.card.header.title.content);
+  const decorated = Lark.buildBotCard({ ...FULL, title: 'NBA 2K27', titleZh: '《NBA 2K27》' });
+  check('C10e 仅差装饰性标点也视作同名（保留官方《》形态）',
+    decorated.card.header.title.content === '《NBA 2K27》', decorated.card.header.title.content);
   // 中文缺失才回退英文（且不带斜体）：机器人只在翻译完成后推，理论上都有中文，
   // 但半成品收口的卡可能没有，不能给张空卡
   check('C10b 无中文简介时回退英文原文，且不加斜体',
