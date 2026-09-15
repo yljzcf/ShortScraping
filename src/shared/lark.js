@@ -103,9 +103,15 @@
   }
 
   /**
-   * payload 专用封面形态适配（不改扩展内部数据/CSV/弹窗展示）：
+   * 推送专用封面形态适配（不改扩展内部数据/CSV/弹窗展示）：
    * 采集存的是榜单页自用的缩略图 URL（弹窗小卡片够用且省流量），推送时按站点
-   * 改写成原图形态（2026-07-25 逐站实测）：
+   * 改写成原图形态（2026-07-25 逐站实测）。
+   *
+   * **两个消费方共用这一份**：多维表格 payload/导出（缩略图链接转出来的附件糊，
+   * 且官方捷径解析不了含逗号/百分号编码的 URL）与群机器人卡片（img 满宽渲染，
+   * IMDB 的 90×133 缩略图被放大 5 倍以上）。v1.6.0~v1.6.3 期间机器人那条路
+   * 绕开了本函数，用户报「群里图太模糊」，v1.6.4 归位——别再拆成两套。
+   *
    * - dramashorts：_next/image 优化端点（?url=https%3A%2F%2F…）→ 原始 CDN 直链
    *   （官方捷径也解析不了其百分号编码查询串；原图约 1.5MB vs 优化图 72KB）；
    * - IMDB：去掉 _V1_ 变换链（90×133 缩略 ~4KB → 原图 ~290KB）。变换段含英文
@@ -113,9 +119,13 @@
    *   （@ 实测无害：新旧形态都含 @、仅逗号有无之差；先前「@ 是死结」为实验
    *   混淆——%40 试验行同时含逗号。真正致死字符＝英文逗号/百分号编码。）
    * - MyDrama：convert 端点去掉 width/height 尺寸参数（189×283 ~7KB → 原尺寸 ~64KB）。
-   * 保持现状的站点：Steam（新游仅有带哈希路径，无哈希大图候选 404 不可安全改写；
-   * header 460×215 为标准图）、RoyalRoad（covers-large 已比 covers-full 大）、
-   * ReelShort（现状已是原图级 ~116KB）、NetShort（651×868 中等尺寸，tplv 模板不可去）。
+   * - AppleTV：尾段尺寸码提到 1200×1800（v1.6.4；400×600 73KB → 393KB）。mzstatic
+   *   按请求尺寸裁切，同为 2:3 故构图不变，22/22 条存量实测 200（2026-09-15）。
+   * 保持现状的站点（2026-09-15 复测，均已在各自上限）：Steam（460×215；同哈希目录下
+   * capsule_616x353 / library_600x900 / library_hero / hero_capsule 逐个实测全 404，
+   * 3 个 app 一致）、RoyalRoad（covers-large 400×600，已比 covers-full 大）、
+   * ReelShort（现状已是原图级 ~116KB）、NetShort（651×868，tplv 模板不可去）、
+   * Netflix（storyArt 1200×675）、MyDrama fandom 子域（WordPress 原图）。
    */
   function posterForPayload(poster) {
     const raw = asText(poster);
@@ -145,6 +155,13 @@
       } catch (e) {
         // 解析失败原样透传
       }
+    }
+    if (/^https:\/\/[a-z0-9-]+\.mzstatic\.com\/image\/thumb\//i.test(raw)) {
+      // 尾段形如 `<w>x<h><裁切码>.<扩展名>`。**按形状匹配数字**、不写死 '400x600nr'：
+      // 裁切码取自站点自己的 artwork.template（content.js 的 appleArtUrl 只替换
+      // {w}/{h}/{f} 三个占位符），当前存量恰好全是 nr，sr/bb 等随时可能出现。
+      // 前瞻限定在最后一段，避免改到路径中间形似尺寸的片段。
+      return raw.replace(/\/\d+x\d+(?=[^/]*$)/, '/1200x1800');
     }
     return raw;
   }
@@ -444,8 +461,11 @@
 
   /**
    * 拉封面并上传到飞书，返回 image_key；任一步失败返回 null（不抛）。
-   * 封面取 drama.poster **原值**（榜单页缩略图，56KB 级），不走 posterForPayload
-   * ——那个是为多维表格「链接转附件」放大到 1.5MB 的形态，卡片显示用不着。
+   * **给什么 URL 就传什么**，形态由调用方决定（同 buildPayload / buildTableRows
+   * 的范式：改写发生在值的发出处）。v1.6.0 曾在此断言「取 drama.poster 原值即可，
+   * posterForPayload 那是为链接转附件放大的形态、卡片显示用不着」——实测推翻：
+   * 库里存的本就是榜单缩略图，IMDB 只有 90×133，满宽卡片上放大 5 倍以上，
+   * 正是用户报的「群里图太模糊」（v1.6.4 订正，见 pushBotCard）。
    */
   async function uploadCoverImage(rawConfig, posterUrl) {
     const config = normalizeConfig(rawConfig);
@@ -531,8 +551,15 @@
       throw error;
     }
 
-    // 封面上传对调用方不可见：拿到 img_key 就带图，拿不到就发无图卡
-    const imgKey = await uploadCoverImage(config, drama && drama.poster);
+    // 封面上传对调用方不可见：拿到 img_key 就带图，拿不到就发无图卡。
+    // 先试 posterForPayload 的高清形态（库里存的是榜单缩略图，IMDB 实测 90×133、4KB，
+    // 卡片满宽渲染会放大 5 倍以上）；拉不到或上传超时（DramaShorts 原图 729KB~1.5MB，
+    // 默认超时 15 秒）再退回缩略图——保底不能从「模糊」退化成「没图」（2026-09-15 用户定）。
+    // 无凭据/无封面时 uploadCoverImage 零请求返回 null，回退那次同样零成本。
+    const rawPoster = asText(drama && drama.poster);
+    const sharpPoster = posterForPayload(rawPoster);
+    let imgKey = await uploadCoverImage(config, sharpPoster);
+    if (!imgKey && sharpPoster !== rawPoster) imgKey = await uploadCoverImage(config, rawPoster);
 
     const response = await fetchWithTimeout(config.botWebhookUrl, {
       method: 'POST',

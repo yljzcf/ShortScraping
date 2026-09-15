@@ -1883,8 +1883,10 @@
   /**
    * artwork.template 形如 `https://is1-ssl.mzstatic.com/image/thumb/<hash>/{w}x{h}nr.{f}`，
    * mzstatic 按请求尺寸裁切（源图是 1680×3636 超长版），取 400×600 标准 2:3 竖版海报
-   * （≈66KB；URL 无逗号/百分号，Lark「链接转附件」可直接转，故 posterForPayload 不改写）。
+   * （≈66KB，弹窗小卡够用且省流量；URL 无逗号/百分号，Lark「链接转附件」可直接转）。
    * 裁切码（nr/sr/bb…）原样保留，只替换三个占位符。
+   * 推送出去时由 lark.js 的 posterForPayload 把尾段尺寸码提到 1200×1800（v1.6.4，
+   * 满宽卡片上 400 宽偏软），故这里存小图、那里放大，两边不要互相跟随。
    */
   function appleArtUrl(template) {
     const t = typeof template === 'string' ? template.trim() : '';

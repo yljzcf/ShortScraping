@@ -241,13 +241,19 @@ if (card) {
 // ---------- U 组：封面上传（效果层，桩掉 fetch） ----------
 const TOKEN_API = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
 const IMAGE_API = 'https://open.feishu.cn/open-apis/im/v1/images';
-const POSTER = 'https://dnm.nflximg.net/x.jpg';
+const POSTER = 'https://dnm.nflximg.net/x.jpg';   // netflix：posterForPayload 不改写的形态
+// IMDB 真实形态（同 unit-lark-table 的 POSTERS.imdb）：库里存的是 90×133 缩略图，
+// posterForPayload 去掉变换段还原成原图。v1.6.4 前机器人上传的是前者，满宽卡片上糊成一片。
+const IMDB_THUMB = 'https://m.media-amazon.com/images/M/MV5BMTQzMTdmMGUtYWJhYi00MzYzLWI5NTItZGJlNzY4MGRjYWMzXkEyXkFqcGc@._V1_QL75_UX90_CR0,13,90,133_.jpg';
+const IMDB_FULL = 'https://m.media-amazon.com/images/M/MV5BMTQzMTdmMGUtYWJhYi00MzYzLWI5NTItZGJlNzY4MGRjYWMzXkEyXkFqcGc@._V1_.jpg';
 const CRED = { feishuAppId: 'cli_x', feishuAppSecret: 's3cret', requestTimeoutSec: 5 };
 
 let calls = [];
 const jsonRes = (body, ok = true) => ({
   ok, status: ok ? 200 : 500, async text() { return JSON.stringify(body); }, async json() { return body; }
 });
+const imgRes = () => ({ ok: true, status: 200, async blob() { return new Blob([new Uint8Array([1, 2, 3])]); } });
+const notFound = () => ({ ok: false, status: 404, async blob() { return new Blob([]); } });
 function installFetch(handlers = {}) {
   calls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -255,7 +261,9 @@ function installFetch(handlers = {}) {
     calls.push({ url: u, method: options.method || 'GET', headers: options.headers || {}, body: options.body });
     if (u === TOKEN_API) return handlers.token ? handlers.token() : jsonRes({ code: 0, tenant_access_token: 't-1', expire: 7200 });
     if (u === IMAGE_API) return handlers.image ? handlers.image() : jsonRes({ code: 0, data: { image_key: 'img_v3_ok' } });
-    if (u === POSTER) return handlers.poster ? handlers.poster() : { ok: true, status: 200, async blob() { return new Blob([new Uint8Array([1, 2, 3])]); } };
+    if (u === POSTER) return handlers.poster ? handlers.poster() : imgRes();
+    if (u === IMDB_FULL) return handlers.imdbFull ? handlers.imdbFull() : imgRes();
+    if (u === IMDB_THUMB) return handlers.imdbThumb ? handlers.imdbThumb() : imgRes();
     if (u.includes('/open-apis/bot/')) return jsonRes({ code: 0, msg: 'success' });
     throw new TypeError(`unit stub: 未预期的请求 ${u}`);
   };
@@ -347,6 +355,44 @@ function installFetch(handlers = {}) {
   check('P4 条目无封面时不碰上传接口（IMDB 有 37 条无封面）',
     !calls.some(c => c.url === IMAGE_API) && Boolean(calls.find(c => c.url === BOT)),
     calls.map(c => c.url).join('|'));
+
+  /* —— v1.6.4：上传的必须是 posterForPayload 的高清形态 ——————————————
+   * 库里存的是榜单页缩略图（IMDB 实测 90×133、4KB），卡片满宽渲染会放大 5 倍以上。
+   * v1.6.0 刻意绕开 posterForPayload（注释误判成「那是为链接转附件放大的形态」），
+   * 结果就是用户报的「群里图太模糊」。P6 直接钉死两条通道同源，防再次漂移。
+   */
+  installFetch(); Lark.__resetTokenCache();
+  await Lark.pushBotCard(botCfg, { ...FULL, source: 'imdb', poster: IMDB_THUMB });
+  check('P5 拉的是改写后的高清图，绝不拉库里的缩略图',
+    calls.some(c => c.url === IMDB_FULL) && !calls.some(c => c.url === IMDB_THUMB),
+    calls.map(c => c.url).join('|'));
+  check('P6 与多维表格 payload 同源（两条通道不许各写一套封面形态）',
+    Lark.buildPayload({ poster: IMDB_THUMB }).poster === IMDB_FULL
+    && calls.filter(c => c.url.startsWith('https://m.media-amazon.com/'))[0]?.url === IMDB_FULL,
+    `payload=${Lark.buildPayload({ poster: IMDB_THUMB }).poster}`);
+
+  // 回退：高清挂了退回缩略图，保底不能从「模糊」退化成「没图」（2026-09-15 用户定）
+  installFetch({ imdbFull: notFound }); Lark.__resetTokenCache();
+  await Lark.pushBotCard(botCfg, { ...FULL, source: 'imdb', poster: IMDB_THUMB });
+  const fellBack = JSON.parse(calls.find(c => c.url === BOT)?.body || '{}');
+  check('P7 高清拉不到时回退缩略图，卡片仍带图',
+    (fellBack.card?.body?.elements || []).some(e => e.tag === 'img' && e.img_key === 'img_v3_ok')
+    && calls.filter(c => c.url.startsWith('https://m.media-amazon.com/'))
+      .map(c => c.url).join('|') === [IMDB_FULL, IMDB_THUMB].join('|'),
+    calls.map(c => c.url).join('|'));
+
+  installFetch({ imdbFull: notFound, imdbThumb: notFound }); Lark.__resetTokenCache();
+  await Lark.pushBotCard(botCfg, { ...FULL, source: 'imdb', poster: IMDB_THUMB });
+  const bothDead = JSON.parse(calls.find(c => c.url === BOT)?.body || '{}');
+  check('P8 两条都挂 → 无图卡，且只试两次不试第三次',
+    !JSON.stringify(bothDead).includes('img_key')
+    && calls.filter(c => c.url.startsWith('https://m.media-amazon.com/')).length === 2,
+    calls.map(c => c.url).join('|'));
+
+  installFetch({ poster: notFound }); Lark.__resetTokenCache();
+  await Lark.pushBotCard(botCfg, { ...FULL, poster: POSTER });
+  check('P9 不改写的站点失败后不重复拉同一个 URL（改写前后同值即无回退可言）',
+    calls.filter(c => c.url === POSTER).length === 1, calls.map(c => c.url).join('|'));
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

@@ -66,12 +66,32 @@ if (typeof pfp === 'function') {
     convertible(pfp(POSTERS.mydramaPlus)) && convertible(pfp(POSTERS.mydramaPct)), '');
 
   // 归一只作用于 static.my-drama.com/convert/ 分支，不波及 fandom 子域与别站
-  const passthrough = ['mydramaFandom', 'steam', 'royalroad', 'reelshort', 'netflix', 'appletv', 'netshort'];
+  const passthrough = ['mydramaFandom', 'steam', 'royalroad', 'reelshort', 'netflix', 'netshort'];
   check('P8 其余站点原样透传', passthrough.every(k => pfp(POSTERS[k]) === POSTERS[k]),
     passthrough.filter(k => pfp(POSTERS[k]) !== POSTERS[k]).join(','));
   check('P9 空值/非法值安全', pfp('') === '' && pfp(null) === '' && pfp(undefined) === '', '');
   check('P10 IMDB/dramashorts 改写后均可转附件',
     convertible(pfp(POSTERS.imdb)) && convertible(pfp(POSTERS.dramashorts)), '');
+
+  /* —— v1.6.4：Apple TV 尺寸码提到 1200×1800 ————————————————————
+   * 采集存 400×600（73KB），机器人卡满宽渲染偏软；mzstatic 按请求尺寸裁切，
+   * 1200×1800 同为 2:3 不改构图，22/22 条存量实测 200（2026-09-15）。
+   */
+  check('P11 appletv 尺寸码提到 1200x1800（裁切码与扩展名保留）', pfp(POSTERS.appletv) ===
+    'https://is1-ssl.mzstatic.com/image/thumb/i-QRI7ak7O755Nvdv11UnQ/1200x1800nr.jpg',
+    pfp(POSTERS.appletv));
+  // 裁切码取自站点自己的 artwork.template（content.js 只替换 {w}/{h}/{f}），
+  // 当前存量恰好全是 nr，但 sr/bb 等随时可能出现——故按形状匹配数字，不写死字符串
+  check('P12 非 nr 裁切码同样归一', pfp(
+    'https://is5-ssl.mzstatic.com/image/thumb/Video/aa/bb/cc/hash.png/800x1200bb.jpg') ===
+    'https://is5-ssl.mzstatic.com/image/thumb/Video/aa/bb/cc/hash.png/1200x1800bb.jpg',
+    pfp('https://is5-ssl.mzstatic.com/image/thumb/Video/aa/bb/cc/hash.png/800x1200bb.jpg'));
+  check('P13 尾段不是尺寸码时原样透传', pfp(
+    'https://is1-ssl.mzstatic.com/image/thumb/i-QRI7ak7O755Nvdv11UnQ/cover.jpg') ===
+    'https://is1-ssl.mzstatic.com/image/thumb/i-QRI7ak7O755Nvdv11UnQ/cover.jpg', '');
+  check('P14 别站的尺寸形状尾段不受波及', pfp('https://example.com/img/400x600nr.jpg') ===
+    'https://example.com/img/400x600nr.jpg', pfp('https://example.com/img/400x600nr.jpg'));
+  check('P15 appletv 改写后仍可转附件', convertible(pfp(POSTERS.appletv)), pfp(POSTERS.appletv));
 }
 
 // ---------- D 组：buildPayload 的 title_display（与卡片/机器人同一份文案） ----------
