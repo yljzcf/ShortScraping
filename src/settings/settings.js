@@ -1429,11 +1429,6 @@
     return TranslateConfig.normalizeConfig(rawConfig);
   }
 
-  function toPositiveNumber(value, fallback) {
-    const number = Number(value);
-    return Number.isFinite(number) && number > 0 ? number : fallback;
-  }
-
   function getScheduleText(config) {
     if (config.scheduleMode === 'cron') {
       return `Cron：抓取 ${config.scrapeCron || '未配置'}，翻译 ${config.translateCron || '未配置'}`;
