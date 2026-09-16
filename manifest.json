@@ -39,6 +39,7 @@
         "*://*.reelshort.com/*",
         "*://*.dramashorts.io/*",
         "*://*.netshort.com/*",
+        "*://*.flickreels.net/*",
         "*://*.royalroad.com/*"
       ],
       "js": ["src/shared/site-registry.js", "src/shared/translate-config.js", "src/content/content.js"],

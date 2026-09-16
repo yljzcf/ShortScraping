@@ -21,7 +21,7 @@
   'use strict';
 
   // 顺序即展示序（2026-09-11 用户定：Netflix 紧随 IMDB 排第二，RoyalRoad 移到末位；
-  // 2026-09-12 用户定：AppleTV 紧随 Netflix 排第三）
+  // 2026-09-12 用户定：AppleTV 紧随 Netflix 排第三；2026-09-16：FlickReels 紧随 NetShort）
   const SITES = [
     { site: 'imdb', name: 'IMDB', host: 'imdb.com', match: 'suffix' },
     { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*' },
@@ -31,6 +31,9 @@
     { site: 'reelshort', name: 'ReelShort', host: 'reelshort.com', match: 'suffix' },
     { site: 'dramashorts', name: 'DramaShorts', host: 'dramashorts.io', match: 'suffix' },
     { site: 'netshort', name: 'NetShort', host: 'netshort.com', match: 'suffix' },
+    // 不加 path：Chrome 匹配模式的路径段连查询串一起匹配，'/' 匹配不到首页订阅 '/?list=…'，
+    // 留默认 /* 与其余短剧站一致（非首页路径由 adapter.matches 闸住，只是不挂浮动按钮）
+    { site: 'flickreels', name: 'FlickReels', host: 'flickreels.net', match: 'suffix' },
     { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix' }
   ];
 
@@ -41,7 +44,7 @@
   // 注意 SITES 顺序本身不受此影响：manifest 推导、siteOfHostname 匹配优先级
   // 仍按 SITES，分组只管头部与设置页的展示序。
   const SITE_GROUPS = [
-    { group: 'shortdrama', name: '短剧', sites: ['mydrama', 'reelshort', 'dramashorts', 'netshort'] },
+    { group: 'shortdrama', name: '短剧', sites: ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels'] },
     { group: 'video', name: '影视', sites: ['imdb', 'netflix', 'appletv'] },
     { group: 'game', name: '游戏 · 网文', sites: ['steam', 'royalroad'] }
   ];

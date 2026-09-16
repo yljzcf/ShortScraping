@@ -29,7 +29,7 @@ check('G2a 分组顺序：短剧 → 影视 → 游戏·网文',
   JSON.stringify(SiteRegistry.SITE_GROUPS.map(g => g.group)));
 check('G2b 组内站点字面量（2026-09-12 用户定）',
   deepEq(SiteRegistry.SITE_GROUPS.map(g => g.sites), [
-    ['mydrama', 'reelshort', 'dramashorts', 'netshort'],
+    ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels'],
     ['imdb', 'netflix', 'appletv'],
     ['steam', 'royalroad']
   ]),
@@ -131,22 +131,22 @@ const shortLatest = { dramashorts: 400, mydrama: 100, netshort: 300 };  // reels
 check('S1 组内按最近更新降序排，无记录的排最后',
   deepEq(SiteTabs.resolveLayout({ visibleSites: allVisible, activeSource: 'mydrama', latestBySite: shortLatest })
     .groups.find(g => g.group === 'shortdrama').sites,
-    ['dramashorts', 'netshort', 'mydrama', 'reelshort']),
+    ['dramashorts', 'netshort', 'mydrama', 'reelshort', 'flickreels']),   // flickreels 无记录，与 reelshort 并列后按注册表序排其后
   JSON.stringify(SiteTabs.resolveLayout({ visibleSites: allVisible, activeSource: 'mydrama', latestBySite: shortLatest })
     .groups.find(g => g.group === 'shortdrama').sites));
 
 check('S2 全都无更新记录时保持注册表组内顺序（稳定排序）',
   deepEq(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, {}),
-    ['mydrama', 'reelshort', 'dramashorts', 'netshort']),
+    ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels']),
   JSON.stringify(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, {})));
 
 check('S3 更新时间并列时保持注册表组内顺序',
-  deepEq(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, { mydrama: 500, reelshort: 500, dramashorts: 500, netshort: 500 }),
-    ['mydrama', 'reelshort', 'dramashorts', 'netshort']),
-  JSON.stringify(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, { mydrama: 500, reelshort: 500, dramashorts: 500, netshort: 500 })));
+  deepEq(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, { mydrama: 500, reelshort: 500, dramashorts: 500, netshort: 500, flickreels: 500 }),
+    ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels']),
+  JSON.stringify(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, { mydrama: 500, reelshort: 500, dramashorts: 500, netshort: 500, flickreels: 500 })));
 
 check('S4 排序不改注册表本身（SITE_GROUPS.sites 未被就地重排）',
-  deepEq(shortGroup.sites, ['mydrama', 'reelshort', 'dramashorts', 'netshort']),
+  deepEq(shortGroup.sites, ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels']),
   JSON.stringify(shortGroup.sites));
 
 check('S5 排序后的首个站点即代表站点（与收起胶囊一致）',

@@ -18,13 +18,13 @@ const deepEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // 站点顺序＝弹窗/共享页图标与设置页分组顺序（2026-09-11 用户定：Netflix 第二、RoyalRoad 末位；
 // 2026-09-12 用户定：AppleTV 紧随 Netflix 排第三）
 check('T1a CATEGORY_SOURCES 顺序与全集',
-  deepEq(SiteRegistry.CATEGORY_SOURCES, ['imdb', 'netflix', 'appletv', 'steam', 'mydrama', 'reelshort', 'dramashorts', 'netshort', 'royalroad']),
+  deepEq(SiteRegistry.CATEGORY_SOURCES, ['imdb', 'netflix', 'appletv', 'steam', 'mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'royalroad']),
   JSON.stringify(SiteRegistry.CATEGORY_SOURCES));
 check('T1b SOURCE_NAMES 字面量（含键序）',
-  deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', appletv: 'AppleTV', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', royalroad: 'RoyalRoad' }),
+  deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', appletv: 'AppleTV', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', flickreels: 'FlickReels', royalroad: 'RoyalRoad' }),
   JSON.stringify(SiteRegistry.SOURCE_NAMES));
 check('T1c hostBySource 字面量（含键序）',
-  deepEq(SiteRegistry.hostBySource, { imdb: 'imdb.com', netflix: 'netflix.com', appletv: 'tv.apple.com', steam: 'store.steampowered.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com', royalroad: 'royalroad.com' }),
+  deepEq(SiteRegistry.hostBySource, { imdb: 'imdb.com', netflix: 'netflix.com', appletv: 'tv.apple.com', steam: 'store.steampowered.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com', flickreels: 'flickreels.net', royalroad: 'royalroad.com' }),
   JSON.stringify(SiteRegistry.hostBySource));
 
 // settings.js 派生的订阅分组（label===tag、icon 按 site 命名）。
@@ -37,6 +37,7 @@ const expectedGroups = [
   { site: 'reelshort', label: 'ReelShort', tag: 'ReelShort', icon: 'assets/icons/site-reelshort.png' },
   { site: 'dramashorts', label: 'DramaShorts', tag: 'DramaShorts', icon: 'assets/icons/site-dramashorts.png' },
   { site: 'netshort', label: 'NetShort', tag: 'NetShort', icon: 'assets/icons/site-netshort.png' },
+  { site: 'flickreels', label: 'FlickReels', tag: 'FlickReels', icon: 'assets/icons/site-flickreels.png' },
   { site: 'imdb', label: 'IMDB', tag: 'IMDB', icon: 'assets/icons/site-imdb.png' },
   { site: 'netflix', label: 'Netflix', tag: 'Netflix', icon: 'assets/icons/site-netflix.png' },
   { site: 'appletv', label: 'AppleTV', tag: 'AppleTV', icon: 'assets/icons/site-appletv.png' },
@@ -54,6 +55,9 @@ const cases = [
   ['https://www.reelshort.com/', 'reelshort'],
   ['https://dramashorts.io/top-movies', 'dramashorts'],
   ['https://www.netshort.com/?list=trending_now', 'netshort'],
+  ['https://www.flickreels.net/?list=hot_picks', 'flickreels'],
+  ['https://flickreels.net/', 'flickreels'],              // 裸域（站点会 301 到 www，归属仍按 suffix 命中）
+  ['https://www.flickreels.net/tc/', 'flickreels'],       // 归属按 host，路径闸门在 adapter.matches
   ['https://www.netflix.com/tudum/top10/united-states/tv', 'netflix'],
   ['https://www.netflix.com/browse', 'netflix'],         // 站点归属仍按 host（注入范围由 path 另管）
   ['https://tv.apple.com/us/collection/most-popular-now/uts.col.ChartsShows.tvs.sbd.4000', 'appletv'],
@@ -140,11 +144,11 @@ check('T4h 共享页静态白名单含 site-tabs', serverSrc.includes("'/shared/
 // ---------- T6 manifest matches 推导：可选 path 字段限定注入路径 ----------
 // Netflix 只注入 /tudum/top10*；AppleTV 只注入两个榜单 collection 页所在路径，
 // 且 exact 语义下无 *. 前缀（不波及 apple.com 其它子域）。
-check('T6 contentScriptMatches 按站点顺序：host 通配七项 + Netflix/AppleTV 路径限定项',
+check('T6 contentScriptMatches 按站点顺序：host 通配八项 + Netflix/AppleTV 路径限定项',
   deepEq(SiteRegistry.contentScriptMatches(), [
     '*://*.imdb.com/*', '*://*.netflix.com/tudum/top10*', '*://tv.apple.com/us/collection/most-popular-now/*',
     '*://store.steampowered.com/*', '*://*.my-drama.com/*',
-    '*://*.reelshort.com/*', '*://*.dramashorts.io/*', '*://*.netshort.com/*', '*://*.royalroad.com/*'
+    '*://*.reelshort.com/*', '*://*.dramashorts.io/*', '*://*.netshort.com/*', '*://*.flickreels.net/*', '*://*.royalroad.com/*'
   ]),
   JSON.stringify(SiteRegistry.contentScriptMatches()));
 
