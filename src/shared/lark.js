@@ -121,6 +121,8 @@
    * - MyDrama：convert 端点去掉 width/height 尺寸参数（189×283 ~7KB → 原尺寸 ~64KB）。
    * - AppleTV：尾段尺寸码提到 1200×1800（v1.6.4；400×600 73KB → 393KB）。mzstatic
    *   按请求尺寸裁切，同为 2:3 故构图不变，22/22 条存量实测 200（2026-09-15）。
+   * - FlickReels：去掉 OSS 缩放参数 ?x-oss-process=image/resize,w_600,image/format,webp
+   *   （v1.6.5；600×780 webp ≈60KB → 1000×1300 jpg ≈400KB），参数本身含英文逗号。
    * 保持现状的站点（2026-09-15 复测，均已在各自上限）：Steam（460×215；同哈希目录下
    * capsule_616x353 / library_600x900 / library_hero / hero_capsule 逐个实测全 404，
    * 3 个 app 一致）、RoyalRoad（covers-large 400×600，已比 covers-full 大）、
@@ -156,6 +158,21 @@
         // 解析失败原样透传
       }
     }
+    if (/^https:\/\/[a-z0-9-]+\.farsunpteltd\.com\//i.test(raw)) {
+      // FlickReels：采集存站内卡片同款 OSS 缩放形态（?x-oss-process=image/resize,w_600,image/format,webp，
+      // 600×780 webp ≈60KB），参数里的英文逗号正是捷径解析不了的字符。只删这一个参数而非清空
+      // 查询串（CDN 日后加缓存参数不受波及），删空后 URL 序列化不带尾部 '?'；剥掉即原图
+      // 1000×1300 jpg ≈400KB（2026-09-16 实测 200），与 dramashorts 解包 _next/image 同理。
+      // 与 content.js 的 FLICKREELS_POSTER_SUFFIX 成对：采集侧加参数、推送侧去参数。
+      try {
+        const u = new URL(raw);
+        u.searchParams.delete('x-oss-process');
+        return u.toString();
+      } catch (e) {
+        // 解析失败原样透传
+      }
+      return raw;
+    }
     if (/^https:\/\/[a-z0-9-]+\.mzstatic\.com\/image\/thumb\//i.test(raw)) {
       // 尾段形如 `<w>x<h><裁切码>.<扩展名>`。**按形状匹配数字**、不写死 '400x600nr'：
       // 裁切码取自站点自己的 artwork.template（content.js 的 appleArtUrl 只替换
@@ -182,7 +199,8 @@
 
     return {
       // 全站点统一条目 ID（值＝内部去重字段 itemId，与 CSV 的 itemId 列一致）：IMDB=tt…、
-      // Steam=appId、RoyalRoad=rr…、MyDrama=md…、ReelShort=rs…、DramaShorts=ds…、NetShort=ns…
+      // Steam=appId、RoyalRoad=rr…、MyDrama=md…、ReelShort=rs…、DramaShorts=ds…、NetShort=ns…、
+      // Netflix=nf…、AppleTV=at…、FlickReels=fr…
       item_id: asText(d.itemId),
       title,
       title_zh: titleZh,

@@ -34,7 +34,10 @@ const POSTERS = {
   reelshort: 'https://www.reelshort.com/fandom/wp-content/uploads/2026/09/SU28371.jpg',
   netflix: 'https://dnm.nflximg.net/api/v6/E8vDc_W8CLv7-yMQu8KMEC7Rrr8/AAAABdCWuSdka3esimqrgO2mxNy9gs7n6dHQ.jpg?r=bc9',
   appletv: 'https://is1-ssl.mzstatic.com/image/thumb/i-QRI7ak7O755Nvdv11UnQ/400x600nr.jpg',
-  netshort: 'https://awscover.netshort.com/tos-vod-mya-v-da59d5a2040f5f77/coverG/prod/-2145583186.jpg~tplv-vod-rs:651:868.webp'
+  netshort: 'https://awscover.netshort.com/tos-vod-mya-v-da59d5a2040f5f77/coverG/prod/-2145583186.jpg~tplv-vod-rs:651:868.webp',
+  // FlickReels：采集存站内卡片同款 OSS 缩放形态（600×780 webp ≈60KB），原图 1000×1300 jpg ≈400KB
+  flickreels: 'https://zshipubcf.farsunpteltd.com/playlet/1782901183_eBpQFwxmRR.jpg?x-oss-process=image/resize,w_600,image/format,webp',
+  flickreelsRaw: 'https://zshipubcf.farsunpteltd.com/playlet/1782901183_eBpQFwxmRR.jpg'
 };
 
 // 捷径致死字符：英文逗号与百分号编码（2026-07-25 两轮对照实锤）
@@ -72,6 +75,19 @@ if (typeof pfp === 'function') {
   check('P9 空值/非法值安全', pfp('') === '' && pfp(null) === '' && pfp(undefined) === '', '');
   check('P10 IMDB/dramashorts 改写后均可转附件',
     convertible(pfp(POSTERS.imdb)) && convertible(pfp(POSTERS.dramashorts)), '');
+
+  /* —— v1.6.5：FlickReels 剥掉 OSS 缩放参数还原原图 ————————————————————
+   * 采集存站内卡片同款 ?x-oss-process=image/resize,w_600,image/format,webp（600×780 ≈60KB），
+   * 参数里的英文逗号正是捷径解析不了的字符；只删这一个参数（CDN 日后加缓存参数不受波及），
+   * 删空后序列化不带尾部 '?'，即 1000×1300 原图 ≈400KB（2026-09-16 实测 200）。
+   */
+  check('P20 flickreels 剥掉 x-oss-process 参数还原原图（无尾部 ?）',
+    pfp(POSTERS.flickreels) === POSTERS.flickreelsRaw, pfp(POSTERS.flickreels));
+  check('P21 flickreels 改写后可转附件', convertible(pfp(POSTERS.flickreels)), pfp(POSTERS.flickreels));
+  check('P22 flickreels 原图形态原样透传', pfp(POSTERS.flickreelsRaw) === POSTERS.flickreelsRaw, pfp(POSTERS.flickreelsRaw));
+  check('P23 flickreels 只删 x-oss-process、其它查询参数保留',
+    pfp(`${POSTERS.flickreelsRaw}?v=2&x-oss-process=image/resize,w_600`) === `${POSTERS.flickreelsRaw}?v=2`,
+    pfp(`${POSTERS.flickreelsRaw}?v=2&x-oss-process=image/resize,w_600`));
 
   /* —— v1.6.4：Apple TV 尺寸码提到 1200×1800 ————————————————————
    * 采集存 400×600（73KB），机器人卡满宽渲染偏软；mzstatic 按请求尺寸裁切，
