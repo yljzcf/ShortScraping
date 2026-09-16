@@ -104,6 +104,9 @@ const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.m
 const Registry = require('../src/shared/site-registry.js');
 assert.deepEqual(manifest.content_scripts[0].matches, Registry.contentScriptMatches());
 assert.ok(manifest.host_permissions.includes('https://*/*'));
+// dramas 单键已约 5MB（3617 条，月增约 2MB）：没有 unlimitedStorage 时 storage.local 的
+// 10MB 配额约 3 个月后撞墙，且写失败只会 console.warn。该权限无安装警告文案。
+assert.ok(manifest.permissions.includes('unlimitedStorage'));
 
 // A late preview response must not re-enable confirmation after the user changes criteria.
 {

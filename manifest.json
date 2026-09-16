@@ -8,7 +8,8 @@
     "alarms",
     "notifications",
     "tabs",
-    "scripting"
+    "scripting",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "https://*/*",

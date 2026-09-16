@@ -201,7 +201,7 @@ server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 
 ## 🔒 数据与隐私
 
-- 抓取数据保存在本机：`chrome.storage.local`（扩展内）与 `db/`（CSV/JSON，若启用同步服务）。启用局域网共享时，同网设备可以只读浏览。
+- 抓取数据保存在本机：`chrome.storage.local`（扩展内，已申请 `unlimitedStorage`，不受 10MB 配额限制——数千条记录约 5MB，按月增长）与 `db/`（CSV/JSON，若启用同步服务）。启用局域网共享时，同网设备可以只读浏览。
 - 站外请求包括抓取订阅站点、调用配置的翻译接口、检查更新，以及用户点击按钮时推送卡片至配置的飞书 webhook。
 - 四个本地配置（含翻译密钥和 webhook）均被 `.gitignore` 排除，不会随仓库分发。
 - 同步服务写接口仅接受回环连接，并且只认首次写入时固定下来的那个扩展（记录在 `config/sync-origin.json`，换目录重载扩展后删除该文件即可重新固定）；所有写请求都要求 `application/json`，本机管理脚本仍可调用。内容脚本仅注入支持的平台域名。
