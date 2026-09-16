@@ -331,6 +331,79 @@ check('S1 同批多条推送之间有节流间隔（≥240ms，即 ≤4 次/秒�
   botPostTimes.length === 3 && gaps.every(g => g >= 240),
   `times=${botPostTimes.length} gaps=${JSON.stringify(gaps)}`);
 
+// ---------- B 组：新站点首轮抓取只入库不推送（v1.6.6，2026-09-16 用户定） ----------
+// 刚接入的站点第一轮会一次抓进几十条（FlickReels 首轮 24 条），它们是存量底座不是新动态，
+// 全推进群里就是刷屏。开轮时库里零条的站点视为新站：本轮期间该站挂「进行中」一律不推
+// （翻译线在开轮 10s 后并行跑，首批卡可能在收轮前就翻完），收轮时把该站基线定在完成时刻，
+// 此后只推 scrapedAt 晚于基线的卡。全局水位线 enabledAt 与其它站点完全不受影响。
+const FR_SUB = 'https://www.flickreels.net/?list=hot_picks';
+const NS_SUB = 'https://netshort.com/?list=trending_now';
+const nowIso = () => new Date().toISOString();
+const mkSite = (id, source, sub, over = {}) => mk(id, { source, sourceListUrl: sub, scrapedAt: nowIso(), ...over });
+const baselineOf = site => rawStore.larkBotState?.siteBaseline?.[site];
+const frTrans = () => (rawStore.dramas || []).filter(d => d.source === 'flickreels' && d.status === 'trans').length;
+// 用抓取桩代替真开标签页：模拟内容脚本在本轮期间把卡片经 saveDrama 入库
+let fakeSaves = [];
+globalThis.scrapeUrlInTab = async () => {
+  for (const drama of fakeSaves) await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama });
+  return { success: true, data: fakeSaves };
+};
+
+await resetDramasCache(); await setupBot();
+rawStore.urlTags = [
+  { urlPattern: SUB, tags: ['T'] },
+  { urlPattern: FR_SUB, tags: ['FlickReels', 'HotPicks'] },
+  { urlPattern: NS_SUB, tags: ['NetShort', 'Trending'] }
+];
+// 库里已有 netshort、没有 flickreels → flickreels 是新站
+rawStore.dramas = [mk('ns-existing', { source: 'netshort', sourceListUrl: NS_SUB, status: 'trans', titleZh: '有', descriptionZh: '有', translatedAt: AFTER })];
+botPosts.length = 0;
+const runStart = nowIso();
+fakeSaves = [
+  { ...mkSite('fr-native', 'flickreels', FR_SUB), status: 'trans', titleZh: '首轮平台中文', descriptionZh: '中文简介', translatedAt: nowIso() },
+  mkSite('fr-new1', 'flickreels', FR_SUB),
+  mkSite('fr-new2', 'flickreels', FR_SUB)
+];
+await sleep(5);
+await performScrapeOnce({ site: 'flickreels' });   // eslint-disable-line no-undef
+await sleep(300);
+check('B1 新站首轮：本轮入库即 trans 的卡不推（进行中闸门）', botPosts.length === 0, `posts=${botPosts.length}`);
+const fb = baselineOf('flickreels');
+check('B2 收轮时该站基线定在完成时刻（ISO，不早于开轮）', typeof fb === 'string' && fb !== 'pending' && fb >= runStart, String(fb));
+check('B3 库里已有卡的站点不设基线', baselineOf('netshort') === undefined, JSON.stringify(rawStore.larkBotState));
+check('B3b 全局水位线不受影响', rawStore.larkBotState?.enabledAt === ENABLED_AT, String(rawStore.larkBotState?.enabledAt));
+
+botPosts.length = 0;
+await runTranslateRound();
+check('B4 首轮抓到的 new 卡翻译完成也不推（scrapedAt 不晚于基线），但正常翻完入库',
+  botPosts.length === 0 && frTrans() === 3, `posts=${botPosts.length} trans=${frTrans()}`);
+
+// 基线之后抓到的才是「有更新」：两个触发点都要照常推
+botPosts.length = 0;
+await sleep(5);
+const later = { ...mkSite('fr-later', 'flickreels', FR_SUB), status: 'trans', titleZh: '后续新卡', descriptionZh: '中文简介', translatedAt: nowIso() };
+await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: later });
+await sleep(300);
+check('B5 基线之后入库即 trans 的新卡照常推', botPosts.length === 1 && JSON.stringify(botPosts[0]).includes('后续新卡'), `posts=${botPosts.length}`);
+botPosts.length = 0;
+await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: mkSite('fr-later2', 'flickreels', FR_SUB) });
+await runTranslateRound();
+check('B6 基线之后的 new 卡翻译完成后照常推', botPosts.length === 1 && JSON.stringify(botPosts[0]).includes('中·T-fr-later2'), `posts=${botPosts.length}`);
+
+// 老站点的抓取完全不受影响
+botPosts.length = 0;
+fakeSaves = [{ ...mkSite('ns-native', 'netshort', NS_SUB), status: 'trans', titleZh: '老站新卡', descriptionZh: '中文简介', translatedAt: nowIso() }];
+await performScrapeOnce({ site: 'netshort' });   // eslint-disable-line no-undef
+await sleep(300);
+check('B7 老站点本轮入库即 trans 的卡照常推、不设基线', botPosts.length === 1 && baselineOf('netshort') === undefined,
+  `posts=${botPosts.length} baseline=${String(baselineOf('netshort'))}`);
+
+// SW 中途被回收会留下「进行中」：下一轮该站收轮时统一收口成时间戳，不能永远卡住该站
+rawStore.larkBotState = { ...rawStore.larkBotState, siteBaseline: { ...(rawStore.larkBotState?.siteBaseline || {}), flickreels: 'pending' } };
+fakeSaves = [];
+await performScrapeOnce({ site: 'flickreels' });   // eslint-disable-line no-undef
+check('B8 遗留的「进行中」在下一轮收轮时收口为时间戳', typeof baselineOf('flickreels') === 'string' && baselineOf('flickreels') !== 'pending', String(baselineOf('flickreels')));
+
 console.log = origLog; console.warn = origWarn; console.error = origError;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

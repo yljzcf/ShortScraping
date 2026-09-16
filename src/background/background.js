@@ -442,6 +442,16 @@ async function performScrapeOnce({ site = null } = {}) {
       return { urlCount: 0, totalNewCount: 0, results: [] };
     }
 
+    // 新站点首轮只入库不推送：开轮时库里零条的站点挂「进行中」，收轮时基线定在完成时刻。
+    // 经队列读表顺带把缓存预热给随后的入库写，不多付一次全表读
+    const sites = [...new Set(scrapeUrls.map(url => siteOfUrl(url)).filter(Boolean))];
+    try {
+      const populated = new Set((await enqueueDramaWrite('新站判定', getDramasInQueue)).map(d => d.source));
+      await markNewSiteBaselines(sites.filter(site => !populated.has(site)));
+    } catch (e) {
+      console.warn('[ShortScraping] 新站点基线标记失败（不影响抓取）:', e?.message || e);
+    }
+
     let totalNewCount = 0;
     const results = [];
 
@@ -461,6 +471,10 @@ async function performScrapeOnce({ site = null } = {}) {
         console.error(`[ShortScraping] 抓取 URL 失败: ${url}`, e);
       }
     }
+
+    // 收轮：新站首轮的机器人基线定在此刻，此后抓到的才算「有更新」
+    await finalizeSiteBaselines(sites).catch(e =>
+      console.warn('[ShortScraping] 新站点基线收口失败（下轮重试）:', e?.message || e));
 
     await chrome.storage.local.set({
       lastScrape: new Date().toISOString()
@@ -1513,6 +1527,44 @@ async function writeBotRetryQueue(queue) {
   else await chrome.alarms.clear(BOT_RETRY_ALARM_NAME);
 }
 
+/* —— 新站点首轮抓取只入库不推送（v1.6.6，2026-09-16 用户定） ————————————————
+ *
+ * 刚接入的站点第一轮会一次抓进几十条（FlickReels 首轮 24 条），它们是存量底座不是
+ * 「新动态」，全推进群里就是刷屏。做法：开轮时库里零条的站点视为新站，本轮期间该站基线
+ * 挂 'pending' 一律不推（翻译线在开轮 10s 后就并行跑，首批卡可能在收轮前翻完），收轮时
+ * 把基线定在完成时刻，此后只推 scrapedAt 晚于基线的卡。存 larkBotState.siteBaseline[site]，
+ * 与全局水位线 enabledAt 并列、互不影响——拨全局水位线会把其它站点那一刻之前还没翻完
+ * 的卡一并静音，且下次加新站还得再来一遍。SW 中途被回收会留下 'pending'：下一轮该站收轮时
+ * 统一收口为时间戳（那一轮的卡也随之不推，接受），不会永远卡住该站。
+ */
+async function markNewSiteBaselines(sites) {
+  if (!sites.length) return;
+  const state = await readBotState();
+  const siteBaseline = { ...(state.siteBaseline || {}) };
+  for (const site of sites) siteBaseline[site] = 'pending';
+  await chrome.storage.local.set({ larkBotState: { ...state, siteBaseline } });
+  console.log(`[ShortScraping] 新站点首轮抓取只入库不推送: ${sites.join(', ')}`);
+}
+
+async function finalizeSiteBaselines(sites) {
+  const state = await readBotState();
+  const current = state.siteBaseline || {};
+  const pending = sites.filter(site => current[site] === 'pending');
+  if (!pending.length) return;
+  const completedAt = new Date().toISOString();
+  const siteBaseline = { ...current };
+  for (const site of pending) siteBaseline[site] = completedAt;
+  await chrome.storage.local.set({ larkBotState: { ...state, siteBaseline } });
+  console.log(`[ShortScraping] 群机器人站点基线定在首轮抓取完成时刻 ${completedAt}: ${pending.join(', ')}`);
+}
+
+/** 该站首轮进行中，或卡片不晚于该站首轮完成时刻 → 不推。无基线的站点照常。 */
+function isBeforeSiteBaseline(drama, state) {
+  const baseline = state && state.siteBaseline ? state.siteBaseline[drama.source] : null;
+  if (!baseline) return false;
+  return baseline === 'pending' || !drama.scrapedAt || drama.scrapedAt <= baseline;
+}
+
 async function enqueueBotRetry(dramaId, attempts) {
   const state = await readBotState();
   const queue = (Array.isArray(state.retryQueue) ? state.retryQueue : [])
@@ -1576,6 +1628,8 @@ async function maybeBotPush(drama) {
     if (!enabledAt) return false;
     // 无 scrapedAt 的条目保守不推（判不出是存量还是新卡）
     if (!drama.scrapedAt || drama.scrapedAt < enabledAt) return false;
+    // 新站点首轮只入库不推送（见 markNewSiteBaselines）
+    if (isBeforeSiteBaseline(drama, await readBotState())) return false;
 
     try {
       await throttleBotPush();
