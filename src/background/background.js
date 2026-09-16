@@ -466,6 +466,14 @@ async function performScrapeOnce({ site = null } = {}) {
       lastScrape: new Date().toISOString()
     });
 
+    // 抓取刚结束队列缓存必热：按最新订阅强制过一遍订阅外清理（零 storage 读），关掉
+    // 「退订时抓取仍在飞、迟到的 saveDrama 把界外卡写回」的竞态——SW 唤醒的清理受
+    // 指纹闸门约束，不会再兜这一手。重读 urlTags 而非用开轮时的快照，退订正是发生在
+    // 这段时间里。失败只记日志，不影响本轮抓取结果。
+    const { urlTags: latestUrlTags = [] } = await chrome.storage.local.get('urlTags');
+    await pruneDramasOutsideConfiguredUrls(latestUrlTags, { force: true }).catch(e =>
+      console.warn('[ShortScraping] 抓取后订阅外清理失败:', e?.message || e));
+
     if (totalNewCount > 0) {
       showNotification(`发现 ${totalNewCount} 部新短剧！`);
     }
@@ -506,14 +514,37 @@ function filterDramasByConfiguredUrls(dramas, urlTags) {
   return (dramas || []).filter(drama => UrlMatch.isUrlCovered(drama.sourceListUrl, configuredSet));
 }
 
-function pruneDramasOutsideConfiguredUrls(urlTags) {
+/**
+ * 订阅 URL 集合指纹：尾斜杠归一 + 排序（与 filterDramasByConfiguredUrls 同口径），
+ * 持久化在 storage 的 pruneFingerprint 键。SW 每次唤醒都会跑一遍订阅外清理，没有
+ * 闸门时每次冷启动都把约 5MB 的 dramas 全表反序列化一遍（v1.6.5 审计）；集合没变
+ * 就跳过，读一个小键代替读全表。
+ */
+function configuredUrlFingerprint(urlTags) {
+  return [...UrlMatch.buildConfiguredUrlSet(getConfiguredScrapeUrls(urlTags))].sort().join('\n');
+}
+
+/**
+ * 清理订阅范围外的历史记录。默认受指纹闸门约束：集合与上次清理完成时相同即跳过、
+ * 零全表读（SW 唤醒与 storage.onChanged 两条路都走这里，顺带消灭了「set urlTags 触发
+ * onChanged + 显式调用」的双清理）。force 供抓取结束时调用——退订时抓取仍在飞、迟到的
+ * saveDrama 会把界外卡写回，而那一刻队列缓存必热，强制过一遍零 storage 读。
+ * 指纹只在本轮清理完成后落库；写入失败向上抛、指纹不更新，下轮照常重试。
+ */
+function pruneDramasOutsideConfiguredUrls(urlTags, { force = false } = {}) {
   return enqueueDramaWrite('清理非订阅来源', async () => {
+    const fingerprint = configuredUrlFingerprint(urlTags);
+    const { pruneFingerprint } = await chrome.storage.local.get('pruneFingerprint');
+    if (!force && pruneFingerprint === fingerprint) return;
+
     const dramas = await getDramasInQueue();
     const filtered = filterDramasByConfiguredUrls(dramas, urlTags);
 
     if (filtered.length !== dramas.length) {
-      await writeDramasInQueue(filtered);
+      await writeDramasInQueue(filtered, { pruneFingerprint: fingerprint });
       console.log(`[ShortScraping] 已清理 ${dramas.length - filtered.length} 条非订阅来源历史记录`);
+    } else if (pruneFingerprint !== fingerprint) {
+      await chrome.storage.local.set({ pruneFingerprint: fingerprint });
     }
   });
 }
