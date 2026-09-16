@@ -80,6 +80,14 @@
     "tags": ["NetShort", "Exclusive"]
   },
   {
+    "url": "https://www.flickreels.net/?list=hot_picks",
+    "tags": ["FlickReels", "HotPicks"]
+  },
+  {
+    "url": "https://www.flickreels.net/?list=7_day_star",
+    "tags": ["FlickReels", "7DayStar"]
+  },
+  {
     "url": "https://www.netflix.com/tudum/top10",
     "tags": ["Netflix", "Movie", "Global"]
   },
