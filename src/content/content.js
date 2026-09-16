@@ -416,6 +416,45 @@
   };
 
   /**
+   * FlickReels 适配器（www.flickreels.net，Nuxt 3 SSR，v1.6.5）：首页板块数据在
+   * script#__NUXT_DATA__（devalue「扁平」格式，见 unflattenNuxtPayload），SSR 直出、hydrate
+   * 后仍留在 DOM（2026-09-16 真机实测），document_end 直读解析，不依赖页面 window。
+   * 板块没有可订的稳定 id（column_config.id 是运营配置号），订阅 URL 用约定参数
+   * ?list=<板块标题归一化> 选板块（'🔥🔥🔥Hot Picks ' → hot_picks、'7-Day Star🥇🥈🥉' →
+   * 7_day_star；无参数默认 hot_picks；Nuxt 忽略未知 query，实测 200 且载荷一致）。
+   * 列表条目自带全文简介 introduce（与详情页逐字一致）与英文 tag_list，无需请求详情页、
+   * 无需后台代理。订阅 URL 必须带 www（裸域 301 到 www 后 location.href 与订阅串不等，
+   * findSubscriptionForUrl 会落空）。基础域恒英文（Accept-Language: zh-CN 不改输出，
+   * i18n detectBrowserLanguage=false 不按浏览器语言跳转；/tc/ 是另一套繁中片库，不是本片
+   * 的中文版），无平台中文，status 走 new 交给 AI 翻译。
+   */
+  const flickreelsAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        return u.hostname.endsWith('flickreels.net') && u.pathname === '/';
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return getFlickreelsItems();
+    },
+    extractId(item) {
+      // playlet_id 是播放页 URL 所用的规范数字 id（当前 4~5 位，不限位数），加 fr 前缀与全局去重键约定一致
+      const id = item && item.playlet_id != null ? String(item.playlet_id) : '';
+      return /^\d+$/.test(id) ? `fr${id}` : null;
+    },
+    extractBasic(item, tags, id, index) {
+      return extractFlickreelsFromItem(item, index, tags, id);
+    },
+    async fetchDetail(drama) {
+      // 列表 introduce 即简介全文（与详情页 chapters-list 数据逐字一致），无需二次请求
+      return drama;
+    }
+  };
+
+  /**
    * Netflix Tudum Top 10 适配器（www.netflix.com/tudum/top10 及其子榜单页，v1.5.8）：
    * 榜单数据 SSR 直出在内联脚本 `netflix.reactContext.models.graphql = JSON.parse('…')`
    * （Apollo 归一化缓存），DOM 上标题是 logo 图、无 /title/ 链接、无简介，页面全局
@@ -500,7 +539,7 @@
   };
 
   // 站点适配器注册表。
-  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
+  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, flickreels: flickreelsAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
 
   /**
    * 添加抓取按钮
@@ -1630,8 +1669,7 @@
     }
     const list = new URLSearchParams(window.location.search).get('list') || '';
     const wanted = /^[a-z0-9_-]+$/.test(list) ? list : 'trending_now';
-    const normalize = name => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-    const group = groups.find(g => g && normalize(g.groupName) === wanted);
+    const group = groups.find(g => g && normalizeSectionName(g.groupName) === wanted);
     if (!group || !Array.isArray(group.data)) {
       console.log(`[ShortScraping] NetShort 首页板块未找到: ${wanted}`);
       return [];
@@ -1663,6 +1701,208 @@
       sourceListUrl: window.location.href,
       status: 'new',
       url: `https://netshort.com${path}`,
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
+  }
+
+  /**
+   * 板块标题归一化（NetShort / FlickReels 共用；抽自 getNetshortItems 的内联 normalize，语义
+   * 不变）：小写、非字母数字连续段折成 '_'、去首尾 '_'。emoji 是多码元也整段折掉：
+   * '🔥🔥🔥Hot Picks ' → hot_picks、'7-Day Star🥇🥈🥉' → 7_day_star。
+   */
+  function normalizeSectionName(name) {
+    return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  }
+
+  /**
+   * 读取 Nuxt 3 的 SSR 载荷（script#__NUXT_DATA__，JSON 数组＝devalue 扁平格式）并还原成普通
+   * 对象。元素带 data-src 时 Nuxt 改从外部 _payload.json 取数、内联为空（预渲染 / payload
+   * extraction 场景）——FlickReels 当前内联（data-ssr="true"），遇到该形态只打日志返回 null，
+   * 不猜路径去 fetch。解析失败返回 null。
+   */
+  function readNuxtData(doc = document) {
+    try {
+      const script = doc.querySelector('script#__NUXT_DATA__');
+      if (!script) return null;
+      const text = script.textContent || '';
+      if (!text.trim()) {
+        const external = typeof script.getAttribute === 'function' ? script.getAttribute('data-src') : null;
+        console.log(`[ShortScraping] __NUXT_DATA__ 为空${external ? `（载荷外置 data-src=${external}）` : ''}`);
+        return null;
+      }
+      const values = JSON.parse(text);
+      return Array.isArray(values) && values.length ? unflattenNuxtPayload(values) : null;
+    } catch (e) {
+      console.warn('[ShortScraping] __NUXT_DATA__ 解析失败:', e.message);
+      return null;
+    }
+  }
+
+  /**
+   * devalue「扁平」载荷还原（Nuxt 3 __NUXT_DATA__ 用它序列化）。values 是一维数组：
+   * values[0] 为根；对象值 / 数组元素里的数字都是指向 values 的**下标**而非字面量（字面量
+   * 数字自己占一格，同值原始类型共用一格——如重复出现的标签名）；负数是哨兵（取自 devalue
+   * src/constants.js，勿凭印象改序）：-1 undefined、-2 数组空洞、-3 NaN、-4 Infinity、
+   * -5 -Infinity、-6 -0；-7 开头是稀疏数组 [-7, 长度, 下标, 值下标, …]。扁平的普通数组元素
+   * 恒为数字，因此**首元素是字符串即特殊形态**：Nuxt 响应式包装 ShallowReactive / Reactive /
+   * Ref / ShallowRef（一律拆包取内层——抓取只要数据形状不要响应式）、EmptyRef / EmptyShallowRef
+   * （内层下标指向字符串：'_'＝undefined、'0n'、或 JSON 文本）、devalue 内建 Date（ISO 内联）/
+   * Set / Map / null（无原型对象，键内联）/ Object（装箱原始值，字面量内联）/ RegExp / BigInt。
+   * 未知类型原样返回不抛错——站点框架升级带来新形态时宁可局部丢数据，不能让整页抓取归零。
+   * 带 memo：同一下标只还原一次，且容器先登记再递归，共享引用 / 自引用不会无限递归。
+   */
+  function unflattenNuxtPayload(values) {
+    const UNWRAP = new Set(['ShallowReactive', 'Reactive', 'Ref', 'ShallowRef']);
+    const memo = new Map();
+    const hydrate = (index) => {
+      if (typeof index !== 'number') return undefined;
+      if (index < 0) {
+        if (index === -3) return NaN;
+        if (index === -4) return Infinity;
+        if (index === -5) return -Infinity;
+        if (index === -6) return -0;
+        return undefined;                       // -1 undefined；-2 空洞由数组分支处理；未知哨兵按缺失
+      }
+      if (memo.has(index)) return memo.get(index);
+      const value = values[index];
+      if (value === null || typeof value !== 'object') {   // 叶子字面量（越界为 undefined）
+        memo.set(index, value);
+        return value;
+      }
+      if (!Array.isArray(value)) {
+        const obj = {};
+        memo.set(index, obj);
+        for (const key of Object.keys(value)) obj[key] = hydrate(value[key]);
+        return obj;
+      }
+      if (value[0] === -7) {                    // 稀疏数组
+        const arr = [];
+        memo.set(index, arr);
+        for (let i = 2; i + 1 < value.length; i += 2) arr[value[i]] = hydrate(value[i + 1]);
+        return arr;
+      }
+      if (typeof value[0] !== 'string') {       // 普通数组
+        const arr = [];
+        memo.set(index, arr);
+        for (const ref of value) arr.push(ref === -2 ? undefined : hydrate(ref));
+        return arr;
+      }
+      const type = value[0];
+      let out = value;                          // 默认：未知形态原样返回
+      try {
+        if (UNWRAP.has(type)) out = hydrate(value[1]);
+        else if (type === 'EmptyRef' || type === 'EmptyShallowRef') {
+          const text = hydrate(value[1]);
+          out = typeof text === 'string' && text !== '_' && text !== '0n' ? JSON.parse(text) : undefined;
+        } else if (type === 'Date') out = new Date(value[1]);
+        else if (type === 'Set') out = new Set(value.slice(1).map(hydrate));
+        else if (type === 'Map') {
+          out = new Map();
+          for (let i = 1; i + 1 < value.length; i += 2) out.set(hydrate(value[i]), hydrate(value[i + 1]));
+        } else if (type === 'null') {
+          out = Object.create(null);
+          for (let i = 1; i + 1 < value.length; i += 2) out[value[i]] = hydrate(value[i + 1]);
+        } else if (type === 'Object') out = value[1];
+        else if (type === 'RegExp') out = new RegExp(value[1], value[2]);
+        else if (type === 'BigInt') out = BigInt(value[1]);
+      } catch (e) {
+        out = value;
+      }
+      memo.set(index, out);
+      return out;
+    };
+    return hydrate(0);
+  }
+
+  /**
+   * FlickReels 首页板块数据。板块数组按**形状**定位——元素带 column_config + playlet_list——
+   * 而不写死 useAsyncData 的键名 'home-playletList'（键名是站点代码里的变量名，改版首当其冲）。
+   * 板块按标题归一化后与 ?list= 比对，无参数或非法值默认 hot_picks。
+   * is_playlet_trailer 的条目是「未上线预告」（站内点击只弹 "Not released yet"、没有播放页），
+   * 这里直接滤掉（2026-09-16 用户定）——上线后该位翻成 false，下轮抓取自然入库，不留残卡。
+   * 定位失败返回空数组（scrapePage 安全跳过）。
+   */
+  function getFlickreelsItems() {
+    const root = readNuxtData();
+    const data = root && root.data && typeof root.data === 'object' ? root.data : null;
+    if (!data) {
+      console.log('[ShortScraping] FlickReels __NUXT_DATA__ 数据未找到');
+      return [];
+    }
+    const isSection = s => !!(s && typeof s === 'object' && s.column_config && Array.isArray(s.playlet_list));
+    const sections = Object.values(data).find(v => Array.isArray(v) && v.some(isSection));
+    if (!sections) {
+      console.log('[ShortScraping] FlickReels 首页板块数据未找到');
+      return [];
+    }
+    const list = new URLSearchParams(window.location.search).get('list') || '';
+    const wanted = /^[a-z0-9_-]+$/.test(list) ? list : 'hot_picks';
+    const section = sections.find(s => isSection(s) && normalizeSectionName(s.column_config.title) === wanted);
+    if (!section) {
+      console.log(`[ShortScraping] FlickReels 首页板块未找到: ${wanted}`);
+      return [];
+    }
+    const items = section.playlet_list.filter(p => p && typeof p === 'object');
+    const released = items.filter(p => p.is_playlet_trailer !== true);
+    if (released.length !== items.length) {
+      console.log(`[ShortScraping] FlickReels 跳过 ${items.length - released.length} 条未上线预告`);
+    }
+    return released;
+  }
+
+  /**
+   * FlickReels 播放页 slug——逐字照搬站点打包代码里各卡片组件共用的 slug 函数（导出名 D，
+   * 2026-09-16 从 bundle 抽出并以 15/15 条真实 URL 验证 200）。**不能复用 slugifyTitle**：
+   * ReelShort / NetShort 只认结尾 id、错 slug 会 301 到规范地址，而 FlickReels 服务端校验 slug，
+   * 错一字即 404、无 slug 也 404。规则：/ & 空白与各式括号（含全角）变 '-'；其余非字母数字
+   * （\p{L}\p{N}，'Fiancée' 的 é 保留、入库时由 URL 构造器百分号编码）直接删不留 '-'——
+   * 'Tame Me,My Lord' → 'tame-memy-lord'、'Bride Swap：The Marquis' Reborn Bride' →
+   * 'bride-swapthe-marquis-reborn-bride'。返回空串表示造不出合法 URL，调用方跳过该条。
+   */
+  function flickreelsSlug(title) {
+    return String(title || '').toLowerCase()
+      .replace(/[/&\s()（）[\]{}]+/g, '-')
+      .replace(/[^\p{L}\p{N}-]+/gu, '')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  // 站内卡片同款 OSS 缩放参数（600×780 webp ≈60KB；原图 1000×1300 jpg ≈400KB）。参数含英文逗号，
+  // Lark「链接转附件」解析不了——推送侧 lark.js posterForPayload 剥掉该参数还原原图，两处成对改
+  const FLICKREELS_POSTER_SUFFIX = '?x-oss-process=image/resize,w_600,image/format,webp';
+
+  /**
+   * 从板块条目提取基础信息。introduce 即简介全文；genres 取 tag_list[].name（英文；同对象里的
+   * category 是站点内部中文分类，不采）；upload_num 集数无对应字段不存。播放页
+   * /playlist/<slug>/<playlet_id>/<episode-1|full-movie>：has_collection 为 true 的是合集
+   * （整片一集）用 full-movie，其余第一集 episode-1；经 new URL(path, origin).href 把 slug 里
+   * 的非 ASCII 字母百分号编码（fianc%C3%A9e，实测 200）。标题空 / 全符号造不出 slug → 站点必
+   * 404，返回 null 跳过（scrapePage 对 extractBasic 为 null 静默 continue），下轮标题正常即入库。
+   */
+  function extractFlickreelsFromItem(item, index, tags, frId) {
+    const title = String(item.title || '').trim();
+    const slug = flickreelsSlug(title);
+    if (!slug) {
+      console.warn(`[ShortScraping] FlickReels 第 ${index + 1} 项标题无法构造 slug（${frId}），跳过`);
+      return null;
+    }
+    const cover = String(item.cover || '').trim();
+    const tail = item.has_collection === true ? 'full-movie' : 'episode-1';
+    return {
+      id: `flickreels_${frId}_${index}`,
+      itemId: frId,
+      title,
+      titleZh: '',
+      poster: cover ? cover + (cover.includes('?') ? '' : FLICKREELS_POSTER_SUFFIX) : '',
+      tags,
+      genres: cleanGenres((Array.isArray(item.tag_list) ? item.tag_list : []).map(t => t && t.name)),
+      description: String(item.introduce || '').trim(),
+      descriptionZh: '',
+      source: 'flickreels',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      url: new URL(`/playlist/${slug}/${frId.slice(2)}/${tail}`, 'https://www.flickreels.net').href,
       scrapedAt: new Date().toISOString(),
       translatedAt: null
     };
