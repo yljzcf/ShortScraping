@@ -1,6 +1,6 @@
 # ShortScraping - 爆款短剧监控助手
 
-Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRoad、My Drama、ReelShort、DramaShorts、NetShort、Netflix、Apple TV 九个平台的榜单/板块，新条目以时间线卡片展示，自动翻译为中文，并可经本地服务同步为 CSV、在局域网内只读共享。
+Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRoad、My Drama、ReelShort、DramaShorts、NetShort、FlickReels、Netflix、Apple TV 十个平台的榜单/板块，新条目以时间线卡片展示，自动翻译为中文，并可经本地服务同步为 CSV、在局域网内只读共享。
 
 适合谁：追踪海外短剧/游戏/网文热榜动向的编辑、制片、市场与数据同学——打开弹窗就能看到"最近各平台新上了什么"，无需逐站巡逻。
 
@@ -10,7 +10,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 - 📅 **时间线卡片**：新条目按抓取时间倒序分组展示（同日一组、±1 分钟合并），卡片含封面、标题、简介、来源标签与站点原生内容类型标签（如 Romance / Billionaire，英文原值；悬停查看全量，v1.5.3）
 - 🌐 **翻译线**：卡片先以英文即时入库，随后按 `config/trans.json` 自动翻译为中文；平台自带官方中文的条目（Steam 中文详情、My Drama 本地化标题）直接采用、不再消耗翻译
 - 🔁 **抓取节奏**：全量抓取由定时任务（cron 或固定间隔）执行；弹窗内再点一次已激活的站点图标可手动刷新该站点，完成后提示"本次新增 N 条"；全局按去重键防重复入库
-- 💾 **CSV 同步**：本地同步服务把时间线实时写入 `db/timeline.csv`（UTF-8 BOM + CRLF，Excel/WPS 直接打开；v1.5.3 起含 `genres` 内容类型标签列，多值以 `|` 分隔）
+- 💾 **CSV 同步**：本地同步服务把时间线实时写入 `db/timeline.csv`（UTF-8 BOM + CRLF，Excel/WPS 直接打开；v1.5.3 起含 `genres` 内容类型标签列，`tags`/`genres` 多值以英文逗号分隔——v1.5.13 起，与 Lark 推送约定一致）
 - 📡 **局域网共享**：同一局域网的手机/平板/电脑打开 `http://<本机IP>:31919/` 即可只读浏览时间线，数据更新经 SSE 自动刷新；链接显示在弹窗底栏（点击复制 + 二维码）
 - 🔔 **版本自检**：弹窗对比远端仓库 master 的 `manifest.json`，有新版本以橙色提示
 
@@ -18,13 +18,14 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 
 | 站点 | 订阅入口 | 取数方式 | 去重键 |
 |------|----------|----------|--------|
-| IMDB | 榜单/搜索页（`/search/title`、`/find`） | 列表 DOM + 详情页补简介/出品公司 | `tt` 编号 |
+| IMDB | 榜单/搜索页（`/search/title`、`/find`） | 列表 DOM + 详情页补简介与类型标签 | `tt` 编号 |
 | Steam | 内容中心 `/category/<name>`、`/tags/<语言>/<标签名>` | 官方动态查询接口取列表 + `appdetails` 补英文详情 | appId |
-| RoyalRoad | 榜单页 `/fictions/*` | 服务端渲染列表自带全文简介，详情页补作者 | `rr`+数字 id |
+| RoyalRoad | 榜单页 `/fictions/*` | 服务端渲染列表自带全文简介与标签，详情页只核对完整简介 | `rr`+数字 id |
 | My Drama | 主站首页板块（`?list=<板块锚点>`）与 fandom 子域文章流/Trending 菜单 | Next.js SSR + hydrate 轮询 / WordPress SSR | `md`+UUID |
 | ReelShort | 主站首页 TOP 板块与 `/fandom/` 文章流 | 页内 `__NEXT_DATA__` SSR 数据直出 / WordPress SSR | `rs`+book_id |
 | DramaShorts | `/top-movies` 榜单与首页板块（`?list=<板块id>`） | 页内 `__NEXT_DATA__` 直出，无需请求详情页 | `ds`+UUID |
 | NetShort | 首页板块（`?list=<板块名>`，如 `trending_now` / `exclusive_originals`） | 页内 RSC flight 数据直出，无需请求详情页 | `ns`+shortPlayId |
+| FlickReels | 首页板块（`?list=<板块名>`，如 `hot_picks` / `7_day_star`；订阅须写 `https://www.flickreels.net/?list=…` 带 www） | 页内 Nuxt `__NUXT_DATA__`（devalue 扁平格式）SSR 直出，无需请求详情页 | `fr`+playlet_id |
 | Netflix | Tudum Top 10 六个榜单页：`/tudum/top10`、`/tv`、`/films-non-english`、`/tv-non-english`、`/united-states`、`/united-states/tv` | 页内 `netflix.reactContext` 内联脚本 SSR 榜单数据直出；类型标签经后台代理取作品 `/title/` 页 | `nf`+videoId |
 | Apple TV | Top 10 TV Shows 与 Top 10 Movies 两个榜单页（`/us/collection/most-popular-now/uts.col.Charts{Shows,Movies}.tvs.sbd.4000`） | 页内 `serialized-server-data` JSON SSR 直出榜单；简介与类型标签经后台代理取作品详情页 | `at`+`umc.cmc.` 编号 |
 
@@ -35,6 +36,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 - **DramaShorts**：首页板块 id 支持 `top_trending`（默认）/ `popular_now` / `audience_favorite`；板块内容每次请求轮换属站点自身行为，多轮定时抓取会逐步累积。规则目录当前未内置 `audience_favorite`（该板块为大池随机采样、单次重合度低），需要时可手动写入 `config/tag.json`。
 - **Apple TV**：榜单即 Apple TV+ 自家的 Top 10，两条订阅分别对应剧集榜与电影榜（标签 `Apple, TV, US` / `Apple, Movie, US`）。榜单页本身不含简介，简介与内容类型标签由后台无 cookie 代理取作品详情页补齐，与你的 Apple TV+ 登录状态无关；某条详情取不到时该作品本轮不入库，下轮榜单复现时自动重来（避免留下永远补不上简介的卡）。内容脚本只注入这两个榜单页，不进 Apple TV 的播放/浏览页。**若抓取成片失败**：先检查本机代理/VPN 是否把 tv.apple.com 的 HTTP/3(QUIC) 流量分流到了非 Apple 边缘节点——那条路会一律返回 404，关闭 QUIC 或调整分流规则即可。
 - **Netflix**：内容脚本只注入 `/tudum/top10*` 栏目页，不进 Netflix 播放/浏览页；同一作品同时上全球榜与美国榜时按作品全局去重、先到先得（订阅顺序全球榜在前，美国榜实际记录「上美国榜但未上全球榜」的作品）；标签约定 `Global`（英语榜）/ `Global-nE`（非英语榜）/ `US`；每周名次与观看量不入库，只记录首次进榜时间。内容类型标签取自作品 `/title/` 页 Netflix 自身分类（如 Thrillers / Dramas / Comedies，英文原值），由后台无 cookie 代理抓取，与你的 Netflix 登录状态无关；单次抓取失败的作品会在下轮榜单复现时自动补上。
+- **FlickReels**：首页板块按标题归一化订阅（`Hot Picks` → `hot_picks`、`7-Day Star` → `7_day_star`，无参数默认 `hot_picks`），站点改板块文案时调整订阅 `?list=` 值即可；订阅 URL 必须带 `www.`（裸域会 301 到 www，跳转后与订阅串不等就不会入库）；列表数据自带全文简介与英文标签，无需请求详情页；播放页链接的 slug 由站点服务端校验、错一字即 404，扩展逐字复刻了站点的 slug 算法；「未上线预告」条目（站内只提示 Not released yet）本轮跳过，上线后下轮自动入库；`/tc/` 是另一套繁中片库而非同片中文版，标题一律走 AI 翻译。
 
 ## 📦 安装与快速上手
 
@@ -182,7 +184,7 @@ server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 
 ## 📡 局域网共享
 
-同步服务运行时同时提供**只读**时间线页面：局域网设备打开 `http://<本机IP>:31919/`，看到与弹窗一致的时间线（六站点切换、日期分组、同款卡片），新数据经 SSE 推送自动刷新。
+同步服务运行时同时提供**只读**时间线页面：局域网设备打开 `http://<本机IP>:31919/`，看到与弹窗一致的时间线（按分组折叠的全部站点切换、日期分组、同款卡片），新数据经 SSE 推送自动刷新。
 
 - **链接位置**：弹窗底栏 `📡 <IP>:31919`，点击复制；`▦` 弹出二维码供手机扫码
 - **防火墙**：首次启动时若系统询问是否允许 Node 联网（Windows 为 `node.exe`），请允许**专用网络**，否则局域网设备无法访问
@@ -217,7 +219,7 @@ ShortScraping/
 ├── README.md / LICENSE / .gitignore / .gitattributes
 ├── src/
 │   ├── background/background.js  # 后台 service worker：调度、抓取/翻译编排、CSV 推送
-│   ├── content/                  # 内容脚本：八站点抓取适配器（content.js + content.css）
+│   ├── content/                  # 内容脚本：十站点抓取适配器（content.js + content.css）
 │   ├── popup/                    # 扩展弹窗（popup.html/css/js）
 │   ├── settings/                 # 设置中心：配置文件/网页订阅/定时任务/翻译接口/Lark 推送/数据存档
 │   └── shared/                   # 共享模块：translator.js（翻译）、timeline-render.js（时间线渲染，弹窗与共享页共用）、qrcode.js（二维码）
@@ -240,7 +242,7 @@ ShortScraping/
 
 ## 验证与升级
 
-使用 Node.js 22 或更新版本运行 `npm test`（当前 24 套），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+使用 Node.js 22 或更新版本运行 `npm test`（当前 35 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
 
 更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本域名清单，测试会检查两者一致。
 
