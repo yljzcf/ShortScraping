@@ -19,6 +19,7 @@ const net = require('net');
 const path = require('path');
 const os = require('os');
 const UrlMatch = require('../src/shared/url-match.js');
+const SubscriptionConfig = require('../src/shared/subscription-config.js');
 const Lark = require('../src/shared/lark.js');
 const TimelineCsv = require('../src/shared/timeline-csv.js');
 const ScheduleConfig = require('../src/shared/schedule-config.js');
@@ -80,24 +81,10 @@ function writeTimelineCsv(dramas) {
   return count;
 }
 
+// 订阅规范化单一真源在 src/shared/subscription-config.js（v1.6.5 收敛，与扩展端同一份语义）；
+// 这里只做文件形态投影 { url, tags }
 function normalizeTagConfig(rawTags) {
-  if (!Array.isArray(rawTags)) return [];
-
-  const seen = new Set();
-  return rawTags
-    .map(item => (item && typeof item === 'object' && !Array.isArray(item) ? item : {}))
-    .map(item => ({
-      url: String(item.url || item.urlPattern || '').trim(),
-      tags: Array.isArray(item.tags)
-        ? item.tags.map(tag => String(tag).trim()).filter(Boolean).slice(0, 3)
-        : []
-    }))
-    .filter(item => /^https?:\/\//i.test(item.url) && item.tags.length > 0)
-    .filter(item => {
-      if (seen.has(item.url)) return false;
-      seen.add(item.url);
-      return true;
-    });
+  return SubscriptionConfig.toTagFileEntries(rawTags);
 }
 
 /** 写入前的强校验：设置页只会发合法条目，坏数据一律拒绝落盘（绝不静默收窄）。 */

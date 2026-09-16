@@ -4,6 +4,7 @@
  */
 
 importScripts('../shared/url-match.js');
+importScripts('../shared/subscription-config.js'); // 订阅规范化单一真源（与设置页/同步服务共用）
 importScripts('../shared/site-registry.js'); // 须先于 lark.js（其 SOURCE_NAMES 取自本模块）
 importScripts('../shared/timeline-csv.js');
 importScripts('../shared/schedule-config.js'); // cron 解析/校验/默认值单一真源
@@ -250,15 +251,13 @@ async function fetchJsonFile(fileName, fallback) {
   }
 }
 
+/**
+ * 订阅规范化单一真源在 src/shared/subscription-config.js（v1.6.5 收敛）：此前这里
+ * 不 trim 标签、不校 http、不去重，与设置页保存路径语义漂移——同一份 tag.json 经 SW
+ * 启动加载与经设置页保存会得到两种标签。本地名保留为一行委托（同 siteOfUrl 先例）。
+ */
 function normalizeUrlTags(rawTags) {
-  if (!Array.isArray(rawTags)) return [];
-
-  return rawTags
-    .map(item => ({
-      urlPattern: item.urlPattern || item.url,
-      tags: Array.isArray(item.tags) ? item.tags.slice(0, 3) : []
-    }))
-    .filter(item => item.urlPattern && item.tags.length > 0);
+  return SubscriptionConfig.normalizeUrlTags(rawTags);
 }
 
 /**

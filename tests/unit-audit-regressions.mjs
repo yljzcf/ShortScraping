@@ -114,6 +114,7 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
   let resolvePreview;
   const context = vm.createContext({
     SiteRegistry: Registry, TranslateConfig: Config, ScheduleConfig: { DEFAULT_CONFIG: {} }, Lark: { DEFAULT_CONFIG: {} },
+    SubscriptionConfig: require('../src/shared/subscription-config.js'),
     document: { addEventListener() {} }, chrome: { runtime: { sendMessage: () => new Promise(resolve => { resolvePreview = resolve; }) } }
   });
   let script = fs.readFileSync(new URL('../src/settings/settings.js', import.meta.url), 'utf8');
@@ -162,6 +163,7 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
   const settingsFixture = (deps) => {
     const context = vm.createContext({
       SiteRegistry: Registry, TranslateConfig: Config, ScheduleConfig: { DEFAULT_CONFIG: {} }, Lark: { DEFAULT_CONFIG: {} },
+    SubscriptionConfig: require('../src/shared/subscription-config.js'),
       document: { addEventListener() {} }, window: { confirm: () => true },
       chrome: { storage: { local: { set: deps.set } }, runtime: { sendMessage: async () => ({ success: true }) } },
       fetch: deps.fetch

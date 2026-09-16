@@ -1420,37 +1420,13 @@
     archiveInfo.textContent = '正在检测本地同步服务...';
   }
 
+  // 订阅规范化单一真源在 src/shared/subscription-config.js（v1.6.5 收敛，三端共用）
   function normalizeUrlTags(rawTags) {
-    if (!Array.isArray(rawTags)) return [];
-
-    const seen = new Set();
-    return rawTags
-      .map(item => ({
-        urlPattern: String(item.urlPattern || item.url || '').trim(),
-        tags: parseTags(Array.isArray(item.tags) ? item.tags.join(',') : item.tags)
-      }))
-      .filter(item => item.urlPattern && /^https?:\/\//i.test(item.urlPattern) && item.tags.length > 0)
-      .filter(item => {
-        if (seen.has(item.urlPattern)) return false;
-        seen.add(item.urlPattern);
-        return true;
-      });
+    return SubscriptionConfig.normalizeUrlTags(rawTags);
   }
 
   function normalizeTranslateConfig(rawConfig) {
     return TranslateConfig.normalizeConfig(rawConfig);
-  }
-
-  function parseTags(value) {
-    if (Array.isArray(value)) {
-      return value.map(tag => String(tag).trim()).filter(Boolean).slice(0, 3);
-    }
-
-    return String(value || '')
-      .split(/[,，]/)
-      .map(tag => tag.trim())
-      .filter(Boolean)
-      .slice(0, 3);
   }
 
   function toPositiveNumber(value, fallback) {

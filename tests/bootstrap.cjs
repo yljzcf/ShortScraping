@@ -1,5 +1,6 @@
-// Existing browser unit fixtures stub importScripts; preload its new shared dependency.
+// Existing browser unit fixtures stub importScripts; preload its new shared dependencies.
 require('../src/shared/translate-config.js');
+require('../src/shared/subscription-config.js');
 
 // Recursive cleanup must stay inside a directory created by this test process.
 const fs = require('node:fs');
