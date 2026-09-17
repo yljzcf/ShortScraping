@@ -331,78 +331,163 @@ check('S1 同批多条推送之间有节流间隔（≥240ms，即 ≤4 次/秒�
   botPostTimes.length === 3 && gaps.every(g => g >= 240),
   `times=${botPostTimes.length} gaps=${JSON.stringify(gaps)}`);
 
-// ---------- B 组：新站点首轮抓取只入库不推送（v1.6.6，2026-09-16 用户定） ----------
-// 刚接入的站点第一轮会一次抓进几十条（FlickReels 首轮 24 条），它们是存量底座不是新动态，
-// 全推进群里就是刷屏。开轮时库里零条的站点视为新站：本轮期间该站挂「进行中」一律不推
-// （翻译线在开轮 10s 后并行跑，首批卡可能在收轮前就翻完），收轮时把该站基线定在完成时刻，
-// 此后只推 scrapedAt 晚于基线的卡。全局水位线 enabledAt 与其它站点完全不受影响。
+/// ---------- B 组：订阅 URL 首轮抓取只入库不推送（v1.6.7，2026-09-17 用户定；取代 v1.6.6 站点级规则） ----------
+// 刚订阅的 URL 第一轮会一次抓进几十条（FlickReels 首轮 24 条、IMDB 新加 9 条出品公司筛选约 300 条），是存量底座
+// 不是新动态，全推即刷屏。粒度是订阅 URL 而非站点——IMDB 库里已有 482 条，按站点永远判不出「新」；新站点只是
+// 「该站所有 URL 都零条」的特例。开轮时库里零条的订阅 URL 挂「进行中」一律不推（翻译线在开轮 10s 后并行跑，
+// 首批卡可能在收轮前就翻完），收轮时基线定在完成时刻，此后只推 scrapedAt 晚于基线的卡。
+// 全局水位线 enabledAt 与其它订阅 URL 完全不受影响。
+const IMDB_A = 'https://www.imdb.com/search/title/?release_date=2026-01-01,&genres=Drama';        // 老订阅，库里有卡
+const IMDB_B = 'https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1116954'; // 新加的出品公司筛选
 const FR_SUB = 'https://www.flickreels.net/?list=hot_picks';
 const NS_SUB = 'https://netshort.com/?list=trending_now';
 const nowIso = () => new Date().toISOString();
-const mkSite = (id, source, sub, over = {}) => mk(id, { source, sourceListUrl: sub, scrapedAt: nowIso(), ...over });
-const baselineOf = site => rawStore.larkBotState?.siteBaseline?.[site];
-const frTrans = () => (rawStore.dramas || []).filter(d => d.source === 'flickreels' && d.status === 'trans').length;
-// 用抓取桩代替真开标签页：模拟内容脚本在本轮期间把卡片经 saveDrama 入库
-let fakeSaves = [];
-globalThis.scrapeUrlInTab = async () => {
-  for (const drama of fakeSaves) await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama });
-  return { success: true, data: fakeSaves };
+const mkSub = (id, source, sub, over = {}) => mk(id, { source, sourceListUrl: sub, scrapedAt: nowIso(), ...over });
+const mkNative = (id, source, sub, zh) => ({ ...mkSub(id, source, sub), status: 'trans', titleZh: zh, descriptionZh: '中文简介', translatedAt: nowIso() });
+const mkOldTrans = (id, source, sub, over = {}) => mkSub(id, source, sub, { status: 'trans', titleZh: '有', descriptionZh: '有', translatedAt: AFTER, ...over });
+const baselineOf = url => rawStore.larkBotState?.urlBaseline?.[url];
+const transCount = pred => (rawStore.dramas || []).filter(d => pred(d) && d.status === 'trans').length;
+const posted = text => botPosts.some(p => JSON.stringify(p).includes(text));
+// 抓取桩按 URL 回放：模拟内容脚本在本轮期间把该订阅页的卡片经 saveDrama 入库
+let fakeSavesByUrl = {};
+globalThis.scrapeUrlInTab = async (url) => {
+  const saves = fakeSavesByUrl[url] || [];
+  for (const drama of saves) await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama });
+  return { success: true, data: saves };
+};
+const setupSubs = async (dramas) => {
+  await resetDramasCache(); await setupBot();
+  rawStore.urlTags = [
+    { urlPattern: SUB, tags: ['T'] },
+    { urlPattern: IMDB_A, tags: ['IMDB', 'drama'] },
+    { urlPattern: IMDB_B, tags: ['IMDB', 'MyDrama'] },
+    { urlPattern: FR_SUB, tags: ['FlickReels', 'HotPicks'] },
+    { urlPattern: NS_SUB, tags: ['NetShort', 'Trending'] }
+  ];
+  rawStore.dramas = dramas;
+  botPosts.length = 0;
 };
 
-await resetDramasCache(); await setupBot();
-rawStore.urlTags = [
-  { urlPattern: SUB, tags: ['T'] },
-  { urlPattern: FR_SUB, tags: ['FlickReels', 'HotPicks'] },
-  { urlPattern: NS_SUB, tags: ['NetShort', 'Trending'] }
-];
-// 库里已有 netshort、没有 flickreels → flickreels 是新站
-rawStore.dramas = [mk('ns-existing', { source: 'netshort', sourceListUrl: NS_SUB, status: 'trans', titleZh: '有', descriptionZh: '有', translatedAt: AFTER })];
-botPosts.length = 0;
+// —— 老站点加新订阅 URL（IMDB 场景，本次改动的存在理由）
+await setupSubs([mkOldTrans('a-existing', 'imdb', IMDB_A)]);
 const runStart = nowIso();
-fakeSaves = [
-  { ...mkSite('fr-native', 'flickreels', FR_SUB), status: 'trans', titleZh: '首轮平台中文', descriptionZh: '中文简介', translatedAt: nowIso() },
-  mkSite('fr-new1', 'flickreels', FR_SUB),
-  mkSite('fr-new2', 'flickreels', FR_SUB)
-];
 await sleep(5);
-await performScrapeOnce({ site: 'flickreels' });   // eslint-disable-line no-undef
+fakeSavesByUrl = {
+  [IMDB_A]: [mkNative('a-native', 'imdb', IMDB_A, '老订阅平台中文'), mkSub('a-new', 'imdb', IMDB_A)],
+  [IMDB_B]: [mkNative('b-native', 'imdb', IMDB_B, '新订阅平台中文'), mkSub('b-new1', 'imdb', IMDB_B), mkSub('b-new2', 'imdb', IMDB_B)]
+};
+await performScrapeOnce({ site: 'imdb' });   // eslint-disable-line no-undef
 await sleep(300);
-check('B1 新站首轮：本轮入库即 trans 的卡不推（进行中闸门）', botPosts.length === 0, `posts=${botPosts.length}`);
-const fb = baselineOf('flickreels');
-check('B2 收轮时该站基线定在完成时刻（ISO，不早于开轮）', typeof fb === 'string' && fb !== 'pending' && fb >= runStart, String(fb));
-check('B3 库里已有卡的站点不设基线', baselineOf('netshort') === undefined, JSON.stringify(rawStore.larkBotState));
+check('B1 同站新订阅 URL 首轮：入库即 trans 的卡不推（进行中闸门），老订阅 URL 的同类卡照常推',
+  botPosts.length === 1 && posted('老订阅平台中文') && !posted('新订阅平台中文'), `posts=${botPosts.length}`);
+check('B2 收轮时新订阅 URL 基线定在完成时刻（ISO，不早于开轮）',
+  typeof baselineOf(IMDB_B) === 'string' && baselineOf(IMDB_B) !== 'pending' && baselineOf(IMDB_B) >= runStart, String(baselineOf(IMDB_B)));
+check('B3 库里已有卡的订阅 URL 不设基线（同站不连坐）', baselineOf(IMDB_A) === undefined, JSON.stringify(rawStore.larkBotState?.urlBaseline));
 check('B3b 全局水位线不受影响', rawStore.larkBotState?.enabledAt === ENABLED_AT, String(rawStore.larkBotState?.enabledAt));
 
 botPosts.length = 0;
 await runTranslateRound();
-check('B4 首轮抓到的 new 卡翻译完成也不推（scrapedAt 不晚于基线），但正常翻完入库',
-  botPosts.length === 0 && frTrans() === 3, `posts=${botPosts.length} trans=${frTrans()}`);
+check('B4 首轮抓到的 new 卡翻完不推（scrapedAt 不晚于基线）、老订阅的 new 卡翻完照常推；都正常翻完入库',
+  botPosts.length === 1 && posted('中·T-a-new') && transCount(d => d.sourceListUrl === IMDB_B) === 3,
+  `posts=${botPosts.length} transB=${transCount(d => d.sourceListUrl === IMDB_B)}`);
 
 // 基线之后抓到的才是「有更新」：两个触发点都要照常推
 botPosts.length = 0;
 await sleep(5);
-const later = { ...mkSite('fr-later', 'flickreels', FR_SUB), status: 'trans', titleZh: '后续新卡', descriptionZh: '中文简介', translatedAt: nowIso() };
-await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: later });
+await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: mkNative('b-later', 'imdb', IMDB_B, '后续新卡') });
 await sleep(300);
-check('B5 基线之后入库即 trans 的新卡照常推', botPosts.length === 1 && JSON.stringify(botPosts[0]).includes('后续新卡'), `posts=${botPosts.length}`);
+check('B5 基线之后入库即 trans 的新卡照常推', botPosts.length === 1 && posted('后续新卡'), `posts=${botPosts.length}`);
 botPosts.length = 0;
-await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: mkSite('fr-later2', 'flickreels', FR_SUB) });
+await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: mkSub('b-later2', 'imdb', IMDB_B) });
 await runTranslateRound();
-check('B6 基线之后的 new 卡翻译完成后照常推', botPosts.length === 1 && JSON.stringify(botPosts[0]).includes('中·T-fr-later2'), `posts=${botPosts.length}`);
+check('B6 基线之后的 new 卡翻译完成后照常推', botPosts.length === 1 && posted('中·T-b-later2'), `posts=${botPosts.length}`);
 
-// 老站点的抓取完全不受影响
+// —— 全新站点＝其所有 URL 都零条，同一规则覆盖（v1.6.6 的 FlickReels 场景不退化）
+await setupSubs([mkOldTrans('ns-existing', 'netshort', NS_SUB)]);
+const frStart = nowIso();
+await sleep(5);
+fakeSavesByUrl = { [FR_SUB]: [mkNative('fr-native', 'flickreels', FR_SUB, '首轮平台中文'), mkSub('fr-new1', 'flickreels', FR_SUB)] };
+await performScrapeOnce({ site: 'flickreels' });   // eslint-disable-line no-undef
+await sleep(300);
+check('B7 全新站点首轮：入库即 trans 的卡不推、收轮定基线',
+  botPosts.length === 0 && typeof baselineOf(FR_SUB) === 'string' && baselineOf(FR_SUB) !== 'pending' && baselineOf(FR_SUB) >= frStart,
+  `posts=${botPosts.length} baseline=${String(baselineOf(FR_SUB))}`);
 botPosts.length = 0;
-fakeSaves = [{ ...mkSite('ns-native', 'netshort', NS_SUB), status: 'trans', titleZh: '老站新卡', descriptionZh: '中文简介', translatedAt: nowIso() }];
+await runTranslateRound();
+check('B7b 新站首轮 new 卡翻完不推但正常入库', botPosts.length === 0 && transCount(d => d.source === 'flickreels') === 2,
+  `posts=${botPosts.length} trans=${transCount(d => d.source === 'flickreels')}`);
+
+// 老订阅 URL 的抓取完全不受影响
+botPosts.length = 0;
+fakeSavesByUrl = { [NS_SUB]: [mkNative('ns-native', 'netshort', NS_SUB, '老站新卡')] };
 await performScrapeOnce({ site: 'netshort' });   // eslint-disable-line no-undef
 await sleep(300);
-check('B7 老站点本轮入库即 trans 的卡照常推、不设基线', botPosts.length === 1 && baselineOf('netshort') === undefined,
-  `posts=${botPosts.length} baseline=${String(baselineOf('netshort'))}`);
+check('B8 老订阅 URL 本轮入库即 trans 的卡照常推、不设基线', botPosts.length === 1 && baselineOf(NS_SUB) === undefined,
+  `posts=${botPosts.length} baseline=${String(baselineOf(NS_SUB))}`);
 
-// SW 中途被回收会留下「进行中」：下一轮该站收轮时统一收口成时间戳，不能永远卡住该站
-rawStore.larkBotState = { ...rawStore.larkBotState, siteBaseline: { ...(rawStore.larkBotState?.siteBaseline || {}), flickreels: 'pending' } };
-fakeSaves = [];
+// SW 中途被回收会留下「进行中」：下一轮含该 URL 的收轮时收口成时间戳；但只碰本轮 URL——
+// 弹窗单站刷新传的是过滤后的列表，别站遗留的 pending 原样保留、零条的别站 URL 也不被标记
+rawStore.larkBotState = { ...rawStore.larkBotState, urlBaseline: { ...(rawStore.larkBotState?.urlBaseline || {}), [FR_SUB]: 'pending', [IMDB_B]: 'pending' } };
+fakeSavesByUrl = {};
 await performScrapeOnce({ site: 'flickreels' });   // eslint-disable-line no-undef
-check('B8 遗留的「进行中」在下一轮收轮时收口为时间戳', typeof baselineOf('flickreels') === 'string' && baselineOf('flickreels') !== 'pending', String(baselineOf('flickreels')));
+check('B9 遗留的「进行中」在下一轮收轮时收口为时间戳', typeof baselineOf(FR_SUB) === 'string' && baselineOf(FR_SUB) !== 'pending', String(baselineOf(FR_SUB)));
+check('B9b 单站刷新只碰本轮 URL：别站遗留 pending 原样保留、零条的别站 URL 不被标记',
+  baselineOf(IMDB_B) === 'pending' && baselineOf(IMDB_A) === undefined, JSON.stringify(rawStore.larkBotState?.urlBaseline));
+
+// —— 尾斜杠归一（UrlMatch.normalizeListUrl，与订阅归属判定同口径）双向
+const RS_CFG = 'https://www.reelshort.com/';    // 手写配置带尾斜杠
+const RS_STORED = 'https://www.reelshort.com';  // 库中卡 sourceListUrl 不带
+await setupSubs([mkOldTrans('rs-existing', 'reelshort', RS_STORED)]);
+rawStore.urlTags.push({ urlPattern: RS_CFG, tags: ['ReelShort'] });
+fakeSavesByUrl = { [RS_CFG]: [mkNative('rs-native', 'reelshort', RS_CFG, '老订阅斜杠差异')] };
+await performScrapeOnce({ site: 'reelshort' });   // eslint-disable-line no-undef
+await sleep(300);
+check('B10 配置带尾斜杠、库中卡不带：仍算已有卡，不被误当首轮静音、不设基线',
+  botPosts.length === 1 && baselineOf(RS_STORED) === undefined && baselineOf(RS_CFG) === undefined,
+  `posts=${botPosts.length} ${JSON.stringify(rawStore.larkBotState?.urlBaseline)}`);
+const DS_CFG = 'https://dramashorts.io/';
+const DS_STORED = 'https://dramashorts.io';
+rawStore.urlTags.push({ urlPattern: DS_CFG, tags: ['DramaShorts'] });
+botPosts.length = 0;
+fakeSavesByUrl = { [DS_CFG]: [mkNative('ds-native', 'dramashorts', DS_STORED, '新订阅斜杠差异')] };
+await performScrapeOnce({ site: 'dramashorts' });   // eslint-disable-line no-undef
+await sleep(300);
+check('B11 新订阅带尾斜杠、卡片 sourceListUrl 不带：基线按归一键存、首轮照样拦住',
+  botPosts.length === 0 && typeof baselineOf(DS_STORED) === 'string' && baselineOf(DS_STORED) !== 'pending' && baselineOf(DS_CFG) === undefined,
+  `posts=${botPosts.length} ${JSON.stringify(rawStore.larkBotState?.urlBaseline)}`);
+
+// —— 无 sourceListUrl 的卡（理论形态：content.js 一律写订阅 URL、订阅外清理也会删它）不受基线约束
+botPosts.length = 0;
+rawStore.larkBotState = { ...rawStore.larkBotState, urlBaseline: { ...(rawStore.larkBotState?.urlBaseline || {}), [NS_SUB]: 'pending' } };
+const orphan = mkNative('orphan', 'netshort', NS_SUB, '无归属卡');
+delete orphan.sourceListUrl;
+await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: orphan });
+await sleep(300);
+check('B12 无 sourceListUrl 的卡不受基线约束（落到既有水位线判定）', botPosts.length === 1 && posted('无归属卡'), `posts=${botPosts.length}`);
+
+// —— v1.6.6 遗留的 larkBotState.siteBaseline（存量形如 { flickreels: ISO }）：首次收轮时折进同站所有订阅 URL 里
+// 尚无基线的那些、再删掉该键——FlickReels 首轮里尚未翻完的卡仍按老基线拦住，不因换粒度被补推。
+// 折的是全部订阅不只本轮：别站的单站刷新也要能触发
+const LEGACY_AT = '2026-09-16T22:00:00.000Z';
+await setupSubs([
+  mkOldTrans('ns-existing2', 'netshort', NS_SUB),
+  mkOldTrans('fr-old-trans', 'flickreels', FR_SUB, { scrapedAt: '2026-09-16T21:50:00.000Z' }),
+  mkSub('fr-old-new', 'flickreels', FR_SUB, { scrapedAt: '2026-09-16T21:51:00.000Z' })   // 首轮抓到、尚未翻完
+]);
+rawStore.larkBotState = { enabledAt: ENABLED_AT, siteBaseline: { flickreels: LEGACY_AT } };
+fakeSavesByUrl = {};
+await performScrapeOnce({ site: 'netshort' });   // eslint-disable-line no-undef
+check('B13 遗留站点基线折进该站所有订阅 URL 后删除 siteBaseline 键',
+  baselineOf(FR_SUB) === LEGACY_AT && !('siteBaseline' in (rawStore.larkBotState || {})) && rawStore.larkBotState?.enabledAt === ENABLED_AT,
+  JSON.stringify(rawStore.larkBotState));
+botPosts.length = 0;
+await runTranslateRound();
+check('B14 首轮遗留未翻完的卡翻完仍不推（scrapedAt 早于继承的基线）', botPosts.length === 0 && transCount(d => d.id === 'fr-old-new') === 1,
+  `posts=${botPosts.length}`);
+botPosts.length = 0;
+await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: mkNative('fr-after-legacy', 'flickreels', FR_SUB, '继承基线之后') });
+await sleep(300);
+check('B14b 继承基线之后的新卡照常推', botPosts.length === 1 && posted('继承基线之后'), `posts=${botPosts.length}`);
 
 console.log = origLog; console.warn = origWarn; console.error = origError;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

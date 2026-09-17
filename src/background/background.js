@@ -442,14 +442,17 @@ async function performScrapeOnce({ site = null } = {}) {
       return { urlCount: 0, totalNewCount: 0, results: [] };
     }
 
-    // 新站点首轮只入库不推送：开轮时库里零条的站点挂「进行中」，收轮时基线定在完成时刻。
+    // 订阅 URL 首轮只入库不推送：开轮时库里零条的订阅 URL 挂「进行中」，收轮时基线定在完成时刻。
     // 经队列读表顺带把缓存预热给随后的入库写，不多付一次全表读
-    const sites = [...new Set(scrapeUrls.map(url => siteOfUrl(url)).filter(Boolean))];
     try {
-      const populated = new Set((await enqueueDramaWrite('新站判定', getDramasInQueue)).map(d => d.source));
-      await markNewSiteBaselines(sites.filter(site => !populated.has(site)));
+      const populated = new Set(
+        (await enqueueDramaWrite('订阅首轮判定', getDramasInQueue))
+          .map(d => UrlMatch.normalizeListUrl(d.sourceListUrl))
+          .filter(Boolean)
+      );
+      await markUrlBaselines(scrapeUrls.filter(url => !populated.has(UrlMatch.normalizeListUrl(url))));
     } catch (e) {
-      console.warn('[ShortScraping] 新站点基线标记失败（不影响抓取）:', e?.message || e);
+      console.warn('[ShortScraping] 订阅首轮基线标记失败（不影响抓取）:', e?.message || e);
     }
 
     let totalNewCount = 0;
@@ -472,9 +475,9 @@ async function performScrapeOnce({ site = null } = {}) {
       }
     }
 
-    // 收轮：新站首轮的机器人基线定在此刻，此后抓到的才算「有更新」
-    await finalizeSiteBaselines(sites).catch(e =>
-      console.warn('[ShortScraping] 新站点基线收口失败（下轮重试）:', e?.message || e));
+    // 收轮：本轮 URL 里「进行中」的机器人基线定在此刻，此后抓到的才算「有更新」
+    await finalizeUrlBaselines(scrapeUrls).catch(e =>
+      console.warn('[ShortScraping] 订阅首轮基线收口失败（下轮重试）:', e?.message || e));
 
     await chrome.storage.local.set({
       lastScrape: new Date().toISOString()
@@ -1473,21 +1476,20 @@ async function syncTimelineToCsv() {
  * resetPartialTranslations 刚退回队列的那批），没有水位线一开机器人就在群里
  * 刷屏。只推 scrapedAt 晚于「启用时刻」的卡；关闭开关即清水位线，下次开启重新计时。
  */
+/**
+ * 同步启用水位线。返回带 enabledAt 的整份 larkBotState（maybeBotPush 顺带用它过订阅基线，
+ * 省一次 storage 读）；开关未就绪返回 null，并按旧语义清空状态（水位线连同基线、重试队列作废）。
+ */
 async function syncBotWatermark(config) {
-  const { larkBotState } = await chrome.storage.local.get('larkBotState');
-  const state = larkBotState && typeof larkBotState === 'object' ? larkBotState : {};
-
-  if (!Lark.botReadiness(config).ok) {
-    if (state.enabledAt) await chrome.storage.local.set({ larkBotState: {} });
-    return '';
-  }
-  if (!state.enabledAt) {
+  const ready = Lark.botReadiness(config).ok;
+  const state = await updateBotState((current) => {
+    if (!ready) return current.enabledAt ? {} : current;
+    if (current.enabledAt) return current;
     const enabledAt = new Date().toISOString();
-    await chrome.storage.local.set({ larkBotState: { ...state, enabledAt } });
     console.log(`[ShortScraping] 群机器人已启用，水位线 ${enabledAt}（更早抓到的存量不推送）`);
-    return enabledAt;
-  }
-  return state.enabledAt;
+    return { ...current, enabledAt };
+  });
+  return ready ? state : null;
 }
 
 /* —— 发送节流与失败重试（v1.6.0） ————————————————————————————
@@ -1520,58 +1522,103 @@ async function readBotState() {
   return larkBotState && typeof larkBotState === 'object' ? larkBotState : {};
 }
 
+/**
+ * larkBotState 的唯一写入口：读→改→写串成一条 promise 链。翻译线的推送/入队与抓取收轮的
+ * 基线收口按设计并行，裸的 get→展开→set 交错一次就丢一次更新（最可能丢 retryQueue）。
+ * mutate 返回同一引用＝无变化不写；mutate 内不得再调本函数（会等自己、死锁）。
+ */
+let botStateQueue = Promise.resolve();
+function updateBotState(mutate) {
+  const run = botStateQueue.then(async () => {
+    const state = await readBotState();
+    const next = await mutate(state);
+    if (next && next !== state) await chrome.storage.local.set({ larkBotState: next });
+    return next || state;
+  });
+  botStateQueue = run.catch(() => {});
+  return run;
+}
+
 async function writeBotRetryQueue(queue) {
-  const state = await readBotState();
-  await chrome.storage.local.set({ larkBotState: { ...state, retryQueue: queue } });
+  await updateBotState(state => ({ ...state, retryQueue: queue }));
   if (queue.length) chrome.alarms.create(BOT_RETRY_ALARM_NAME, { delayInMinutes: 1 });
   else await chrome.alarms.clear(BOT_RETRY_ALARM_NAME);
 }
 
-/* —— 新站点首轮抓取只入库不推送（v1.6.6，2026-09-16 用户定） ————————————————
+/* —— 订阅 URL 首轮抓取只入库不推送（v1.6.7，2026-09-17 用户定；取代 v1.6.6 的站点级规则，不叠加） ——
  *
- * 刚接入的站点第一轮会一次抓进几十条（FlickReels 首轮 24 条），它们是存量底座不是
- * 「新动态」，全推进群里就是刷屏。做法：开轮时库里零条的站点视为新站，本轮期间该站基线
- * 挂 'pending' 一律不推（翻译线在开轮 10s 后就并行跑，首批卡可能在收轮前翻完），收轮时
- * 把基线定在完成时刻，此后只推 scrapedAt 晚于基线的卡。存 larkBotState.siteBaseline[site]，
- * 与全局水位线 enabledAt 并列、互不影响——拨全局水位线会把其它站点那一刻之前还没翻完
- * 的卡一并静音，且下次加新站还得再来一遍。SW 中途被回收会留下 'pending'：下一轮该站收轮时
- * 统一收口为时间戳（那一轮的卡也随之不推，接受），不会永远卡住该站。
+ * 刚订阅的 URL 第一轮会一次抓进几十条（FlickReels 首轮 24 条；IMDB 新加 9 条出品公司筛选约 300 条），
+ * 它们是存量底座不是「新动态」，全推进群里就是刷屏。粒度必须是订阅 URL 而非站点：IMDB 库里已有
+ * 482 条，按站点判「新站」永远判不出来；新站点只是「该站所有 URL 都零条」的特例，一条规则覆盖两种情形。
+ * 做法：开轮时库里零条的订阅 URL 视为首轮，本轮期间该 URL 基线挂 'pending' 一律不推（翻译线在开轮
+ * 10s 后就并行跑，首批卡可能在收轮前翻完），收轮时把基线定在完成时刻，此后只推 scrapedAt 晚于基线的卡。
+ * 存 larkBotState.urlBaseline[UrlMatch.normalizeListUrl(url)]（尾斜杠归一，与订阅归属判定同口径），
+ * 与全局水位线 enabledAt 并列、互不影响。卡片按 sourceListUrl 归属（content.js 写入的就是订阅 URL
+ * 本身）；无 sourceListUrl 的卡不受基线约束。标记/收口都只碰本轮 URL（弹窗单站刷新传的是过滤后的列表）。
+ * SW 中途被回收会留下 'pending'：下一轮含该 URL 的收轮时统一收口为时间戳（那一轮的卡也随之不推，接受）。
+ * 已知边界（接受）：某 URL 长期零条（条目全与其它订阅重叠、去重命中不入库）时每轮都算首轮，它的第一条
+ * 真正新卡会被吞一次；换成「有过基线就不再标」则首轮整页加载失败时下一轮会把底座全推出去，刷屏比漏一条更糟。
+ * 退订 URL 的基线条目不清理（每条约 100 字节，重订阅时零条即重标覆盖）。
+ * v1.6.6 的 larkBotState.siteBaseline[site] 是遗留死数据：首次收轮时折进同站所有已订阅、尚无基线的 URL
+ * （保住 FlickReels 首轮尚未翻完的卡不被补推）后删除该键，一次性。
  */
-async function markNewSiteBaselines(sites) {
-  if (!sites.length) return;
-  const state = await readBotState();
-  const siteBaseline = { ...(state.siteBaseline || {}) };
-  for (const site of sites) siteBaseline[site] = 'pending';
-  await chrome.storage.local.set({ larkBotState: { ...state, siteBaseline } });
-  console.log(`[ShortScraping] 新站点首轮抓取只入库不推送: ${sites.join(', ')}`);
+const baselineKey = url => UrlMatch.normalizeListUrl(url);
+
+async function markUrlBaselines(urls) {
+  if (!urls.length) return;
+  await updateBotState((state) => {
+    const urlBaseline = { ...(state.urlBaseline || {}) };
+    for (const url of urls) urlBaseline[baselineKey(url)] = 'pending';
+    return { ...state, urlBaseline };
+  });
+  console.log(`[ShortScraping] 订阅首轮抓取只入库不推送: ${urls.join(', ')}`);
 }
 
-async function finalizeSiteBaselines(sites) {
-  const state = await readBotState();
-  const current = state.siteBaseline || {};
-  const pending = sites.filter(site => current[site] === 'pending');
-  if (!pending.length) return;
+async function finalizeUrlBaselines(urls) {
   const completedAt = new Date().toISOString();
-  const siteBaseline = { ...current };
-  for (const site of pending) siteBaseline[site] = completedAt;
-  await chrome.storage.local.set({ larkBotState: { ...state, siteBaseline } });
-  console.log(`[ShortScraping] 群机器人站点基线定在首轮抓取完成时刻 ${completedAt}: ${pending.join(', ')}`);
+  let settled = [];
+  await updateBotState(async (state) => {
+    const { siteBaseline: legacy, ...rest } = state;
+    const urlBaseline = { ...(rest.urlBaseline || {}) };
+
+    // v1.6.6 遗留的站点基线（一次性）：折进同站所有已订阅、尚无基线的 URL 后删除该键。
+    // 折全部订阅而非只本轮——弹窗单站刷新只带一个站的 URL，不能让别站的遗留基线白白丢掉。
+    if (legacy) {
+      const { urlTags = [] } = await chrome.storage.local.get('urlTags');
+      for (const url of getConfiguredScrapeUrls(urlTags)) {
+        const inherited = legacy[siteOfUrl(url)];
+        if (inherited && !urlBaseline[baselineKey(url)]) urlBaseline[baselineKey(url)] = inherited;
+      }
+      console.log(`[ShortScraping] v1.6.6 站点基线已折进订阅基线并移除: ${Object.keys(legacy).join(', ')}`);
+    }
+
+    settled = urls.filter(url => urlBaseline[baselineKey(url)] === 'pending');
+    if (!settled.length && !legacy) return state;   // 同一引用＝不写
+    for (const url of settled) urlBaseline[baselineKey(url)] = completedAt;
+    return { ...rest, urlBaseline };
+  });
+  if (settled.length) {
+    console.log(`[ShortScraping] 群机器人订阅基线定在首轮抓取完成时刻 ${completedAt}: ${settled.join(', ')}`);
+  }
 }
 
-/** 该站首轮进行中，或卡片不晚于该站首轮完成时刻 → 不推。无基线的站点照常。 */
-function isBeforeSiteBaseline(drama, state) {
-  const baseline = state && state.siteBaseline ? state.siteBaseline[drama.source] : null;
+/** 该订阅 URL 首轮进行中，或卡片不晚于其首轮完成时刻 → 不推。无基线 / 无 sourceListUrl 的卡照常。 */
+function isBeforeUrlBaseline(drama, state) {
+  const key = baselineKey(drama.sourceListUrl);
+  const baseline = key && state && state.urlBaseline ? state.urlBaseline[key] : null;
   if (!baseline) return false;
   return baseline === 'pending' || !drama.scrapedAt || drama.scrapedAt <= baseline;
 }
 
 async function enqueueBotRetry(dramaId, attempts) {
-  const state = await readBotState();
-  const queue = (Array.isArray(state.retryQueue) ? state.retryQueue : [])
-    .filter(entry => entry && entry.dramaId !== dramaId);
-  queue.push({ dramaId, attempts });
-  while (queue.length > BOT_RETRY_QUEUE_LIMIT) queue.shift();   // 超限丢最老的
-  await writeBotRetryQueue(queue);
+  await updateBotState((state) => {
+    const queue = (Array.isArray(state.retryQueue) ? state.retryQueue : [])
+      .filter(entry => entry && entry.dramaId !== dramaId);
+    queue.push({ dramaId, attempts });
+    while (queue.length > BOT_RETRY_QUEUE_LIMIT) queue.shift();   // 超限丢最老的
+    return { ...state, retryQueue: queue };
+  });
+  chrome.alarms.create(BOT_RETRY_ALARM_NAME, { delayInMinutes: 1 });   // 入队后队列必非空
 }
 
 async function processBotRetryQueue() {
@@ -1624,12 +1671,12 @@ async function maybeBotPush(drama) {
     const config = Lark.normalizeConfig(larkConfig);
     if (!Lark.botReadiness(config).ok) return false;
 
-    const enabledAt = await syncBotWatermark(config);
-    if (!enabledAt) return false;
+    const state = await syncBotWatermark(config);
+    if (!state || !state.enabledAt) return false;
     // 无 scrapedAt 的条目保守不推（判不出是存量还是新卡）
-    if (!drama.scrapedAt || drama.scrapedAt < enabledAt) return false;
-    // 新站点首轮只入库不推送（见 markNewSiteBaselines）
-    if (isBeforeSiteBaseline(drama, await readBotState())) return false;
+    if (!drama.scrapedAt || drama.scrapedAt < state.enabledAt) return false;
+    // 订阅 URL 首轮只入库不推送（见 markUrlBaselines）
+    if (isBeforeUrlBaseline(drama, state)) return false;
 
     try {
       await throttleBotPush();
