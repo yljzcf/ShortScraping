@@ -34,6 +34,11 @@
     // 不加 path：Chrome 匹配模式的路径段连查询串一起匹配，'/' 匹配不到首页订阅 '/?list=…'，
     // 留默认 /* 与其余短剧站一致（非首页路径由 adapter.matches 闸住，只是不挂浮动按钮）
     { site: 'flickreels', name: 'FlickReels', host: 'flickreels.net', match: 'suffix' },
+    // 三站同上：首页/榜单页订阅都可能带查询串，path 一律留默认 /*
+    // shortmax 的站点键取品牌名（站点 og:site_name 与用户标签都是 ShortMax），host 才是 shorttv.live
+    { site: 'goodshort', name: 'GoodShort', host: 'goodshort.com', match: 'suffix' },
+    { site: 'shortical', name: 'Shortical', host: 'shortical.com', match: 'suffix' },
+    { site: 'shortmax', name: 'ShortMax', host: 'shorttv.live', match: 'suffix' },
     { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix' }
   ];
 
@@ -44,7 +49,7 @@
   // 注意 SITES 顺序本身不受此影响：manifest 推导、siteOfHostname 匹配优先级
   // 仍按 SITES，分组只管头部与设置页的展示序。
   const SITE_GROUPS = [
-    { group: 'shortdrama', name: '短剧', sites: ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels'] },
+    { group: 'shortdrama', name: '短剧', sites: ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax'] },
     { group: 'video', name: '影视', sites: ['imdb', 'netflix', 'appletv'] },
     { group: 'game', name: '游戏 · 网文', sites: ['steam', 'royalroad'] }
   ];

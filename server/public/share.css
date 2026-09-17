@@ -64,6 +64,8 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* flex 子项 min-width 默认 auto，不清零则展开组只会撑破容器而不进入滚动 */
+  min-width: 0;
 }
 
 /* 展开组：图标外套浅色衬底，视觉上圈出「这几个是一组」
@@ -73,10 +75,32 @@ body {
   gap: 6px;
 }
 
+/* v1.6.9：短剧组增至 8 个站点后，光展开组就要 402px，而标签条可用宽度只有 416px
+   （520 − 32 头部内边距 − 72 头部按钮区，实测），再加两枚收起胶囊共需 504px。
+   改为横向可滚，操作是「按住即拖」（逻辑在 shared/site-tabs.js）。刻意不显滚动条、
+   不加左右箭头——箭头会再吃掉约 40px，而横向宽度正是这里最稀缺的资源。
+   grab 手型即拖动的可发现性提示。本段与 popup.css 逐字同步（unit-card-layout 守着）。 */
 .tab-group.is-open {
   background: var(--bg);
   border-radius: 10px;
   padding: 2px 4px;
+  overflow-x: auto;
+  min-width: 0;
+  cursor: grab;
+  scrollbar-width: none;
+}
+
+.tab-group.is-open::-webkit-scrollbar {
+  display: none;
+}
+
+/* 不写死则图标会被挤扁而不是溢出滚动 */
+.tab-group.is-open .category-tab {
+  flex-shrink: 0;
+}
+
+.tab-group.is-open.is-dragging {
+  cursor: grabbing;
 }
 
 /* 收起胶囊：箭头纯装饰，整枚是一个按钮 */
@@ -90,6 +114,8 @@ body {
   border-radius: 10px;
   cursor: pointer;
   transition: all 0.2s;
+  /* 展开组会抢光剩余宽度，胶囊不锁死就会被挤扁 */
+  flex-shrink: 0;
 }
 
 .tab-group-chip img {

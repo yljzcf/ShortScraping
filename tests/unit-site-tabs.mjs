@@ -1,7 +1,9 @@
 import './bootstrap.cjs';
 // SiteTabs 折叠标签条回归测试（v1.5.11）：分组划分完备性、代表站点三级优先级、
-// 活动站点回退链、布局折叠规则。全部走纯函数，零 DOM。
+// 活动站点回退链、布局折叠规则；v1.6.9 加横向拖动判据（D/E 组）与两份 CSS 同步（F 组）。
+// 逻辑断言全部走纯函数、零 DOM；CSS 只做文本断言。
 // 用法：node tests/unit-site-tabs.mjs
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -29,7 +31,7 @@ check('G2a 分组顺序：短剧 → 影视 → 游戏·网文',
   JSON.stringify(SiteRegistry.SITE_GROUPS.map(g => g.group)));
 check('G2b 组内站点字面量（2026-09-12 用户定）',
   deepEq(SiteRegistry.SITE_GROUPS.map(g => g.sites), [
-    ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels'],
+    ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax'],
     ['imdb', 'netflix', 'appletv'],
     ['steam', 'royalroad']
   ]),
@@ -131,22 +133,23 @@ const shortLatest = { dramashorts: 400, mydrama: 100, netshort: 300 };  // reels
 check('S1 组内按最近更新降序排，无记录的排最后',
   deepEq(SiteTabs.resolveLayout({ visibleSites: allVisible, activeSource: 'mydrama', latestBySite: shortLatest })
     .groups.find(g => g.group === 'shortdrama').sites,
-    ['dramashorts', 'netshort', 'mydrama', 'reelshort', 'flickreels']),   // flickreels 无记录，与 reelshort 并列后按注册表序排其后
+    ['dramashorts', 'netshort', 'mydrama', 'reelshort', 'flickreels', 'goodshort', 'shortical', 'shortmax']),   // 无记录的几家彼此并列，按注册表序排在有记录的之后
   JSON.stringify(SiteTabs.resolveLayout({ visibleSites: allVisible, activeSource: 'mydrama', latestBySite: shortLatest })
     .groups.find(g => g.group === 'shortdrama').sites));
 
+const SHORT_REGISTRY_ORDER = ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax'];
+const allTied = Object.fromEntries(SHORT_REGISTRY_ORDER.map(site => [site, 500]));
+
 check('S2 全都无更新记录时保持注册表组内顺序（稳定排序）',
-  deepEq(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, {}),
-    ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels']),
+  deepEq(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, {}), SHORT_REGISTRY_ORDER),
   JSON.stringify(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, {})));
 
 check('S3 更新时间并列时保持注册表组内顺序',
-  deepEq(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, { mydrama: 500, reelshort: 500, dramashorts: 500, netshort: 500, flickreels: 500 }),
-    ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels']),
-  JSON.stringify(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, { mydrama: 500, reelshort: 500, dramashorts: 500, netshort: 500, flickreels: 500 })));
+  deepEq(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, allTied), SHORT_REGISTRY_ORDER),
+  JSON.stringify(SiteTabs.visibleSitesOfGroup(shortGroup, allVisible, allTied)));
 
 check('S4 排序不改注册表本身（SITE_GROUPS.sites 未被就地重排）',
-  deepEq(shortGroup.sites, ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels']),
+  deepEq(shortGroup.sites, SHORT_REGISTRY_ORDER),
   JSON.stringify(shortGroup.sites));
 
 check('S5 排序后的首个站点即代表站点（与收起胶囊一致）',
@@ -163,6 +166,80 @@ const chipLayout = SiteTabs.resolveLayout({
 const gameChip = chipLayout.groups.find(g => g.group === 'game');
 check('L8 收起胶囊的代表站点遵循固定项',
   gameChip.collapsed === true && gameChip.representative === 'royalroad', JSON.stringify(gameChip));
+
+// ---------- D 展开组横向拖动的判据（v1.6.9，2026-09-17 用户定「按住即拖」） ----------
+// 核心：原地按一下仍是选站，只有真拖过才吞掉那一下 click。
+check('D1 默认阈值 5px', SiteTabs.DRAG_THRESHOLD_PX === 5, String(SiteTabs.DRAG_THRESHOLD_PX));
+
+const d0 = SiteTabs.beginDrag(100, 40);
+check('D2 按下即记起点与当前 scrollLeft，尚未算拖动',
+  d0.active === true && d0.moved === false && d0.startX === 100 && d0.startScroll === 40 && d0.scrollLeft === 40,
+  JSON.stringify(d0));
+
+check('D3 位移不足阈值不算拖动，松手仍是点击',
+  SiteTabs.endDrag(SiteTabs.moveDrag(d0, 104)).suppressClick === false,
+  JSON.stringify(SiteTabs.moveDrag(d0, 104)));
+check('D3b 恰好等于阈值即算拖动（>=，边界含等号）',
+  SiteTabs.moveDrag(d0, 105).moved === true, JSON.stringify(SiteTabs.moveDrag(d0, 105)));
+check('D3c 反向位移同样按绝对值判定',
+  SiteTabs.moveDrag(d0, 95).moved === true, JSON.stringify(SiteTabs.moveDrag(d0, 95)));
+
+// 往右拖（clientX 变大）＝内容左移＝scrollLeft 变小，位移始终相对**按下那一刻**算，
+// 不是逐帧累加（累加会因丢帧漂移）
+check('D4 scrollLeft = 按下时的 scrollLeft − 相对按下点的位移',
+  SiteTabs.moveDrag(d0, 130).scrollLeft === 10 && SiteTabs.moveDrag(d0, 70).scrollLeft === 70,
+  JSON.stringify([SiteTabs.moveDrag(d0, 130).scrollLeft, SiteTabs.moveDrag(d0, 70).scrollLeft]));
+
+// moved 单向置位：拖出去又拖回原点，松手不能变回「点击」——否则会误切站点
+const dBackAndForth = SiteTabs.moveDrag(SiteTabs.moveDrag(d0, 160), 100);
+check('D5 moved 一旦置位不回落（拖出去又拖回原点仍算拖动）',
+  dBackAndForth.moved === true && dBackAndForth.scrollLeft === 40 && SiteTabs.endDrag(dBackAndForth).suppressClick === true,
+  JSON.stringify(dBackAndForth));
+
+check('D6 endDrag 一律收掉 active', SiteTabs.endDrag(dBackAndForth).active === false, '');
+check('D6b endDrag 容忍空状态（组外松手 / 重复触发）',
+  SiteTabs.endDrag(null).suppressClick === false && SiteTabs.endDrag(undefined).active === false, '');
+check('D7 moveDrag 对未按下的状态是恒等变换',
+  SiteTabs.moveDrag(null, 999) === null && SiteTabs.moveDrag({ active: false }, 999).active === false, '');
+check('D8 moveDrag 不就地改状态（保持可预测的纯函数语义）',
+  SiteTabs.moveDrag(d0, 200) !== d0 && d0.moved === false && d0.scrollLeft === 40, JSON.stringify(d0));
+
+// 活动站点滚进视区：纯横向计算，不用 scrollIntoView（那个会连带竖向滚动整个弹窗）
+const visible = SiteTabs.scrollLeftForVisible;
+check('E1 已在视区内则不动', visible(50, 44, 40, 200) === 40, String(visible(50, 44, 40, 200)));
+check('E2 在视区左侧则左对齐到它', visible(10, 44, 40, 200) === 10, String(visible(10, 44, 40, 200)));
+check('E3 在视区右侧则右对齐到它', visible(300, 44, 40, 200) === 144, String(visible(300, 44, 40, 200)));
+check('E4 首个元素（offsetLeft 0）能回到最左', visible(0, 44, 60, 200) === 0, String(visible(0, 44, 60, 200)));
+
+// ---------- F 两份 CSS 同步：标签条滚动规则 ----------
+// 只在 popup.css 改会让共享页的 8 个图标继续撑破容器（先例：unit-card-layout C 组）
+const squash = s => s.replace(/\s+/g, ' ');
+const ruleBody = (src, selector) => {
+  const m = squash(src).match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`));
+  return m ? m[1].trim() : null;
+};
+for (const rel of ['src/popup/popup.css', 'server/public/share.css']) {
+  const src = fs.readFileSync(path.join(worktreeRoot, rel), 'utf8');
+  const open = ruleBody(src, '.tab-group.is-open');
+  check(`F1 ${rel} 展开组横向可滚且不显滚动条`,
+    Boolean(open) && /overflow-x:\s*auto/.test(open) && /min-width:\s*0/.test(open) && /scrollbar-width:\s*none/.test(open),
+    open || '(未匹配到规则)');
+  // 容器不清 min-width，展开组只会撑破 .category-tabs 而永远不进入滚动
+  const tabs = ruleBody(src, '.category-tabs');
+  check(`F2 ${rel} .category-tabs 清了 min-width`, Boolean(tabs) && /min-width:\s*0/.test(tabs), tabs || '(未匹配到规则)');
+  // 图标与收起胶囊都不许被压缩——否则是「挤扁」而不是「溢出滚动」
+  const tab = ruleBody(src, '.tab-group.is-open .category-tab');
+  check(`F3 ${rel} 组内图标 flex-shrink: 0`, Boolean(tab) && /flex-shrink:\s*0/.test(tab), tab || '(未匹配到规则)');
+  const chip = ruleBody(src, '.tab-group-chip');
+  check(`F4 ${rel} 收起胶囊 flex-shrink: 0`, Boolean(chip) && /flex-shrink:\s*0/.test(chip), chip || '(未匹配到规则)');
+  check(`F5 ${rel} 拖动中换 grabbing 手型`,
+    /\.tab-group\.is-open\.is-dragging \{[^}]*cursor:\s*grabbing/.test(squash(src)), '');
+}
+// 上面那个 is-dragging 类必须真的由共享渲染模块加上，类名拼错就全盘失效
+const tabsSrc = fs.readFileSync(path.join(worktreeRoot, 'src/shared/site-tabs.js'), 'utf8');
+check('F6 site-tabs.js 拖动时加 is-dragging 类', tabsSrc.includes("classList.add('is-dragging')"), '');
+check('F7 site-tabs.js 在捕获阶段拦 click（拖完那一下不选站）',
+  /addEventListener\('click',[\s\S]{0,260}?\}, true\)/.test(tabsSrc), '');
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

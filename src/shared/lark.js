@@ -173,6 +173,34 @@
       }
       return raw;
     }
+    if (/^https:\/\/[a-z0-9-]+\.shorttv\.live\//i.test(raw)) {
+      // ShortMax：采集存站内卡片同款形态（?process=mediagate&x-oss-process=m_fill,w_293,h_390，
+      // 293×390 ≈65KB），x-oss-process 里的英文逗号正是捷径解析不了的字符。只删这一个参数、
+      // 保留 process=mediagate（实测两种形态都回同一张原图 ≈651KB），同 FlickReels 范式。
+      // 与 content.js 的 SHORTMAX_POSTER_SUFFIX 成对：采集侧加参数、推送侧去参数。
+      try {
+        const u = new URL(raw);
+        u.searchParams.delete('x-oss-process');
+        return u.toString();
+      } catch (e) {
+        // 解析失败原样透传
+      }
+      return raw;
+    }
+    if (/^https:\/\/[a-z0-9-]+\.goodshort\.com\//i.test(raw)) {
+      // GoodShort：采集存 ?w=293&h=412（≈28KB），剥掉即原图（≈271KB）。这两个参数不含
+      // 逗号/百分号，两种形态捷径都能转附件——改写纯粹为了 v1.6.4 定的「库里存小图、
+      // 推出去放大」。与 content.js 的 GOODSHORT_POSTER_SUFFIX 成对。
+      try {
+        const u = new URL(raw);
+        u.searchParams.delete('w');
+        u.searchParams.delete('h');
+        return u.toString();
+      } catch (e) {
+        // 解析失败原样透传
+      }
+      return raw;
+    }
     if (/^https:\/\/[a-z0-9-]+\.mzstatic\.com\/image\/thumb\//i.test(raw)) {
       // 尾段形如 `<w>x<h><裁切码>.<扩展名>`。**按形状匹配数字**、不写死 '400x600nr'：
       // 裁切码取自站点自己的 artwork.template（content.js 的 appleArtUrl 只替换

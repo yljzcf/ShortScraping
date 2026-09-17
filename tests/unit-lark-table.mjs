@@ -37,7 +37,15 @@ const POSTERS = {
   netshort: 'https://awscover.netshort.com/tos-vod-mya-v-da59d5a2040f5f77/coverG/prod/-2145583186.jpg~tplv-vod-rs:651:868.webp',
   // FlickReels：采集存站内卡片同款 OSS 缩放形态（600×780 webp ≈60KB），原图 1000×1300 jpg ≈400KB
   flickreels: 'https://zshipubcf.farsunpteltd.com/playlet/1782901183_eBpQFwxmRR.jpg?x-oss-process=image/resize,w_600,image/format,webp',
-  flickreelsRaw: 'https://zshipubcf.farsunpteltd.com/playlet/1782901183_eBpQFwxmRR.jpg'
+  flickreelsRaw: 'https://zshipubcf.farsunpteltd.com/playlet/1782901183_eBpQFwxmRR.jpg',
+  // ShortMax：采集存站内卡片同款（293×390 ≈65KB），原图 ≈651KB。x-oss-process 里的逗号是捷径致死字符
+  shortmax: 'https://akamai-static.shorttv.live/images/cover/2026/08/21/9927c43c172545b39ca19eab36859097.jpg?process=mediagate&x-oss-process=m_fill,w_293,h_390',
+  shortmaxRaw: 'https://akamai-static.shorttv.live/images/cover/2026/08/21/9927c43c172545b39ca19eab36859097.jpg',
+  // GoodShort：采集存 ?w=293&h=412（≈28KB），原图 ≈271KB。两种形态本就无逗号/百分号，改写纯为放大
+  goodshort: 'https://acf.goodshort.com/videobook/202609/cover-WL7xIOUEJP.jpg?w=293&h=412',
+  goodshortRaw: 'https://acf.goodshort.com/videobook/202609/cover-WL7xIOUEJP.jpg',
+  // Shortical：站点只有这一种尺寸形态，无可改写
+  shortical: 'https://dirjqbe1kaah2.cloudfront.net/198/image.webp'
 };
 
 // 捷径致死字符：英文逗号与百分号编码（2026-07-25 两轮对照实锤）
@@ -69,7 +77,7 @@ if (typeof pfp === 'function') {
     convertible(pfp(POSTERS.mydramaPlus)) && convertible(pfp(POSTERS.mydramaPct)), '');
 
   // 归一只作用于 static.my-drama.com/convert/ 分支，不波及 fandom 子域与别站
-  const passthrough = ['mydramaFandom', 'steam', 'royalroad', 'reelshort', 'netflix', 'netshort'];
+  const passthrough = ['mydramaFandom', 'steam', 'royalroad', 'reelshort', 'netflix', 'netshort', 'shortical'];
   check('P8 其余站点原样透传', passthrough.every(k => pfp(POSTERS[k]) === POSTERS[k]),
     passthrough.filter(k => pfp(POSTERS[k]) !== POSTERS[k]).join(','));
   check('P9 空值/非法值安全', pfp('') === '' && pfp(null) === '' && pfp(undefined) === '', '');
@@ -88,6 +96,22 @@ if (typeof pfp === 'function') {
   check('P23 flickreels 只删 x-oss-process、其它查询参数保留',
     pfp(`${POSTERS.flickreelsRaw}?v=2&x-oss-process=image/resize,w_600`) === `${POSTERS.flickreelsRaw}?v=2`,
     pfp(`${POSTERS.flickreelsRaw}?v=2&x-oss-process=image/resize,w_600`));
+
+  /* —— v1.6.9：ShortMax / GoodShort 剥掉缩放参数还原原图 ————————————————
+   * 两家都是「库里存站内小图、推出去才放大」（v1.6.4 定的口径），与 content.js 的
+   * SHORTMAX_POSTER_SUFFIX / GOODSHORT_POSTER_SUFFIX 成对改。
+   * ShortMax 多一层理由：x-oss-process 里的英文逗号正是捷径解析不了的字符。
+   */
+  check('P24 shortmax 只删 x-oss-process、保留 process=mediagate（实测同回原图）',
+    pfp(POSTERS.shortmax) === `${POSTERS.shortmaxRaw}?process=mediagate`, pfp(POSTERS.shortmax));
+  check('P25 shortmax 改写后可转附件（逗号已消失）', convertible(pfp(POSTERS.shortmax)), pfp(POSTERS.shortmax));
+  check('P26 shortmax 无参形态原样透传', pfp(POSTERS.shortmaxRaw) === POSTERS.shortmaxRaw, pfp(POSTERS.shortmaxRaw));
+  check('P27 goodshort 删掉 w/h 还原原图（删空后无尾部 ?）',
+    pfp(POSTERS.goodshort) === POSTERS.goodshortRaw, pfp(POSTERS.goodshort));
+  check('P28 goodshort 只删 w/h，其它查询参数保留',
+    pfp(`${POSTERS.goodshortRaw}?w=293&v=2&h=412`) === `${POSTERS.goodshortRaw}?v=2`,
+    pfp(`${POSTERS.goodshortRaw}?w=293&v=2&h=412`));
+  check('P29 shortical 只有一种尺寸形态，原样透传', pfp(POSTERS.shortical) === POSTERS.shortical, pfp(POSTERS.shortical));
 
   /* —— v1.6.4：Apple TV 尺寸码提到 1200×1800 ————————————————————
    * 采集存 400×600（73KB），机器人卡满宽渲染偏软；mzstatic 按请求尺寸裁切，

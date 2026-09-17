@@ -124,6 +124,30 @@
     "tags": ["FlickReels", "7DayStar"]
   },
   {
+    "url": "https://www.goodshort.com/channel/Most-Trending",
+    "tags": ["GoodShort", "Trending"]
+  },
+  {
+    "url": "https://www.goodshort.com/channel/Top-in-GoodShort",
+    "tags": ["GoodShort", "Top"]
+  },
+  {
+    "url": "https://www.goodshort.com/channel/Hot-List",
+    "tags": ["GoodShort", "Hot"]
+  },
+  {
+    "url": "https://shortical.com/?list=top_recommended",
+    "tags": ["Shortical", "Top"]
+  },
+  {
+    "url": "https://www.shorttv.live/?list=most_popular",
+    "tags": ["ShortMax", "Pop"]
+  },
+  {
+    "url": "https://www.shorttv.live/fandom",
+    "tags": ["ShortMax", "fandom"]
+  },
+  {
     "url": "https://www.netflix.com/tudum/top10",
     "tags": ["Netflix", "Movie", "Global"]
   },

@@ -4,6 +4,12 @@
  * 背景：9 个站点图标平铺已超出 520px 弹窗宽度，改为按 SiteRegistry.SITE_GROUPS
  * 折叠成手风琴——同一时间只展开一组，收起组压成一枚「‹ 代表 logo ›」胶囊。
  *
+ * v1.6.9：短剧组增至 8 个站点后，光展开组本身就要 402px，而标签条可用宽度只有
+ * 416px（520 − 32 头部内边距 − 72 头部按钮区，实测），加上两枚收起胶囊共需 504px。
+ * 展开组改为横向可滚，操作方式是**按住即拖**（2026-09-17 用户定：不加滚轮横滚
+ * JS、不显滚动条、不加左右箭头——箭头会再吃掉约 40px，而横向宽度正是稀缺资源）。
+ * 拖动判据与「原地点一下仍是选站」的边界由下面三个纯函数定义，零 DOM 可单测。
+ *
  * 核心不变量：**展开的组恒等于当前活动站点所在的组**。因此本模块不接受
  * expandedGroup 参数，展开态一律由 activeSource 推导；调用方也只需持久化
  * activeSource 一个字段，不会出现两个字段互相矛盾的状态。
@@ -127,6 +133,42 @@
     return { activeSource, activeGroup, groups };
   }
 
+  /* ——— 展开组横向拖动（v1.6.9）———————————————————————————————
+   * 三个纯函数就是全部判据，render 只负责把 pointer 事件喂进来、把 scrollLeft 写回去。
+   * 阈值语义：位移**首次**超过 threshold 就锁定为「这是一次拖动」，之后即使手指
+   * 回到原点也不再退回点击（moved 单向置位）——否则「拖出去又拖回来」松手会误切站点。
+   */
+  const DRAG_THRESHOLD_PX = 5;
+
+  function beginDrag(clientX, scrollLeft) {
+    return { active: true, moved: false, startX: clientX, startScroll: scrollLeft, scrollLeft };
+  }
+
+  function moveDrag(state, clientX, threshold) {
+    if (!state || !state.active) return state;
+    const limit = typeof threshold === 'number' ? threshold : DRAG_THRESHOLD_PX;
+    const dx = clientX - state.startX;
+    return Object.assign({}, state, {
+      moved: state.moved || Math.abs(dx) >= limit,
+      scrollLeft: state.startScroll - dx
+    });
+  }
+
+  /** 松手：moved 为真则这一下不是点击，调用方要吞掉随后那个 click。 */
+  function endDrag(state) {
+    return { active: false, suppressClick: !!(state && state.moved) };
+  }
+
+  /**
+   * 把某一项滚进可视区所需的 scrollLeft（纯横向，不用 scrollIntoView——那个会连带
+   * 把整个弹窗竖向滚动）。已在视区内则原样返回当前值，不做无谓跳动。
+   */
+  function scrollLeftForVisible(itemLeft, itemWidth, viewLeft, viewWidth) {
+    if (itemLeft < viewLeft) return itemLeft;
+    if (itemLeft + itemWidth > viewLeft + viewWidth) return itemLeft + itemWidth - viewWidth;
+    return viewLeft;
+  }
+
   function createSiteTab(site, opts) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -215,8 +257,20 @@
       activeSource: layout.activeSource
     });
 
+    // 重建前记下展开组的横向位置：抓取期间卡片陆续入库会触发整条标签栏重建，
+    // 不记就会一直弹回最左（与时间线滚动位置那次是同一类失败）。只在
+    // 「组没换、活动站点也没换」时还原——用户切了站点就该把新站点滚进视区。
+    const previousOpen = container.querySelector('.tab-group.is-open');
+    const previousActive = container.querySelector('.category-tab.active');
+    const previous = previousOpen ? {
+      group: previousOpen.dataset.group,
+      scrollLeft: previousOpen.scrollLeft,
+      activeSource: previousActive ? previousActive.dataset.source : null
+    } : null;
+
     container.innerHTML = '';
 
+    let openGroupEl = null;
     for (const groupLayout of layout.groups) {
       if (groupLayout.collapsed) {
         container.appendChild(createGroupChip(groupLayout, options));
@@ -236,7 +290,74 @@
         group.appendChild(createSiteTab(site, options));
       }
       container.appendChild(group);
+      if (expandable) openGroupEl = group;
     }
+
+    if (openGroupEl) {
+      attachDragScroll(openGroupEl);
+      restoreScroll(openGroupEl, previous, layout.activeSource);
+    }
+  }
+
+  /** 还原横向位置；条件不满足则把活动站点滚进视区（首次渲染、切组、切站都走这条）。 */
+  function restoreScroll(groupEl, previous, activeSource) {
+    if (previous && previous.group === groupEl.dataset.group && previous.activeSource === activeSource) {
+      groupEl.scrollLeft = previous.scrollLeft;
+      return;
+    }
+    const activeTab = groupEl.querySelector('.category-tab.active');
+    if (!activeTab) return;
+    groupEl.scrollLeft = scrollLeftForVisible(
+      activeTab.offsetLeft, activeTab.offsetWidth, groupEl.scrollLeft, groupEl.clientWidth
+    );
+  }
+
+  /**
+   * 按住即拖。用 setPointerCapture 让手滑出标签栏也照常跟手；捕获阶段拦 click，
+   * 拖动松手那一下不算选站（原地按一下 moved 仍为 false，照常选站/再点刷新）。
+   */
+  function attachDragScroll(groupEl) {
+    let state = null;
+    let suppressClick = false;
+
+    groupEl.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 && event.pointerType === 'mouse') return;
+      suppressClick = false;                       // 上一次拖动若在组外松手就没 click 可吞，这里兜底清掉
+      state = beginDrag(event.clientX, groupEl.scrollLeft);
+      if (typeof groupEl.setPointerCapture === 'function') groupEl.setPointerCapture(event.pointerId);
+    });
+
+    groupEl.addEventListener('pointermove', (event) => {
+      if (!state || !state.active) return;
+      state = moveDrag(state, event.clientX);
+      if (!state.moved) return;
+      groupEl.classList.add('is-dragging');
+      groupEl.scrollLeft = state.scrollLeft;
+      event.preventDefault();                      // 拖动期间不选中图标/不触发原生图片拖拽
+    });
+
+    const finish = (event) => {
+      if (!state) return;
+      suppressClick = endDrag(state).suppressClick;
+      state = null;
+      groupEl.classList.remove('is-dragging');
+      if (event && event.pointerId != null && typeof groupEl.releasePointerCapture === 'function'
+        && typeof groupEl.hasPointerCapture === 'function' && groupEl.hasPointerCapture(event.pointerId)) {
+        groupEl.releasePointerCapture(event.pointerId);
+      }
+    };
+    groupEl.addEventListener('pointerup', finish);
+    groupEl.addEventListener('pointercancel', finish);
+
+    groupEl.addEventListener('click', (event) => {
+      if (!suppressClick) return;
+      suppressClick = false;
+      event.stopPropagation();
+      event.preventDefault();
+    }, true);
+
+    // 图标是 <img>，不拦的话按住拖会变成浏览器原生的「拖拽图片」
+    groupEl.addEventListener('dragstart', event => event.preventDefault());
   }
 
   const api = {
@@ -245,7 +366,12 @@
     pickRepresentative,
     resolveActiveSource,
     resolveLayout,
-    render
+    render,
+    DRAG_THRESHOLD_PX,
+    beginDrag,
+    moveDrag,
+    endDrag,
+    scrollLeftForVisible
   };
 
   if (typeof module !== 'undefined' && module.exports) {

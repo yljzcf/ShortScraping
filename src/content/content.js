@@ -455,6 +455,141 @@
   };
 
   /**
+   * GoodShort 适配器（www.goodshort.com/channel/<板块>，Vue SSR，v1.6.9）：
+   * 数据在内联 `window.__INITIAL_STATE__={…}`，但**那个 script 执行完会把自己从
+   * DOM 里删掉**（`parentNode.removeChild(s)`，真机实测 document_end 时已查不到，
+   * outerHTML 里也没有），页面 window 上的值又在隔离世界外 → 只能同源重取一次
+   * 原始 HTML 文本来解析（fetchServerHtml，与 ShortMax 共用）。
+   *
+   * 订阅用板块的「More」页 /channel/<板块> 而不是首页：首页每板块 SSR 只直出 6 条，
+   * channel 页正好 10 条（total=10、pageSize=20，无分页）且首页那 6 条是它的子集
+   * （2026-09-17 用户定）。每个板块各是独立 URL，不需要 ?list= 约定（同 Netflix 六榜单）。
+   *
+   * 条目字段齐全、**零详情请求**：introduction 与详情页逐字一致（结尾的「…」是站点
+   * 自己的数据、不是被截断）。页面恒英文（Accept-Language: zh-CN 不改变输出），
+   * 无平台中文，status 全走 new 交 AI 翻译。
+   */
+  const goodshortAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        return u.hostname.endsWith('goodshort.com') && /^\/channel\/[^/]+\/?$/.test(u.pathname);
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return await getGoodshortItems();
+    },
+    extractId(item) {
+      // sourceId 是站点全站规范 id（详情页 URL 尾段就是它），加 gs 前缀与全局去重键约定一致
+      const id = item && item.sourceId != null ? String(item.sourceId).trim() : '';
+      return /^\d{6,}$/.test(id) ? `gs${id}` : null;
+    },
+    extractBasic(item, tags, id, index) {
+      return extractGoodshortFromItem(item, index, tags, id);
+    },
+    async fetchDetail(drama) {
+      // 列表 introduction 即详情页同一份文本，无需二次请求
+      return drama;
+    }
+  };
+
+  /**
+   * Shortical 适配器（shortical.com 首页，Vite+React 纯前端渲染，v1.6.9）：
+   * 服务端只回 9KB 空壳（<div id="root">），**只能读 hydrate 后的 DOM**（同 MyDrama
+   * 范式轮询等条目数稳定）。「Top Recommended」区块是栅格不是轮播，9 张卡与视口宽度无关。
+   *
+   * genres 两段式（2026-09-17 用户定「DOM 为主，token 可用时补」）：卡片上只印**第一个**
+   * 分类，官方接口 /api/v1/series/top-recommendations 给全量 2~4 个但匿名调用 401——
+   * token 在页面 firebaseLocalStorageDb 里、内容脚本同源可读。先用 DOM 那一个填上保底，
+   * 再尽力去补全量；token 取不到 / 接口失败一律静默保留保底值（见 backfillShorticalGenres）。
+   * 封面两条路线**逐字节相同**（9/9 实测），所以走 DOM 不损失任何图像质量。
+   *
+   * 订阅 URL 必须是**裸域**（www.shortical.com 会 301 到裸域，带 www 会让
+   * findSubscriptionForUrl 落空，与 FlickReels 恰好相反）。无平台中文，status 全走 new。
+   */
+  const shorticalAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        return u.hostname.endsWith('shortical.com') && u.pathname === '/';
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return await getShorticalItems();
+    },
+    extractId(item) {
+      // 详情页 URL 尾段的数字是站点全站规范 id，加 sc 前缀与全局去重键约定一致
+      const id = item && item.id ? String(item.id) : '';
+      return /^\d+$/.test(id) ? `sc${id}` : null;
+    },
+    extractBasic(item, tags, id, index) {
+      return extractShorticalFromItem(item, index, tags, id);
+    },
+    async fetchDetail(drama) {
+      // 列表卡片已含完整简介（与接口 description 逐字一致），无需二次请求
+      return drama;
+    }
+  };
+
+  /**
+   * ShortMax 适配器（www.shorttv.live，Nuxt 3 SSR，v1.6.9）——一个适配器覆盖同域名
+   * 两个入口（source 都是 shortmax，弹窗同一分类，**入口分派只按 location.pathname**）。
+   * 站点键取品牌名 shortmax（站点 og:site_name 与用户标签都是 ShortMax），host 是 shorttv.live。
+   *
+   * **两个入口都经 fetchServerHtml 重取服务端 HTML 解析，不读实时 DOM**，理由是首页板块
+   * hydrate 后变成按视口裁剪的轮播：799px 视口下 Most Popular 只剩 5 张卡，而 SSR HTML 里
+   * 恒为 8 张（两次实测一致）。__NUXT_DATA__ 里的 data 是加密 blob、pinia 是开发假数据，
+   * 载荷这条路走不通。
+   *
+   * 首页（?list=<板块名归一化>，缺省 most_popular）：列表**无简介、无 genres**，两者只有
+   * 详情页 /drama/<slug>-<id> 有 → genresFromDetail，且**详情失败一律跳过该卡**（理由与
+   * AppleTV 逐字相同：简介只有详情页这一个来源，而存量回填只补 genres 不补简介，
+   * 一旦存下无简介的卡就永远自愈不了）。
+   *
+   * /fandom：12 篇文章，列表项无主站 id，先用 smf-+slug 临时键（sm 后必是数字，带连字符的
+   * smf- 不会与之歧义）；文章页里有回主站的绝对链接 /episode/<slug>-<id>-1，据此改写为
+   * sm+id 并与首页条目全局去重（先到先得、不追加标签）。映射不到的不入库，由 scrapePage
+   * 的未映射闸门跳过、下轮重试。
+   *
+   * 页面恒英文（Accept-Language: zh-CN 不改变输出），无平台中文，status 全走 new。
+   */
+  const shortmaxAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        return u.hostname.endsWith('shorttv.live') && (u.pathname === '/' || /^\/fandom\/?$/.test(u.pathname));
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return isShortmaxFandom() ? await getShortmaxFandomItems() : await getShortmaxHomeItems();
+    },
+    extractId(item) {
+      if (isShortmaxFandom()) {
+        // 文章 slug 作临时键，详情里找到回主站链接后改写为 sm+id
+        const slug = item && item.slug ? String(item.slug).trim() : '';
+        return slug ? `smf-${slug}` : null;
+      }
+      const id = item && item.id ? String(item.id) : '';
+      return /^\d{3,}$/.test(id) ? `sm${id}` : null;
+    },
+    extractBasic(item, tags, id, index) {
+      return isShortmaxFandom()
+        ? extractShortmaxFandomFromItem(item, index, tags, id)
+        : extractShortmaxHomeFromItem(item, index, tags, id);
+    },
+    genresFromDetail: true,    // 首页与 fandom 的 genres 权威源都在主站 /drama/ 详情页
+    async fetchDetail(drama) {
+      return isShortmaxFandom() ? await fetchShortmaxFandomDetail(drama) : await fetchShortmaxDetail(drama);
+    }
+  };
+
+  /**
    * Netflix Tudum Top 10 适配器（www.netflix.com/tudum/top10 及其子榜单页，v1.5.8）：
    * 榜单数据 SSR 直出在内联脚本 `netflix.reactContext.models.graphql = JSON.parse('…')`
    * （Apollo 归一化缓存），DOM 上标题是 logo 图、无 /title/ 链接、无简介，页面全局
@@ -539,7 +674,7 @@
   };
 
   // 站点适配器注册表。
-  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, flickreels: flickreelsAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
+  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, flickreels: flickreelsAdapter, goodshort: goodshortAdapter, shortical: shorticalAdapter, shortmax: shortmaxAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
 
   /**
    * 添加抓取按钮
@@ -697,9 +832,9 @@
         // 保证弹窗/后台/CSV 的精确等值过滤对新卡永远成立。
         detailed.sourceListUrl = subscription.urlPattern;
 
-        // fandom 条目映射不到主站（itemId 仍为 mdf-/rsf- 临时键）＝给不了播放页，
+        // fandom 条目映射不到主站（itemId 仍为 mdf-/rsf-/smf- 临时键）＝给不了播放页，
         // 不入库；未保存条目下轮抓取自动重试，文章补了回链即可正常入库
-        if (/^(mdf|rsf)-/.test(String(detailed.itemId))) {
+        if (/^(mdf|rsf|smf)-/.test(String(detailed.itemId))) {
           console.log(`[ShortScraping] fandom 未映射条目跳过入库: ${detailed.title}`);
           continue;
         }
@@ -1906,6 +2041,518 @@
       scrapedAt: new Date().toISOString(),
       translatedAt: null
     };
+  }
+
+  /* ——— GoodShort / Shortical / ShortMax（v1.6.9）——————————————————————— */
+
+  /**
+   * 同源重取当前页的**服务端原始 HTML 文本**（GoodShort 与 ShortMax 共用）。
+   * 两家都不能读实时 DOM，理由各不相同、但解法相同：
+   *   · GoodShort 的 __INITIAL_STATE__ 内联脚本执行完就把自己从 DOM 里删掉；
+   *   · ShortMax 的板块 hydrate 后变成按视口裁剪的轮播（8 张卡在 799px 下只剩 5 张）。
+   * 同源请求不需要后台代理；失败返回 null，调用方按「本轮取不到」处理（下轮重试）。
+   */
+  async function fetchServerHtml(url = window.location.href) {
+    try {
+      const response = await fetch(url, { headers: { 'Accept': 'text/html' } });
+      if (!response.ok) {
+        console.warn(`[ShortScraping] 取服务端 HTML 失败 HTTP ${response.status}: ${url}`);
+        return null;
+      }
+      return await response.text();
+    } catch (e) {
+      console.warn(`[ShortScraping] 取服务端 HTML 异常: ${url}`, e.message);
+      return null;
+    }
+  }
+
+  function parseHtmlDocument(html) {
+    try {
+      return new DOMParser().parseFromString(html, 'text/html');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 从 text[start]（必须是 '{'）起做**字符串感知**的花括号匹配，截出完整的对象字面量。
+   * 不靠尾部锚点（GoodShort 的收尾是 `;(function(){…}())` 这种自删脚本，站点随时可改），
+   * 也不靠计数——简介里带 `{`/`}` 或引号时纯计数会截错（同 NetShort parseFlightArray 的理由）。
+   * 匹配不上返回 null。
+   */
+  function sliceBalancedObject(text, start) {
+    if (typeof text !== 'string' || text[start] !== '{') return null;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}' && --depth === 0) return text.slice(start, i + 1);
+    }
+    return null;
+  }
+
+  // 站内卡片同款缩放参数（293×412 ≈28KB；原图 ≈271KB）。无逗号，两种形态 Lark 捷径都能转
+  // 附件，但按 v1.6.4 定的「库里存小图、推出去放大」仍由 lark.js posterForPayload 剥掉
+  const GOODSHORT_POSTER_SUFFIX = '?w=293&h=412';
+
+  /**
+   * GoodShort 板块条目：同源重取 HTML → 解 window.__INITIAL_STATE__ →
+   * ChannelModule.channelBooks（10 条）。取不到一律返回空数组，scrapePage 安全跳过。
+   */
+  async function getGoodshortItems() {
+    const html = await fetchServerHtml();
+    if (!html) return [];
+
+    const marker = 'window.__INITIAL_STATE__=';
+    const at = html.indexOf(marker);
+    if (at < 0) {
+      console.log('[ShortScraping] GoodShort __INITIAL_STATE__ 未找到');
+      return [];
+    }
+    const literal = sliceBalancedObject(html, at + marker.length);
+    if (!literal) {
+      console.log('[ShortScraping] GoodShort __INITIAL_STATE__ 花括号不配对');
+      return [];
+    }
+
+    let state;
+    try {
+      state = JSON.parse(literal);
+    } catch (e) {
+      console.warn('[ShortScraping] GoodShort __INITIAL_STATE__ 解析失败:', e.message);
+      return [];
+    }
+
+    const books = state && state.ChannelModule && state.ChannelModule.channelBooks;
+    if (!Array.isArray(books)) {
+      console.log('[ShortScraping] GoodShort ChannelModule.channelBooks 未找到');
+      return [];
+    }
+    return books.filter(b => b && typeof b === 'object');
+  }
+
+  /**
+   * 从 channelBooks 条目提取基础信息。introduction 即详情页同一份文本（结尾的「…」
+   * 是站点自己的数据）。genres 合并两个站点原生英文来源：genreList 是粗分类（Romance），
+   * tagsList 是主题标签（Werewolf / Regret / Mafia），cleanGenres 去重。
+   * bookResourceUrl 形如 <slug>-<sourceId>，即详情页路径。
+   */
+  function extractGoodshortFromItem(item, index, tags, gsId) {
+    const title = String(item.bookName || item.name || '').trim();
+    const cover = String(item.cover || '').trim();
+    const resource = String(item.bookResourceUrl || '').trim();
+    const genreNames = (Array.isArray(item.genreList) ? item.genreList : []).map(g => g && g.name);
+    const tagNames = (Array.isArray(item.tagsList) ? item.tagsList : []).map(t => t && t.name);
+
+    return {
+      id: `goodshort_${gsId}_${index}`,
+      itemId: gsId,
+      title,
+      titleZh: '',
+      poster: cover ? cover + (cover.includes('?') ? '' : GOODSHORT_POSTER_SUFFIX) : '',
+      tags,
+      genres: cleanGenres([...genreNames, ...tagNames]),
+      description: String(item.introduction || '').trim(),
+      descriptionZh: '',
+      source: 'goodshort',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      // 订阅 URL 必须带 www（裸域 301 到 www），入库地址同口径
+      url: resource ? `https://www.goodshort.com/drama/${resource}` : '',
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
+  }
+
+  /**
+   * Shortical「Top Recommended」区块条目（读 hydrate 后的 DOM）。
+   * 区块按 ?list= 归一化后的标题定位（缺省 top_recommended），从 h2 向上找到第一个
+   * 含 /drama/ 链接的祖先即区块本身。每卡：/drama/<slug>-<id> 给 id 与标题，img 给封面，
+   * **简介取卡内最长的 <p>**——另一个 <p> 是「19.5K」这类观看量，按顺序取第一个会踩雷。
+   * 取完 DOM 再尽力用官方接口补全量 categories（见 backfillShorticalGenres）。
+   */
+  async function getShorticalItems() {
+    const list = new URLSearchParams(window.location.search).get('list') || '';
+    const wanted = /^[a-z0-9_-]+$/.test(list) ? list : 'top_recommended';
+
+    const section = await waitForShorticalSection(wanted);
+    if (!section) {
+      console.log(`[ShortScraping] Shortical 区块未找到: ${wanted}`);
+      return [];
+    }
+
+    const items = [];
+    const seen = new Set();
+    for (const link of section.querySelectorAll('a[href*="/drama/"]')) {
+      const href = link.getAttribute('href') || '';
+      const id = (href.match(/-(\d+)\/?$/) || [])[1];
+      if (!id || seen.has(id)) continue;          // 同一卡的封面与标题可能各是一个链接
+      seen.add(id);
+
+      // 从链接向上找到既含图又含简介的卡片根
+      let card = link;
+      while (card && card !== section && !card.querySelector('img')) card = card.parentElement;
+      if (!card || card === section) card = link.parentElement || link;
+
+      const img = card.querySelector('img');
+      const paragraphs = Array.from(card.querySelectorAll('p')).map(p => (p.textContent || '').trim());
+      const description = paragraphs.reduce((longest, t) => (t.length > longest.length ? t : longest), '');
+      // 卡片上只印一个分类（接口给的是全量，随后尽力覆盖）
+      const category = Array.from(card.querySelectorAll('div'))
+        .map(d => (d.textContent || '').trim())
+        .find(t => t && t.length < 40) || '';
+
+      items.push({
+        id,
+        title: (link.textContent || '').trim() || (img ? img.getAttribute('alt') || '' : ''),
+        poster: img ? (img.getAttribute('src') || '') : '',
+        description,
+        categories: cleanGenres([category]),
+        href
+      });
+    }
+
+    await backfillShorticalGenres(items);
+    return items;
+  }
+
+  /** 等区块出现且卡片数连续两次不变（纯前端渲染，同 waitForMyDramaItems 范式，最长约 8 秒）。 */
+  async function waitForShorticalSection(wanted) {
+    const query = () => {
+      const heading = Array.from(document.querySelectorAll('h1, h2, h3'))
+        .find(h => normalizeSectionName(h.textContent) === wanted);
+      if (!heading) return null;
+      let node = heading;
+      while (node && node !== document.body && node.querySelectorAll('a[href*="/drama/"]').length === 0) {
+        node = node.parentElement;
+      }
+      return node && node !== document.body ? node : null;
+    };
+
+    let last = -1;
+    for (let i = 0; i < 16; i++) {
+      const section = query();
+      const count = section ? section.querySelectorAll('a[href*="/drama/"]').length : 0;
+      if (count > 0 && count === last) return section;
+      last = count;
+      await new Promise(r => setTimeout(r, 500));
+    }
+    return query();
+  }
+
+  /**
+   * 尽力把 genres 从「卡片上那一个分类」补成官方接口的全量分类（实测每条 2~4 个）。
+   * 接口匿名调用 401，token 在页面 firebaseLocalStorageDb 里、内容脚本同源可读。
+   * **任何一步失败都静默保留 DOM 的保底值**——这条线只负责锦上添花，绝不能让抓取归零。
+   */
+  async function backfillShorticalGenres(items) {
+    if (!items.length) return;
+    try {
+      const token = await readShorticalToken();
+      if (!token) {
+        console.log('[ShortScraping] Shortical 未取到接口凭据，genres 用卡片上的单个分类');
+        return;
+      }
+      const response = await fetch('https://prod.shortical.com/api/v1/series/top-recommendations', {
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        console.log(`[ShortScraping] Shortical 接口 HTTP ${response.status}，genres 保留卡片值`);
+        return;
+      }
+      const payload = await response.json();
+      const rows = Array.isArray(payload) ? payload : [];
+      const byId = new Map();
+      for (const row of rows) {
+        const series = row && row.series;
+        if (series && series.id != null && Array.isArray(series.categories)) {
+          byId.set(String(series.id), cleanGenres(series.categories));
+        }
+      }
+      let filled = 0;
+      for (const item of items) {
+        const full = byId.get(item.id);
+        if (full && full.length) {
+          item.categories = full;
+          filled++;
+        }
+      }
+      console.log(`[ShortScraping] Shortical 已补全 ${filled}/${items.length} 条的内容类型标签`);
+    } catch (e) {
+      console.log('[ShortScraping] Shortical genres 补全跳过:', e.message);
+    }
+  }
+
+  /**
+   * 读页面 Firebase 会话里的 accessToken。**先用 databases() 确认库已存在再 open**——
+   * 直接 open 一个不存在的库会把它按版本 1 建出来且没有对象仓库，反而会把站点自己的
+   * 鉴权初始化搞坏。带 3 秒兜底，取不到一律返回 null。
+   */
+  async function readShorticalToken() {
+    const DB_NAME = 'firebaseLocalStorageDb';
+    const STORE = 'firebaseLocalStorage';
+    try {
+      if (typeof indexedDB === 'undefined' || typeof indexedDB.databases !== 'function') return null;
+      const existing = await indexedDB.databases();
+      if (!existing.some(db => db && db.name === DB_NAME)) return null;
+
+      return await new Promise(resolve => {
+        let settled = false;
+        const done = value => { if (!settled) { settled = true; resolve(value); } };
+        setTimeout(() => done(null), 3000);
+        const request = indexedDB.open(DB_NAME);
+        request.onerror = () => done(null);
+        request.onsuccess = () => {
+          try {
+            const db = request.result;
+            if (!db.objectStoreNames.contains(STORE)) return done(null);
+            const all = db.transaction(STORE, 'readonly').objectStore(STORE).getAll();
+            all.onerror = () => done(null);
+            all.onsuccess = () => {
+              const hit = (all.result || []).find(r => r && r.value && r.value.stsTokenManager
+                && typeof r.value.stsTokenManager.accessToken === 'string');
+              done(hit ? hit.value.stsTokenManager.accessToken : null);
+            };
+          } catch (e) {
+            done(null);
+          }
+        };
+      });
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function extractShorticalFromItem(item, index, tags, scId) {
+    return {
+      id: `shortical_${scId}_${index}`,
+      itemId: scId,
+      title: String(item.title || '').trim(),
+      titleZh: '',
+      poster: String(item.poster || '').trim(),
+      tags,
+      genres: cleanGenres(item.categories),
+      description: String(item.description || '').trim(),
+      descriptionZh: '',
+      source: 'shortical',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      // 订阅与入库都用裸域（www.shortical.com 会 301 到裸域）
+      url: item.href ? new URL(item.href, 'https://shortical.com').href : '',
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
+  }
+
+  const SHORTMAX_ORIGIN = 'https://www.shorttv.live';
+  // 站内卡片同款 OSS 缩放参数（293×390 ≈65KB；原图 ≈651KB）。参数含英文逗号，正是 Lark
+  // 「链接转附件」解析不了的字符 → 推送侧 lark.js posterForPayload 剥掉，两处成对改
+  const SHORTMAX_POSTER_SUFFIX = '?process=mediagate&x-oss-process=m_fill,w_293,h_390';
+
+  /** 入口分派只按 pathname（同 ReelShort 范式），不按 id 前缀猜。 */
+  function isShortmaxFandom() {
+    return /^\/fandom\/?$/.test(window.location.pathname);
+  }
+
+  /** 统一成站内卡片同款缩放形态：先剥掉原有查询串（详情页 preload 给的是 390×520）。 */
+  function shortmaxPoster(raw) {
+    const url = String(raw || '').trim();
+    return url ? url.split('?')[0] + SHORTMAX_POSTER_SUFFIX : '';
+  }
+
+  /** /drama/<slug>-<id>：由第一集播放页地址去掉尾部集号推得（实测 200）。 */
+  function shortmaxDetailUrl(episodeUrl) {
+    const url = String(episodeUrl || '');
+    if (!url.includes('/episode/')) return '';
+    return url.replace('/episode/', '/drama/').replace(/-\d+\/?$/, '');
+  }
+
+  /**
+   * ShortMax 首页板块条目：重取服务端 HTML 解析（实时 DOM 的轮播按视口裁剪）。
+   * 板块按 ?list=<板块名归一化> 选（'Most Popular 🔥' → most_popular，缺省即它）。
+   */
+  async function getShortmaxHomeItems() {
+    const html = await fetchServerHtml();
+    const doc = html ? parseHtmlDocument(html) : null;
+    if (!doc) return [];
+
+    const list = new URLSearchParams(window.location.search).get('list') || '';
+    const wanted = /^[a-z0-9_-]+$/.test(list) ? list : 'most_popular';
+    const section = Array.from(doc.querySelectorAll('section.section'))
+      .find(s => normalizeSectionName((s.querySelector('.section-title') || {}).textContent) === wanted);
+    if (!section) {
+      console.log(`[ShortScraping] ShortMax 首页板块未找到: ${wanted}`);
+      return [];
+    }
+
+    const items = [];
+    for (const card of section.querySelectorAll('.drama-card')) {
+      const detailLink = card.querySelector('a[href*="/drama/"]');
+      const episodeLink = card.querySelector('a[href*="/episode/"]');
+      const img = card.querySelector('img');
+      const href = detailLink ? detailLink.getAttribute('href') || '' : '';
+      const id = (href.match(/-(\d+)\/?$/) || [])[1];
+      if (!id) continue;
+      items.push({
+        id,
+        title: ((card.querySelector('.card-title') || {}).textContent || '').trim()
+          || (img ? img.getAttribute('alt') || '' : ''),
+        // data-src 是无参原图，src 带站内缩放参数——都归一到同一形态
+        cover: img ? (img.getAttribute('data-src') || img.getAttribute('src') || '') : '',
+        episodeHref: episodeLink ? episodeLink.getAttribute('href') || '' : ''
+      });
+    }
+    return items;
+  }
+
+  function extractShortmaxHomeFromItem(item, index, tags, smId) {
+    // 条目 url 存第一集播放页（同 ReelShort/NetShort 约定）；站点数据没给就按 id 构造不了，
+    // 退回详情页地址——两者都是有效落点，详情补采按 shortmaxDetailUrl 推导
+    const episode = item.episodeHref ? new URL(item.episodeHref, SHORTMAX_ORIGIN).href : '';
+    return {
+      id: `shortmax_${smId}_${index}`,
+      itemId: smId,
+      title: String(item.title || '').trim(),
+      titleZh: '',
+      poster: shortmaxPoster(item.cover),
+      tags,
+      genres: [],                 // 列表无类型字段，详情页 .tags 是权威源
+      description: '',            // 列表无简介，只有详情页 meta[name=description] 有
+      descriptionZh: '',
+      source: 'shortmax',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      url: episode,
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
+  }
+
+  /**
+   * 首页条目详情：同源取 /drama/<slug>-<id> 补简介与 genres。
+   * **失败一律返回 null 跳过该卡**（理由同 AppleTV：简介只有详情页这一个来源，而存量
+   * 回填只补 genres 不补简介，一旦存下无简介的卡就永远自愈不了），下轮抓取自动重试。
+   * opts.takeTitle：fandom 路径用，拿详情页 h1 当权威标题（文章标题不是剧名）。
+   */
+  async function fetchShortmaxDetail(drama, opts = {}) {
+    const detailUrl = shortmaxDetailUrl(drama.url);
+    if (!detailUrl) {
+      console.log(`[ShortScraping] ShortMax 无法推出详情页地址，跳过: ${drama.title}`);
+      return null;
+    }
+
+    const html = await fetchServerHtml(detailUrl);
+    const doc = html ? parseHtmlDocument(html) : null;
+    if (!doc) return null;
+
+    const metaDesc = doc.querySelector('meta[name="description"]');
+    const description = (metaDesc ? metaDesc.getAttribute('content') || '' : '').trim();
+    if (!description) {
+      console.log(`[ShortScraping] ShortMax 详情页无简介，跳过: ${drama.title}`);
+      return null;
+    }
+    drama.description = description;
+
+    // 移动端与桌面端各渲染一份同样的标签，cleanGenres 去重
+    drama.genres = cleanGenres(Array.from(doc.querySelectorAll('.tags a.tag')).map(a => a.textContent));
+
+    const heading = ((doc.querySelector('h1') || {}).textContent || '').trim();
+    if (heading && (opts.takeTitle || !drama.title)) drama.title = heading;
+
+    if (!drama.poster) {
+      const preload = doc.querySelector('link[rel="preload"][as="image"]');
+      if (preload) drama.poster = shortmaxPoster(preload.getAttribute('href'));
+    }
+    return drama;
+  }
+
+  /**
+   * fandom 文章：12 篇，列表项无主站 id。先用 smf-+slug 临时键，文章页里有回主站的
+   * /episode/<slug>-<id>-1 链接，据此改写为 sm+id 并与首页条目全局去重。
+   * 封面刻意不用 fandom 卡自己那张——是 1200×630 横版且带会过期的 auth_key。
+   */
+  async function getShortmaxFandomItems() {
+    const html = await fetchServerHtml();
+    const doc = html ? parseHtmlDocument(html) : null;
+    if (!doc) return [];
+
+    const items = [];
+    const seen = new Set();
+    for (const card of doc.querySelectorAll('.fandom-card')) {
+      // 卡上另有一个指向 /fandom/tags/… 的分类链接，要排掉
+      const link = Array.from(card.querySelectorAll('a[href^="/fandom/"]'))
+        .find(a => !/^\/fandom\/tags\//.test(a.getAttribute('href') || ''));
+      const href = link ? link.getAttribute('href') || '' : '';
+      const slug = (href.match(/^\/fandom\/([^/?#]+)/) || [])[1];
+      if (!slug || seen.has(slug)) continue;      // 同卡的图与标题各是一个链接
+      seen.add(slug);
+      items.push({
+        slug,
+        href,
+        title: ((card.querySelector('.fandom-card-title') || {}).textContent || '').trim(),
+        description: ((card.querySelector('.fandom-card-description') || {}).textContent || '').trim()
+      });
+    }
+    return items;
+  }
+
+  function extractShortmaxFandomFromItem(item, index, tags, tempId) {
+    return {
+      id: `shortmax_${tempId}_${index}`,
+      itemId: tempId,             // smf-+slug，映射成功后由 fetchShortmaxFandomDetail 改写
+      title: String(item.title || '').trim(),
+      titleZh: '',
+      poster: '',                 // 映射到主站后取详情页的竖版封面
+      tags,
+      genres: [],
+      description: String(item.description || '').trim(),
+      descriptionZh: '',
+      source: 'shortmax',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      url: item.href ? new URL(item.href, SHORTMAX_ORIGIN).href : '',
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
+  }
+
+  /**
+   * fandom 文章详情：找回主站链接 → 改写 itemId/url → 再取主站详情页拿权威标题/简介/
+   * genres/封面。找不到回链就原样返回（itemId 仍是 smf- 临时键），由 scrapePage 的
+   * 未映射闸门跳过入库、下轮重试。
+   */
+  async function fetchShortmaxFandomDetail(drama) {
+    if (!drama.url) return drama;
+
+    const html = await fetchServerHtml(drama.url);
+    const doc = html ? parseHtmlDocument(html) : null;
+    if (!doc) return drama;
+
+    const episodeLink = Array.from(doc.querySelectorAll('a[href*="/episode/"]'))
+      .map(a => a.getAttribute('href') || '')
+      .find(href => /\/episode\/.+-\d+-\d+\/?$/.test(href));
+    if (!episodeLink) {
+      console.log(`[ShortScraping] ShortMax fandom 文章无回主站链接（下轮重试）: ${drama.title}`);
+      return drama;
+    }
+
+    const episodeUrl = new URL(episodeLink, SHORTMAX_ORIGIN).href;
+    const id = (episodeUrl.match(/-(\d+)-\d+\/?$/) || [])[1];
+    if (!id) return drama;
+
+    drama.itemId = `sm${id}`;
+    drama.url = episodeUrl;
+    // 文章标题是「剧名：Full Guide & Streaming Options」这类 SEO 句式，以主站 h1 为准
+    return await fetchShortmaxDetail(drama, { takeTitle: true });
   }
 
   /**

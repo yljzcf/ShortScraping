@@ -40,6 +40,9 @@
         "*://*.dramashorts.io/*",
         "*://*.netshort.com/*",
         "*://*.flickreels.net/*",
+        "*://*.goodshort.com/*",
+        "*://*.shortical.com/*",
+        "*://*.shorttv.live/*",
         "*://*.royalroad.com/*"
       ],
       "js": ["src/shared/site-registry.js", "src/shared/translate-config.js", "src/content/content.js"],
