@@ -219,7 +219,7 @@ async function loadConfigFromJsonFiles() {
       translateConfig,
       larkConfig
     });
-    await pruneDramasOutsideConfiguredUrls(urlTags);
+    await runGuarded('订阅外历史清理', () => pruneDramasOutsideConfiguredUrls(urlTags));
   } else {
     const stored = await chrome.storage.local.get('urlTags');
     urlTags = Array.isArray(stored.urlTags) ? stored.urlTags : [];
@@ -227,17 +227,33 @@ async function loadConfigFromJsonFiles() {
     await chrome.storage.local.set({ scheduleConfig, translateConfig, larkConfig });
   }
 
-  await syncBotWatermark(larkConfig);
-
-  await runLegacyDramaMigrations();
-  await dropCompanyField();
-  await resetPartialTranslations();
-  await resetNonChineseTitleZh();
-  await migrateReelshortEpisodeUrls();
+  // 水位线同步与一次性迁移各自兜底：任一抛错只记日志、下轮唤醒重试（各自的完成标记未置位）。
+  // 它们的失败不能向上冒泡——setupAlarms 挂在本函数之后（顶层 .then 与 onInstalled/onStartup
+  // 两条路都是先 load 再 setup），某迁移确定性抛错＝看门狗与定时任务一起装不上、用户以为在跑
+  // 其实全停（2026-09-17 审计 H1）。配置种子 set 失败仍照旧向上传播：那是「配置没恢复成」。
+  await runGuarded('群机器人水位线同步', () => syncBotWatermark(larkConfig));
+  for (const [label, step] of [
+    ['itemId/标签/未映射 fandom 迁移', runLegacyDramaMigrations],
+    ['company 字段移除', dropCompanyField],
+    ['半成品翻译复位', resetPartialTranslations],
+    ['非中文译名复位', resetNonChineseTitleZh],
+    ['ReelShort 播放页 URL 迁移', migrateReelshortEpisodeUrls]
+  ]) {
+    await runGuarded(label, step);
+  }
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
 
   return { urlTags, scheduleConfig, translateConfig };
+}
+
+/** 旁路步骤的统一兜底：失败只 warn，不向上冒泡（见 loadConfigFromJsonFiles 内注释）。 */
+async function runGuarded(label, step) {
+  try {
+    await step();
+  } catch (error) {
+    console.warn(`[ShortScraping] ${label}失败（下轮唤醒重试，不影响配置恢复与定时任务）:`, error?.message || error);
+  }
 }
 
 async function fetchJsonFile(fileName, fallback) {

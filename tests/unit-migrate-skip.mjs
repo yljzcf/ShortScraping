@@ -177,6 +177,33 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   check('T3c 下轮重试完成迁移并置标记', rawStore.legacyDramaMigrated === true && !('imdbId' in ((rawStore.dramas || [])[0] || {})), JSON.stringify(rawStore.dramas?.[0]));
 }
 
+// ---------- T4 迁移/清理抛错不得阻断配置恢复（v1.6.7，2026-09-17 审计 H1） ----------
+// loadConfigFromJsonFiles 是 SW 每次唤醒的入口，setupAlarms 挂在它后面（顶层 .then 与
+// onInstalled/onStartup 两条路都是先 load 再 setup）。此前水位线同步与五个迁移全是裸 await：
+// 某迁移确定性抛错＝看门狗与定时任务永远装不上，用户以为在跑、其实全停。
+// 注意 T3 的语义不变：config 种子 set 失败仍向上传播（那是「配置没恢复成」，不是迁移问题）。
+{
+  await seedLegacy();
+  const origReset = globalThis.resetNonChineseTitleZh;
+  globalThis.resetNonChineseTitleZh = async () => { throw new Error('unit stub: 迁移炸了'); };
+  let result = null, threw = false;
+  await loadConfigFromJsonFiles().then(r => { result = r; }, () => { threw = true; }); // eslint-disable-line no-undef
+  globalThis.resetNonChineseTitleZh = origReset;
+  check('T4a 单个迁移抛错时 loadConfigFromJsonFiles 仍正常完成（不掐掉 setupAlarms）',
+    !threw && Array.isArray(result?.urlTags), `threw=${threw} result=${JSON.stringify(result)}`);
+  check('T4b 排在它后面的迁移照常完成并置标（不是整条链一起死）',
+    rawStore.rsEpisodeUrlMigrated === true, String(rawStore.rsEpisodeUrlMigrated));
+  check('T4c 抛错的迁移标记未置位（下轮唤醒重试）',
+    rawStore.nonChineseTitleZhReset === undefined, String(rawStore.nonChineseTitleZhReset));
+
+  const origPrune = globalThis.pruneDramasOutsideConfiguredUrls;
+  globalThis.pruneDramasOutsideConfiguredUrls = async () => { throw new Error('unit stub: 清理炸了'); };
+  threw = false;
+  await loadConfigFromJsonFiles().catch(() => { threw = true; }); // eslint-disable-line no-undef
+  globalThis.pruneDramasOutsideConfiguredUrls = origPrune;
+  check('T4d 订阅外清理抛错同样不阻断配置恢复', threw === false, `threw=${threw}`);
+}
+
 console.log = origLog; console.warn = origWarn; console.error = origError;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

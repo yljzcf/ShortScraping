@@ -13,6 +13,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 - 💾 **CSV 同步**：本地同步服务把时间线实时写入 `db/timeline.csv`（UTF-8 BOM + CRLF，Excel/WPS 直接打开；v1.5.3 起含 `genres` 内容类型标签列，`tags`/`genres` 多值以英文逗号分隔——v1.5.13 起，与 Lark 推送约定一致）
 - 📡 **局域网共享**：同一局域网的手机/平板/电脑打开 `http://<本机IP>:31919/` 即可只读浏览时间线，数据更新经 SSE 自动刷新；链接显示在弹窗底栏（点击复制 + 二维码）
 - 🔔 **版本自检**：弹窗对比远端仓库 master 的 `manifest.json`，有新版本以橙色提示
+- 🤖 **Lark 推送**：单卡按钮把条目 POST 到多维表格工作流 webhook；群机器人在条目翻译完成后自动推一张卡到飞书 / Lark 群（可关；配置飞书自建应用凭据时附封面真图；新订阅 URL 的首轮抓取只入库不推送，避免刷屏）
 
 ## 🌍 支持站点
 
@@ -64,7 +65,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 | 网页订阅 | 勾选式订阅管理：候选规则来自目录 `config/tag.example.json`（按站点分组），保存后写回 `config/tag.json`；不支持在界面自由添加 URL，新增规则＝编辑目录文件后重载扩展 |
 | 定时任务 | **完整编辑器**（v1.5.2）：调度模式切换、间隔/Cron 表达式编辑、实时预览下一次执行时间；非法表达式拒绝保存，保存即重排定时任务并写回 `config/cron.json`（需同步服务） |
 | 翻译接口 | 完整表单编辑 `config/trans.json` 的全部字段（模式/端点/密钥/模型/提示词/批量/延迟/超时），保存写回文件（需同步服务） |
-| Lark 推送 | 配置多维表格工作流 webhook 与超时，「发送测试」验证链路，保存写回 `config/lark.json`（需同步服务）；payload 15 键含内容类型标签 `genres`（v1.5.3，已在用的工作流重发测试即可捕获新参数） |
+| Lark 推送 | 三节：多维表格工作流 webhook 与超时（「发送测试」验证链路）；群机器人 webhook 与开关（翻译完成后自动推卡，「发送机器人测试」真发一张）；飞书自建应用 App ID / Secret（两个都填才上传封面真图，留空发无图卡）。保存写回 `config/lark.json`（需同步服务）；工作流 payload 15 键含内容类型标签 `genres`（v1.5.3，已在用的工作流重发测试即可捕获新参数） |
 | 数据存档 | 检测同步服务与 CSV 路径；**导出 JSON 备份 / 导出 CSV / 导入恢复（按条目 ID 去重合并）/ 按站点与时间两段式清理**（v1.5.2） |
 
 ## ⚙️ 配置文件
@@ -204,7 +205,7 @@ server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 ## 🔒 数据与隐私
 
 - 抓取数据保存在本机：`chrome.storage.local`（扩展内，已申请 `unlimitedStorage`，不受 10MB 配额限制——数千条记录约 5MB，按月增长）与 `db/`（CSV/JSON，若启用同步服务）。启用局域网共享时，同网设备可以只读浏览。
-- 站外请求包括抓取订阅站点、调用配置的翻译接口、检查更新，以及用户点击按钮时推送卡片至配置的飞书 webhook。
+- 站外请求包括抓取订阅站点、调用配置的翻译接口、检查更新，以及 Lark 推送：用户点击单卡按钮时 POST 到配置的多维表格工作流 webhook；开启群机器人后，条目翻译完成即自动 POST 到配置的机器人 webhook（可随时关闭）；填写了飞书自建应用凭据时，还会把封面图上传到 `open.feishu.cn` 换取卡片图片 key（不填则发无图卡）。
 - 四个本地配置（含翻译密钥和 webhook）均被 `.gitignore` 排除，不会随仓库分发。
 - 同步服务写接口仅接受回环连接，并且只认首次写入时固定下来的那个扩展（记录在 `config/sync-origin.json`，换目录重载扩展后删除该文件即可重新固定）；所有写请求都要求 `application/json`，本机管理脚本仍可调用。内容脚本仅注入支持的平台域名。
 - 共享页按主机地址类型放行：IP 地址与 `localhost` 直接可用，用自定义域名访问需启动时加 `--allow-host=<域名>`。
@@ -222,13 +223,14 @@ ShortScraping/
 │   ├── content/                  # 内容脚本：十站点抓取适配器（content.js + content.css）
 │   ├── popup/                    # 扩展弹窗（popup.html/css/js）
 │   ├── settings/                 # 设置中心：配置文件/网页订阅/定时任务/翻译接口/Lark 推送/数据存档
-│   └── shared/                   # 共享模块：translator.js（翻译）、timeline-render.js（时间线渲染，弹窗与共享页共用）、qrcode.js（二维码）
+│   └── shared/                   # 共享模块（UMD 多端共用）：site-registry（站点元数据单一真源）、site-tabs（分组折叠标签条）、timeline-render（时间线渲染）、timeline-csv（CSV 序列化/导入校验）、schedule-config（cron 解析）、translate-config（翻译配置与文本判据）、subscription-config（订阅规范化）、url-match（订阅 URL 归属）、translator（翻译）、lark（Lark 推送/多维表格导出/群机器人卡片）、qrcode（二维码）
 ├── assets/icons/                 # 扩展图标、站点图标与默认海报
 ├── config/                       # 本地配置（gitignore）与 example 模板
 ├── server/                       # 本地同步服务；根目录仅日常入口 start-sync.bat/.command、setup-launcher.bat
 │   ├── sync-server.js            # CSV 写入 + 配置写回 + 局域网只读共享（SSE）
 │   ├── public/                   # 局域网共享页（share.html/css/js）
 │   └── tools/                    # 管理脚本：stop-sync/restart-sync/fix-csv-encoding（.bat + .command）、Node 助手 stop.js/fix-csv-encoding.js、remove-launcher.bat、launcher.vbs
+├── scripts/                      # update-site-matches.mjs（由 site-registry 生成 manifest 域名清单）、export-lark-csv.mjs（多维表格导入文件）
 ├── tests/                       # 隔离回归测试与夹具（npm test）
 ├── db/timeline.csv               # CSV 输出（运行时生成）
 └── db/timeline.json              # 时间线快照（共享页数据源，服务重启后回读）

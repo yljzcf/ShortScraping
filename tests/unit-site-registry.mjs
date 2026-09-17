@@ -130,6 +130,35 @@ for (const [rel, prefix] of [
 }
 check('T4j 共享页静态白名单含 translate-config', serverSrc.includes("'/shared/translate-config.js'"), '');
 
+// lark.js 在**模块求值时**就取 SiteRegistry.SOURCE_NAMES / TranslateConfig.titleDisplay / TimelineCsv
+// （lark.js:42-55），排在它们前面＝设置页加载即白屏、后台 SW 启动即 ReferenceError。只有设置页与后台
+// 加载它，两处加载序都要逐个守（2026-09-17 审计 H4：此前顺序对但零测试）
+{
+  const LARK_DEPS = ['site-registry.js', 'timeline-csv.js', 'translate-config.js'];
+  const settingsHtml = fs.readFileSync(path.join(worktreeRoot, 'src/settings/settings.html'), 'utf8');
+  const htmlAt = needle => settingsHtml.indexOf(`src="../shared/${needle}"`);
+  const htmlLarkAt = htmlAt('lark.js');
+  check('T4k settings.html 里 site-registry / timeline-csv / translate-config 都排在 lark 之前',
+    htmlLarkAt >= 0 && LARK_DEPS.every(n => htmlAt(n) >= 0 && htmlAt(n) < htmlLarkAt),
+    `lark=${htmlLarkAt} deps=${JSON.stringify(LARK_DEPS.map(htmlAt))}`);
+  const bgAt = needle => bgSrc.indexOf(`importScripts('../shared/${needle}')`);
+  const bgLarkAt = bgAt('lark.js');
+  check('T4l 后台 importScripts 里 site-registry / timeline-csv / translate-config 都排在 lark 之前',
+    bgLarkAt >= 0 && LARK_DEPS.every(n => bgAt(n) >= 0 && bgAt(n) < bgLarkAt),
+    `lark=${bgLarkAt} deps=${JSON.stringify(LARK_DEPS.map(bgAt))}`);
+}
+
+// ---------- T7 content.js 适配器注册表 ≡ 站点全集 ----------
+// ADAPTERS 是手写映射；注册表加了站点却漏写适配器＝scrapePage 查不到 adapter 只 log 一句、静默零抓取
+// （与 FlickReels「订阅漏 www → 静默零抓取」同一失败类别，2026-09-17 审计 H5）
+{
+  const contentSrc = fs.readFileSync(path.join(worktreeRoot, 'src/content/content.js'), 'utf8');
+  const m = contentSrc.match(/const ADAPTERS = \{([^}]*)\}/);
+  const keys = m ? m[1].split(',').map(s => s.split(':')[0].trim()).filter(Boolean) : [];
+  check('T7 content.js ADAPTERS 键集与 CATEGORY_SOURCES 全集一致',
+    keys.length > 0 && deepEq([...keys].sort(), [...SiteRegistry.CATEGORY_SOURCES].sort()), JSON.stringify(keys));
+}
+
 // 折叠标签条（v1.5.11）：弹窗与共享页共用 site-tabs.js，且都不再手写站点按钮
 for (const [rel, needle] of [
   ['src/popup/popup.html', '../shared/site-tabs.js'],
