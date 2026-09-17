@@ -16,6 +16,42 @@
     "tags": ["IMDB", "MyDrama"]
   },
   {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1124838",
+    "tags": ["IMDB", "DramaWave"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1045147",
+    "tags": ["IMDB", "GoodShort"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1028734",
+    "tags": ["IMDB", "DramaBox"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1065580",
+    "tags": ["IMDB", "ShortMax"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1167893",
+    "tags": ["IMDB", "Shortical"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1016895",
+    "tags": ["IMDB", "ReelShort"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1116348",
+    "tags": ["IMDB", "DramaShorts"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1149472",
+    "tags": ["IMDB", "FlickReels"]
+  },
+  {
+    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1104898",
+    "tags": ["IMDB", "NetShort"]
+  },
+  {
     "url": "https://store.steampowered.com/category/visual_novel?flavor=contenthub_newandtrending",
     "tags": ["Steam", "视觉小说", "人气蹿升"]
   },
