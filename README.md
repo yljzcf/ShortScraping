@@ -247,7 +247,7 @@ ShortScraping/
 
 ## 验证与升级
 
-使用 Node.js 22 或更新版本运行 `npm test`（当前 35 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+使用 Node.js 22 或更新版本运行 `npm test`（当前 38 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
 
 更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本域名清单，测试会检查两者一致。
 
