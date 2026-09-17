@@ -1,6 +1,6 @@
 # ShortScraping - 爆款短剧监控助手
 
-Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRoad、My Drama、ReelShort、DramaShorts、NetShort、FlickReels、Netflix、Apple TV 十个平台的榜单/板块，新条目以时间线卡片展示，自动翻译为中文，并可经本地服务同步为 CSV、在局域网内只读共享。
+Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRoad、My Drama、ReelShort、DramaShorts、NetShort、FlickReels、GoodShort、Shortical、ShortMax、Netflix、Apple TV 十三个平台的榜单/板块，新条目以时间线卡片展示，自动翻译为中文，并可经本地服务同步为 CSV、在局域网内只读共享。
 
 适合谁：追踪海外短剧/游戏/网文热榜动向的编辑、制片、市场与数据同学——打开弹窗就能看到"最近各平台新上了什么"，无需逐站巡逻。
 
@@ -27,17 +27,25 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 | DramaShorts | `/top-movies` 榜单与首页板块（`?list=<板块id>`） | 页内 `__NEXT_DATA__` 直出，无需请求详情页 | `ds`+UUID |
 | NetShort | 首页板块（`?list=<板块名>`，如 `trending_now` / `exclusive_originals`） | 页内 RSC flight 数据直出，无需请求详情页 | `ns`+shortPlayId |
 | FlickReels | 首页板块（`?list=<板块名>`，如 `hot_picks` / `7_day_star`；订阅须写 `https://www.flickreels.net/?list=…` 带 www） | 页内 Nuxt `__NUXT_DATA__`（devalue 扁平格式）SSR 直出，无需请求详情页 | `fr`+playlet_id |
+| GoodShort | 板块「More」页 `/channel/<板块>`（`Most-Trending` / `Top-in-GoodShort` / `Hot-List`，各 10 条） | 同源重取服务端 HTML 解 `window.__INITIAL_STATE__`，列表字段齐全，无需请求详情页 | `gs`+sourceId |
+| Shortical | 首页 Top Recommended 板块（`?list=top_recommended`，9 条；订阅须写裸域 `https://shortical.com/`） | 纯前端渲染，等 hydrate 后读 DOM；内容类型标签尽力经官方接口补全量 | `sc`+数字 id |
+| ShortMax | 首页板块（`?list=<板块名>`，如 `most_popular`）与 `/fandom` 文章流；订阅须带 www | 同源重取服务端 HTML 解析（实时 DOM 的轮播会按视口裁剪条目）+ 详情页补简介与类型标签 | `sm`+数字 id |
 | Netflix | Tudum Top 10 六个榜单页：`/tudum/top10`、`/tv`、`/films-non-english`、`/tv-non-english`、`/united-states`、`/united-states/tv` | 页内 `netflix.reactContext` 内联脚本 SSR 榜单数据直出；类型标签经后台代理取作品 `/title/` 页 | `nf`+videoId |
 | Apple TV | Top 10 TV Shows 与 Top 10 Movies 两个榜单页（`/us/collection/most-popular-now/uts.col.Charts{Shows,Movies}.tvs.sbd.4000`） | 页内 `serialized-server-data` JSON SSR 直出榜单；简介与类型标签经后台代理取作品详情页 | `at`+`umc.cmc.` 编号 |
 
 站点细节：
 
 - **Steam**：成人专属/受限作品（接口 `success=false`）自动跳过；官方中文简介与英文不同时直接作为翻译结果。
-- **My Drama / ReelShort 的 fandom 入口**：文章条目通过文中回主站的链接换取主站 id，与主站条目全局去重；换不到 id 的条目本轮不入库，待文章补上回链后下轮抓取自动重试。
+- **My Drama / ReelShort / ShortMax 的 fandom 入口**：文章条目通过文中回主站的链接换取主站 id，与主站条目全局去重；换不到 id 的条目本轮不入库，待文章补上回链后下轮抓取自动重试。同一部剧只留一张卡，标签先到先得——已被主站板块抓到的剧不会再追加 `fandom` 标签。
 - **DramaShorts**：首页板块 id 支持 `top_trending`（默认）/ `popular_now` / `audience_favorite`；板块内容每次请求轮换属站点自身行为，多轮定时抓取会逐步累积。规则目录当前未内置 `audience_favorite`（该板块为大池随机采样、单次重合度低），需要时可手动写入 `config/tag.json`。
 - **Apple TV**：榜单即 Apple TV+ 自家的 Top 10，两条订阅分别对应剧集榜与电影榜（标签 `Apple, TV, US` / `Apple, Movie, US`）。榜单页本身不含简介，简介与内容类型标签由后台无 cookie 代理取作品详情页补齐，与你的 Apple TV+ 登录状态无关；某条详情取不到时该作品本轮不入库，下轮榜单复现时自动重来（避免留下永远补不上简介的卡）。内容脚本只注入这两个榜单页，不进 Apple TV 的播放/浏览页。**若抓取成片失败**：先检查本机代理/VPN 是否把 tv.apple.com 的 HTTP/3(QUIC) 流量分流到了非 Apple 边缘节点——那条路会一律返回 404，关闭 QUIC 或调整分流规则即可。
 - **Netflix**：内容脚本只注入 `/tudum/top10*` 栏目页，不进 Netflix 播放/浏览页；同一作品同时上全球榜与美国榜时按作品全局去重、先到先得（订阅顺序全球榜在前，美国榜实际记录「上美国榜但未上全球榜」的作品）；标签约定 `Global`（英语榜）/ `Global-nE`（非英语榜）/ `US`；每周名次与观看量不入库，只记录首次进榜时间。内容类型标签取自作品 `/title/` 页 Netflix 自身分类（如 Thrillers / Dramas / Comedies，英文原值），由后台无 cookie 代理抓取，与你的 Netflix 登录状态无关；单次抓取失败的作品会在下轮榜单复现时自动补上。
 - **FlickReels**：首页板块按标题归一化订阅（`Hot Picks` → `hot_picks`、`7-Day Star` → `7_day_star`，无参数默认 `hot_picks`），站点改板块文案时调整订阅 `?list=` 值即可；订阅 URL 必须带 `www.`（裸域会 301 到 www，跳转后与订阅串不等就不会入库）；列表数据自带全文简介与英文标签，无需请求详情页；播放页链接的 slug 由站点服务端校验、错一字即 404，扩展逐字复刻了站点的 slug 算法；「未上线预告」条目（站内只提示 Not released yet）本轮跳过，上线后下轮自动入库；`/tc/` 是另一套繁中片库而非同片中文版，标题一律走 AI 翻译。
+- **GoodShort**：订阅的是每个板块的「More」页 `/channel/<板块>` 而不是首页——首页每个板块只给 6 条，`/channel/` 页正好 10 条且首页那 6 条是它的子集。简介、封面、内容类型标签全在列表数据里，不需要额外请求详情页（列表里结尾带「…」的简介是站点自己的原文，不是被截断）。
+- **Shortical**：站点是纯前端渲染，扩展等页面渲染完成后再读；卡片上只印一个分类，扩展会尽力再向站点接口取全量分类补上，取不到就用卡片上那一个（不影响入库）。订阅 URL 要写**裸域** `https://shortical.com/`（带 `www.` 会被 301 到裸域，跳转后与订阅串不等就不会入库）。
+- **ShortMax**：站点首页板块在浏览器里是横向轮播、**只渲染当前可见的那几张卡**（窗口窄时 8 条会只剩 5 条），扩展改为重新取一次服务端页面来解析，条数不再受窗口宽度影响。列表本身没有简介和类型标签，两者都从作品详情页补齐；某条详情取不到时该作品本轮不入库、下轮重来（避免留下永远补不上简介的卡）。订阅 URL 须带 `www.`。
+
+> 三家新站点的域名形态各不相同，订阅 URL 写错一个字符就会静默零抓取：GoodShort 与 ShortMax 必须带 `www.`，Shortical 必须**不带**。规则目录里已按正确形态内置。
 
 ## 📦 安装与快速上手
 
@@ -222,7 +230,7 @@ ShortScraping/
 ├── README.md / LICENSE / .gitignore / .gitattributes
 ├── src/
 │   ├── background/background.js  # 后台 service worker：调度、抓取/翻译编排、CSV 推送
-│   ├── content/                  # 内容脚本：十站点抓取适配器（content.js + content.css）
+│   ├── content/                  # 内容脚本：十三站点抓取适配器（content.js + content.css）
 │   ├── popup/                    # 扩展弹窗（popup.html/css/js）
 │   ├── settings/                 # 设置中心：配置文件/网页订阅/定时任务/翻译接口/Lark 推送/数据存档
 │   └── shared/                   # 共享模块（UMD 多端共用）：site-registry（站点元数据单一真源）、site-tabs（分组折叠标签条）、timeline-render（时间线渲染）、timeline-csv（CSV 序列化/导入校验）、schedule-config（cron 解析）、translate-config（翻译配置与文本判据）、subscription-config（订阅规范化）、url-match（订阅 URL 归属）、translator（翻译）、lark（Lark 推送/多维表格导出/群机器人卡片）、qrcode（二维码）
@@ -247,7 +255,7 @@ ShortScraping/
 
 ## 验证与升级
 
-使用 Node.js 22 或更新版本运行 `npm test`（当前 38 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+使用 Node.js 22 或更新版本运行 `npm test`（当前 41 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
 
 更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本域名清单，测试会检查两者一致。
 
