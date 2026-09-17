@@ -121,6 +121,13 @@ if (SC) {
     countUnder(prefixDramas, ['https://b.test/y']) === 1, String(countUnder(prefixDramas, ['https://b.test/y'])));
 
   check('R12 dramas 非数组不抛', countUnder(null, ['https://a.test/x']) === 0 && countUnder('x', ['https://a.test/x']) === 0, '');
+
+  // 备份文件要正好是「将被删的那批」，故取数组的那支才是实现，count 只是它的长度
+  const picked = SC.dramasUnderUrls(dramas, ['https://b.test/y']);
+  check('R13 dramasUnderUrls 返回命中的原始条目',
+    deepEq(picked.map(d => d.id), ['2', '3']), show(picked.map(d => d.id)));
+  check('R14 countDramasUnderUrls 恒等于 dramasUnderUrls 的长度',
+    countUnder(dramas, ['https://b.test/y', 'https://c.test/z']) === SC.dramasUnderUrls(dramas, ['https://b.test/y', 'https://c.test/z']).length, '');
 }
 
 // ---------- W 组：接线探针（三端 + 夹具） ----------

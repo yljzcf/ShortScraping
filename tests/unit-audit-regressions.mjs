@@ -164,8 +164,14 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
     const context = vm.createContext({
       SiteRegistry: Registry, TranslateConfig: Config, ScheduleConfig: { DEFAULT_CONFIG: {} }, Lark: { DEFAULT_CONFIG: {} },
     SubscriptionConfig: require('../src/shared/subscription-config.js'),
+      UrlMatch: require('../src/shared/url-match.js'),
       document: { addEventListener() {} }, window: { confirm: () => true },
-      chrome: { storage: { local: { set: deps.set } }, runtime: { sendMessage: async () => ({ success: true }) } },
+      // get 是 v1.6.7 退订闸门新增的读取点（算「这次会删掉几条历史」）；
+      // 本夹具只验写失败的回滚语义，给空库即可——doomed 为 0 就不会走下载分支
+      chrome: {
+        storage: { local: { get: async () => ({}), set: deps.set } },
+        runtime: { getManifest: () => ({ version: 'fixture' }), sendMessage: async () => ({ success: true }) }
+      },
       fetch: deps.fetch
     });
     let script = fs.readFileSync(new URL('../src/settings/settings.js', import.meta.url), 'utf8');

@@ -861,15 +861,24 @@
   async function saveSubscriptions() {
     try {
       const normalized = normalizeUrlTags(readSubscriptionsFromDom());
-      const clearingAll = normalized.length === 0 && state.urlTags.length > 0;
-      if (clearingAll &&
-          !window.confirm('取消全部订阅将清理对应的历史记录，并同步清空 CSV 和共享页。是否继续？')) return;
+      // 退订＝删历史，且没有任何回收站：确认与备份必须发生在动 storage 之前
+      // （2026-09-17 事故：取消 4 条 Steam 订阅，1847 条历史被静默删除）。
+      // 此前只有「取消全部」走这条路，取消部分订阅同样删历史却一声不吭。
+      const removed = SubscriptionConfig.removedSubscriptionUrls(state.urlTags, normalized);
+      if (removed.length > 0) {
+        const { dramas = [] } = await chrome.storage.local.get('dramas');
+        const doomed = SubscriptionConfig.dramasUnderUrls(dramas, removed);
+        if (!window.confirm(buildUnsubscribeConfirmText(removed, doomed.length))) return;
+        // 备份严格先于 storage 写：写 storage 会经 onChanged 立刻触发后台清理，
+        // 之后再想导出就晚了。unit-unsubscribe-guard G3b 钉住这个次序。
+        if (doomed.length > 0) exportDoomedDramas(doomed);
+      }
 
-      // 取消全部订阅必须「文件优先」：写 storage 会经 onChanged 立刻让后台清空整库，
+      // 退订必须「文件优先」：写 storage 会经 onChanged 立刻让后台清掉对应历史，
       // 而 config/tag.json 没落盘时下次 SW 唤醒又按旧文件复活订阅——用户得到的是
-      // 「历史没了、订阅回来了」。文件写成功才动 storage；其余增减仍是 storage 优先
+      // 「历史没了、订阅回来了」。文件写成功才动 storage；纯新增/改标签仍是 storage 优先
       // （写文件失败最多下次唤醒回滚到旧订阅，不会删历史）。
-      const preflight = clearingAll ? await trySyncTagConfig(normalized) : null;
+      const preflight = removed.length > 0 ? await trySyncTagConfig(normalized) : null;
       if (preflight && !preflight.ok) {
         showStatus(`未取消订阅：写回 config/tag.json 失败（${preflight.error}）——同步服务未启动时若只改扩展本地配置，历史会被清空、而订阅会在扩展下次唤醒时从文件回读恢复`, false);
         return;
@@ -890,6 +899,37 @@
       console.error('[ShortScraping] 保存网页订阅失败:', e);
       showStatus(`保存失败：${e.message}`, false);
     }
+  }
+
+  /** 退订确认文案。零历史时不提备份——那一支不会产生文件，提了就是假承诺。 */
+  function buildUnsubscribeConfirmText(removedUrls, doomedCount) {
+    const LIST_LIMIT = 5;
+    const shown = removedUrls.slice(0, LIST_LIMIT).map(url => `　· ${url}`).join('\n');
+    const more = removedUrls.length > LIST_LIMIT ? `\n　…… 等共 ${removedUrls.length} 条` : '';
+    const head = `本次将取消 ${removedUrls.length} 条订阅：\n${shown}${more}\n`;
+    if (doomedCount === 0) return `${head}\n其下暂无历史记录，不会删除任何数据。\n\n是否继续？`;
+    return `${head}\n其下的 ${doomedCount} 条历史记录会被一并删除，且不可恢复。\n`
+      + `继续前会自动下载这 ${doomedCount} 条的 JSON 备份文件；日后如需还原，`
+      + `要先把订阅重新加回来，再用下方「导入恢复」写回。\n\n是否继续？`;
+  }
+
+  /**
+   * 把即将被清理的条目落成一份备份文件。**只备将被删的那批**，不是全量——
+   * 导入是增量合并（重复会跳过），全量每次退订都下几 MB 没必要。
+   * payload 沿用 handleExportJson 的 shortscraping-backup 形态，「导入恢复」原样能吃。
+   */
+  function exportDoomedDramas(doomed) {
+    const payload = {
+      format: 'shortscraping-backup',
+      backupVersion: 1,
+      extensionVersion: chrome.runtime.getManifest().version,
+      exportedAt: new Date().toISOString(),
+      reason: 'unsubscribe',
+      count: doomed.length,
+      dramas: doomed
+    };
+    triggerDownload(`shortscraping-unsubscribed-${formatStamp()}.json`,
+      new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
   }
 
   async function saveTranslateConfig() {

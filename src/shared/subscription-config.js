@@ -82,21 +82,26 @@
   }
 
   /**
-   * 落在给定订阅 URL 下的条目数。判定复用 UrlMatch（尾斜杠归一后的**精确等值**），
-   * 与后台 filterDramasByConfiguredUrls 同口径——提示的条数必须等于实际会被清掉的条数，
-   * 否则确认框就成了假情报。缺 sourceListUrl 的条目永不命中。
+   * 落在给定订阅 URL 下的条目。判定复用 UrlMatch（尾斜杠归一后的**精确等值**），
+   * 与后台 filterDramasByConfiguredUrls 同口径——确认框提示的条数必须等于实际会被
+   * 清掉的条数、备份文件必须正好是那批条目，否则提示与备份都成了假情报。
+   * 缺 sourceListUrl 的条目永不命中。
    */
-  function countDramasUnderUrls(dramas, urls) {
+  function dramasUnderUrls(dramas, urls) {
     const set = UrlMatch.buildConfiguredUrlSet(urls);
-    if (set.size === 0) return 0;
-    let count = 0;
-    for (const drama of (Array.isArray(dramas) ? dramas : [])) {
-      if (drama && UrlMatch.isUrlCovered(drama.sourceListUrl, set)) count++;
-    }
-    return count;
+    if (set.size === 0) return [];
+    return (Array.isArray(dramas) ? dramas : [])
+      .filter(drama => drama && UrlMatch.isUrlCovered(drama.sourceListUrl, set));
   }
 
-  const api = { MAX_TAGS, normalizeUrlTags, toTagFileEntries, removedSubscriptionUrls, countDramasUnderUrls };
+  function countDramasUnderUrls(dramas, urls) {
+    return dramasUnderUrls(dramas, urls).length;
+  }
+
+  const api = {
+    MAX_TAGS, normalizeUrlTags, toTagFileEntries,
+    removedSubscriptionUrls, dramasUnderUrls, countDramasUnderUrls
+  };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
