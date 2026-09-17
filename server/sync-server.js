@@ -73,6 +73,79 @@ function writeJsonAtomic(filePath, value) {
   writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+// —— 覆盖 db/timeline.* 之前留痕（v1.6.7）——
+// 2026-09-17 事故：用户退订后扩展推来的快照少了 1847 条，服务端原样覆盖，
+// timeline.csv 与 timeline.json 两份本地副本同时消失（原子写 rename 不留旧文件）。
+// 两档留痕，都只挂在**真正要覆盖**的那一支（同内容推送本就不重写，见 /sync），
+// 所以 SW 每次唤醒的预热推送不会刷屏：
+//   每日档 timeline-YYYYMMDD.{csv,json}   当天第一次改写前的状态，保留最近 14 天；
+//   drop 档 timeline-YYYYMMDD-HHMMSS-mmm-drop.{csv,json}
+//                                        条数清空或跌超 20% 时额外留一份，保留最近 10 份。
+// 事故形态必定落在 drop 档；日常改写只多出每天两个文件。
+const HISTORY_DIR = path.join(DB_DIR, 'history');
+const HISTORY_KEEP_DAILY = 14;
+const HISTORY_KEEP_DROP = 10;
+const HISTORY_DROP_RATIO = 0.8;
+
+// drop 档的时刻带毫秒：退订那一刻扩展可能在同一秒内连推两次（清理后紧跟一次预热），
+// 只到秒会让后一份覆盖前一份、正好丢掉最该留的那一版。字典序仍等于时间序。
+function stampParts(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return {
+    day: `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`,
+    time: `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}-${String(date.getMilliseconds()).padStart(3, '0')}`
+  };
+}
+
+// 源文件都是原子写落定的完整文件，copyFileSync 拿到的必然是一致快照；
+// 不存在的那份（首启时还没有 timeline.json）跳过不报错。
+function copyTimelinePair(baseName) {
+  const copied = [];
+  for (const [source, ext] of [[CSV_PATH, 'csv'], [TIMELINE_JSON_PATH, 'json']]) {
+    if (!fs.existsSync(source)) continue;
+    const target = path.join(HISTORY_DIR, `${baseName}.${ext}`);
+    fs.copyFileSync(source, target);
+    copied.push(target);
+  }
+  return copied;
+}
+
+// 同类备份只保留最近 keep 份：文件名以 YYYYMMDD[-HHMMSS] 开头，字典序即时间序
+function rotateHistory(pattern, keep) {
+  const names = fs.readdirSync(HISTORY_DIR).filter(name => pattern.test(name)).sort();
+  for (const name of names.slice(0, Math.max(0, names.length - keep))) {
+    fs.rmSync(path.join(HISTORY_DIR, name), { force: true });
+  }
+}
+
+/**
+ * 返回 drop 档路径（未触发则空数组）供调用方写进告警。
+ * 备份失败只警告不抛——留痕是保险，不该成为同步的前置条件。
+ */
+function backupBeforeOverwrite(nextCount, prevCount) {
+  try {
+    fs.mkdirSync(HISTORY_DIR, { recursive: true });
+    const { day, time } = stampParts();
+
+    const dailyDone = fs.existsSync(path.join(HISTORY_DIR, `timeline-${day}.csv`))
+      || fs.existsSync(path.join(HISTORY_DIR, `timeline-${day}.json`));
+    if (!dailyDone) {
+      copyTimelinePair(`timeline-${day}`);
+      rotateHistory(/^timeline-\d{8}\.csv$/, HISTORY_KEEP_DAILY);
+      rotateHistory(/^timeline-\d{8}\.json$/, HISTORY_KEEP_DAILY);
+    }
+
+    if (!(prevCount > 0 && nextCount < prevCount * HISTORY_DROP_RATIO)) return [];
+    const dropPaths = copyTimelinePair(`timeline-${day}-${time}-drop`);
+    rotateHistory(/^timeline-\d{8}-\d{6}-\d{3}-drop\.csv$/, HISTORY_KEEP_DROP);
+    rotateHistory(/^timeline-\d{8}-\d{6}-\d{3}-drop\.json$/, HISTORY_KEEP_DROP);
+    return dropPaths;
+  } catch (error) {
+    console.warn('[ShortScraping Sync] 落盘前备份失败（不影响同步）:', error.message);
+    return [];
+  }
+}
+
 // CSV 列序/转义/去重/normalizeDrama 单一真源在 src/shared/timeline-csv.js
 // （与设置页「导出 CSV」共用）；本函数只负责落盘
 function writeTimelineCsv(dramas) {
@@ -456,21 +529,26 @@ async function handleRequest(req, res) {
       }
       const dramas = payload.dramas;
       const configured = filterDramasByTagConfig(dramas);
-      // 合法空推送或订阅已取消导致清空时留痕；配置读取失败已在过滤阶段拒绝。
-      if (configured.length === 0 && latestDramas.length > 0) {
-        console.warn(
-          `[ShortScraping Sync] 警告：收到空时间线推送（原始 ${dramas.length} 条 / 过滤后 0 条），` +
-          `现有快照 ${latestDramas.length} 条即将被清空——若非主动清空订阅，请检查扩展数据与 config/tag.json`
-        );
-      }
       // 同内容跳过 CSV 重写：扩展 SW 每次唤醒都预热推送，绝大多数与上次内容一致，
       // 无谓的磁盘重写全部拦在这里；existsSync 守卫保住「CSV 被手删后下次推送自愈」的行为
       const serialized = JSON.stringify(configured);
       let count;
+      let dropBackups = [];
       if (serialized === latestSerialized && fs.existsSync(CSV_PATH)) {
         count = new Set(latestDramas.map(d => d.itemId || d.id)).size;
       } else {
+        // 覆盖前留痕；备份只在真会重写时发生，同内容的预热推送不触发
+        dropBackups = backupBeforeOverwrite(configured.length, latestDramas.length);
         count = writeTimelineCsv(configured);
+      }
+
+      // 合法空推送或订阅已取消导致清空时留痕；配置读取失败已在过滤阶段拒绝。
+      if (configured.length === 0 && latestDramas.length > 0) {
+        console.warn(
+          `[ShortScraping Sync] 警告：收到空时间线推送（原始 ${dramas.length} 条 / 过滤后 0 条），` +
+          `现有快照 ${latestDramas.length} 条即将被清空——若非主动清空订阅，请检查扩展数据与 config/tag.json` +
+          (dropBackups.length > 0 ? `；覆盖前的快照已备份到 ${dropBackups.join('、')}` : '')
+        );
       }
 
       // 更新局域网共享快照并广播给已连接页面；内容未变化时不 bump 版本
