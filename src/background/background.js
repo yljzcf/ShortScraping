@@ -1024,17 +1024,13 @@ async function performTranslateOnce(source) {
 
     // 回填一条翻译结果并计进度：按 drama.id 精确定位，不依赖数组顺序（批量保对应的锚点）
     //
-    // 完成判据＝「该翻的都翻出来了」：标题非空须有 titleZh，简介非空须有 descriptionZh
-    // （已有的值也算数——fillOnly 下它们不会被冲掉）。只回一半的留 status='new'
-    // 下轮补另一半，不再像此前那样一律标 trans 把半成品永久定格。
+    // 完成判据（「该翻的都翻出来了」）在 updateSingleDramaTranslation 队列内按合并后的
+    // 记录统一计算：只回一半的留 status='new' 下轮补另一半（updated=false），不再像
+    // 此前那样一律标 trans 把半成品永久定格。
     const applyOne = async (drama, result) => {
       const hasTranslation = Boolean(result?.title || result?.desc);
       if (hasTranslation) {
-        const needTitle = Boolean(String(drama.title || '').trim());
-        const needDesc = Boolean(String(drama.description || '').trim());
-        const complete = (!needTitle || Boolean(result.title) || Boolean(drama.titleZh))
-          && (!needDesc || Boolean(result.desc) || Boolean(drama.descriptionZh));
-        const updated = await updateSingleDramaTranslation(drama.id, result, { fillOnly: true, complete });
+        const updated = await updateSingleDramaTranslation(drama.id, result, { fillOnly: true });
         progressedCount++;
         if (updated) {
           translatedCount++;
@@ -1153,11 +1149,14 @@ const MAX_PARTIAL_TRANSLATE_ATTEMPTS = 3;
  *
  * options.fillOnly（批量翻译线用）：只补空缺，绝不覆盖既有译文——保护 Steam
  * 官方中文这类平台自带译名，也让「半成品下轮补另一半」不会把上轮成果冲掉。
- * 弹窗单卡 🌍 重译不传该选项，仍是新结果优先（重译的语义就是要覆盖）。
+ * 弹窗单卡 🌍 重译（translateSingle）不传该选项，仍是新结果优先（重译的语义就是要覆盖）。
  *
- * options.complete（同上）：false 表示该翻的还没翻全，此时**保持 status='new'**
- * 让下一轮继续补。此前无论多残缺都直接标 trans，导致「有简介无标题」的条目被
- * 永久定格、再也不进翻译队列（全库实测 660 条这样卡死）。
+ * 完成判据＝「该翻的都翻出来了」，在队列内按**合并后的记录**统一计算：标题非空须有
+ * titleZh，简介非空须有 descriptionZh（既有值也算数）。没翻全的半成品**保持 status='new'**
+ * 让下一轮继续补、translateAttempts 累加，达上限才收口。此前无论多残缺都直接标 trans，
+ * 导致「有简介无标题」的条目被永久定格、再也不进翻译队列（全库实测 660 条这样卡死）。
+ * 三个写入口（批量线 / translateSingle / applyTranslation）共用这一份判据，不由调用方各算。
+ * 返回值＝是否收口为 trans（半成品返回 false；卡片不存在也返回 false）。
  */
 function updateSingleDramaTranslation(dramaId, result, options = {}) {
   return enqueueDramaWrite('翻译更新', async () => {
@@ -1174,7 +1173,9 @@ function updateSingleDramaTranslation(dramaId, result, options = {}) {
       ? (current.descriptionZh || result.desc || '')
       : (result.desc || current.descriptionZh);
 
-    const complete = options.complete !== false;
+    const needTitle = Boolean(String(current.title || '').trim());
+    const needDesc = Boolean(String(current.description || '').trim());
+    const complete = (!needTitle || Boolean(titleZh)) && (!needDesc || Boolean(descriptionZh));
     const attempts = complete ? 0 : (Number(current.translateAttempts) || 0) + 1;
     const done = complete || attempts >= MAX_PARTIAL_TRANSLATE_ATTEMPTS;
 
@@ -1192,6 +1193,36 @@ function updateSingleDramaTranslation(dramaId, result, options = {}) {
     await writeDramasInQueue(next);
     return done;
   });
+}
+
+/**
+ * 弹窗单卡 🌍 翻译（translateSingle 消息）：请求在 SW 内发起——弹窗一关页面即销毁，
+ * 页内 fetch 随之中断，与 larkPush 走后台同理。消息只带 dramaId、按 id 从 storage
+ * 取卡，不信任调用方传对象。落库复用 updateSingleDramaTranslation：不传 fillOnly
+ * （重译的语义就是要覆盖），完成判据与批量线同口径——该翻的没翻全保持 status='new'、
+ * translateAttempts 累加、达上限收口。空结果 / 接口异常一律 success:false 回传文案，
+ * 卡片原样不动（与批量线「没回内容不写记录」一致）。
+ */
+async function handleTranslateSingle(dramaId) {
+  const drama = (await getDramasSnapshot()).find(d => d.id === dramaId);
+  if (!drama) {
+    return { success: false, error: '未找到该卡片数据' };
+  }
+
+  try {
+    await loadTranslator();
+    const result = await Translator.translateTitleAndDesc(drama.title, drama.description);
+    if (!result?.title && !result?.desc) {
+      return { success: false, error: '翻译结果为空，请检查翻译接口配置或控制台错误' };
+    }
+
+    const done = await updateSingleDramaTranslation(dramaId, result);
+    console.log(`[ShortScraping] 单卡翻译${done ? '完成' : '只补到一半'}: ${drama.title}`);
+    return { success: true, complete: done };
+  } catch (e) {
+    console.warn('[ShortScraping] 单卡翻译失败:', e.message);
+    return { success: false, error: e.message };
+  }
 }
 
 /**
@@ -1728,8 +1759,8 @@ const SAMPLE_LARK_DRAMA = {
 };
 
 /**
- * 弹窗卡片按钮：按 id 从 storage 取卡再推送（对齐 applyTranslation 只传 id
- * 的惯例，不信任调用方传对象）。配置永远读 storage，是唯一事实源。
+ * 弹窗卡片按钮：按 id 从 storage 取卡再推送（与 translateSingle 同款只传 id，
+ * 不信任调用方传对象）。配置永远读 storage，是唯一事实源。
  */
 async function handleLarkPush(dramaId) {
   const { larkConfig } = await chrome.storage.local.get('larkConfig');
@@ -1938,6 +1969,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'fetchDetailHtml') {
     // fetchDetailHtmlForContent 全路径返回对象、不 reject，无需 catch
     fetchDetailHtmlForContent(request.url).then(sendResponse);
+    return true;
+  }
+
+  if (request.action === 'translateSingle') {
+    handleTranslateSingle(request.dramaId).then(sendResponse).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
     return true;
   }
 

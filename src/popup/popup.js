@@ -833,12 +833,45 @@
   const larkInFlight = new Set();
   const LARK_BUTTON_ICON = '<img src="../../assets/icons/lark.png" alt="Lark">';
 
-  function setLarkButtonState(dramaId, fallbackBtn, html, disabled) {
-    const btn = Array.from(elements.containers.timeline.querySelectorAll('.btn-lark'))
+  /**
+   * 卡片右上角按钮（🌍 / Lark）的瞬态：⏳ 进行中、✅/❌ 终态 2 秒窗口。写入按 selector +
+   * data-id 重查当前节点（找不到才退回传入的旧节点），并记进 cardButtonStates——
+   * storage.onChanged 的全量重渲染会把按钮重建成默认态，而翻译成功本身就会触发一次
+   * 重渲染（落库 → onChanged），不重贴的话 ✅ 只闪几十毫秒（2026-09-17 真机实测）。
+   * renderTimeline 重建卡片后调 reapplyCardButtonStates 按记录重贴；复原默认态时忘掉。
+   */
+  const cardButtonStates = new Map();   // `${selector}|${dramaId}` → { selector, dramaId, html, disabled }
+
+  function applyCardButtonState(selector, dramaId, fallbackBtn, html, disabled) {
+    const btn = Array.from(elements.containers.timeline.querySelectorAll(selector))
       .find(node => node.dataset.id === dramaId) || fallbackBtn;
     if (!btn) return;
     btn.innerHTML = html;
     btn.disabled = disabled;
+  }
+
+  function setCardButtonState(selector, dramaId, fallbackBtn, html, disabled) {
+    cardButtonStates.set(`${selector}|${dramaId}`, { selector, dramaId, html, disabled });
+    applyCardButtonState(selector, dramaId, fallbackBtn, html, disabled);
+  }
+
+  function resetCardButtonState(selector, dramaId, fallbackBtn, defaultHtml) {
+    cardButtonStates.delete(`${selector}|${dramaId}`);
+    applyCardButtonState(selector, dramaId, fallbackBtn, defaultHtml, false);
+  }
+
+  function reapplyCardButtonStates() {
+    for (const { selector, dramaId, html, disabled } of cardButtonStates.values()) {
+      applyCardButtonState(selector, dramaId, null, html, disabled);
+    }
+  }
+
+  function setLarkButtonState(dramaId, fallbackBtn, html, disabled) {
+    setCardButtonState('.btn-lark', dramaId, fallbackBtn, html, disabled);
+  }
+
+  function resetLarkButtonState(dramaId, fallbackBtn) {
+    resetCardButtonState('.btn-lark', dramaId, fallbackBtn, LARK_BUTTON_ICON);
   }
 
   async function pushCardToLark(dramaId, btn) {
@@ -848,15 +881,14 @@
     }
 
     larkInFlight.add(dramaId);
-    btn.disabled = true;
-    btn.innerHTML = '⏳';
+    setLarkButtonState(dramaId, btn, '⏳', true);
 
     try {
       const response = await chrome.runtime.sendMessage({ action: 'larkPush', dramaId });
 
       if (response?.notConfigured) {
         showToast('Lark 推送未配置，已打开设置页', { type: 'info' });
-        setLarkButtonState(dramaId, btn, LARK_BUTTON_ICON, false);
+        resetLarkButtonState(dramaId, btn);
         openSettings();
         return;
       }
@@ -878,59 +910,54 @@
     // ✅/❌ 展示 2 秒后复原图标；期间若同卡又发起新推送，交给新流程接管
     setTimeout(() => {
       if (!larkInFlight.has(dramaId)) {
-        setLarkButtonState(dramaId, btn, LARK_BUTTON_ICON, false);
+        resetLarkButtonState(dramaId, btn);
       }
     }, 2000);
   }
 
   /**
-   * 翻译单张卡片
+   * 翻译单张卡片：只发 translateSingle 消息，翻译请求与落库都在后台完成——弹窗一关
+   * 页面即销毁，页内发起的 fetch 会被掐断，与 Lark 推送走后台同理。防重与终态回写
+   * 与 pushCardToLark 同款：translateInFlight 按 dramaId 兜底（瞬态重贴之外的第二道
+   * 防线），终态经 setCardButtonState 按 data-id 重查节点。成功不弹 toast（卡片经
+   * onChanged 自会刷新）；只翻出一半时后台保持待翻译等下轮补齐，要提示用户这不是失败。
    */
+  const translateInFlight = new Set();
+  const TRANSLATE_BUTTON_ICON = '🌍';
+
   async function translateSingleCard(dramaId, btn) {
-    btn.disabled = true;
-    btn.innerHTML = '⏳';
+    if (translateInFlight.has(dramaId)) {
+      showToast('该卡片正在翻译中', { type: 'info' });
+      return;
+    }
+
+    translateInFlight.add(dramaId);
+    setCardButtonState('.btn-translate', dramaId, btn, '⏳', true);
 
     try {
-      // 找到对应的数据
-      const drama = state.dramas.find(d => d.id === dramaId);
-      if (!drama) {
-        throw new Error('未找到该卡片数据');
+      const response = await chrome.runtime.sendMessage({ action: 'translateSingle', dramaId });
+      if (!response?.success) {
+        throw new Error(response?.error || '后台翻译失败');
       }
 
-      // 调用翻译
-      if (typeof Translator === 'undefined' || typeof Translator.translateTitleAndDesc !== 'function') {
-        throw new Error('翻译模块未正确加载，请刷新扩展后重试');
+      setCardButtonState('.btn-translate', dramaId, btn, '✅', true);
+      if (response.complete === false) {
+        showToast('只翻出一部分，已保存；剩余部分留待下轮自动补齐', { type: 'info', duration: 4000 });
       }
-
-      console.log('[ShortScraping] 开始翻译:', drama.title);
-      const result = await Translator.translateTitleAndDesc(drama.title, drama.description);
-      console.log('[ShortScraping] 翻译结果:', result);
-
-      if (!result?.title && !result?.desc) {
-        throw new Error('翻译结果为空，请检查翻译接口配置或控制台错误');
-      }
-
-      // 写入结果：经后台单写者队列，避免与并行的抓取/翻译写互相覆盖
-      const applied = await chrome.runtime.sendMessage({ action: 'applyTranslation', dramaId, result });
-      if (!applied?.success) {
-        throw new Error(applied?.error || '后台写入翻译结果失败');
-      }
-      // UI 会通过 storage.onChanged 自动更新
-
-      btn.innerHTML = '✅';
-      setTimeout(() => {
-        btn.innerHTML = '🌍';
-        btn.disabled = false;
-      }, 2000);
-
     } catch (e) {
       console.error('[ShortScraping] 翻译失败:', e);
-      btn.innerHTML = '❌';
-      setTimeout(() => {
-        btn.innerHTML = '🌍';
-        btn.disabled = false;
-      }, 2000);
+      showToast(`翻译失败：${e.message}`, { type: 'error', duration: 5000 });
+      setCardButtonState('.btn-translate', dramaId, btn, '❌', true);
+    } finally {
+      translateInFlight.delete(dramaId);
     }
+
+    // ✅/❌ 展示 2 秒后复原图标；期间若同卡又发起新翻译，交给新流程接管
+    setTimeout(() => {
+      if (!translateInFlight.has(dramaId)) {
+        resetCardButtonState('.btn-translate', dramaId, btn, TRANSLATE_BUTTON_ICON);
+      }
+    }, 2000);
   }
 
   /**
@@ -1088,6 +1115,8 @@
       onLarkPush: pushCardToLark,
       onOpenUrl: (url) => chrome.tabs.create({ url })
     });
+    // 整树重建把按钮全部重建成默认态，把进行中 / 终态的瞬态按 data-id 贴回去
+    reapplyCardButtonStates();
     elements.states.empty.classList.toggle('hidden', hasData);
     restoreScroll();
   }
