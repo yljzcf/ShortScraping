@@ -320,34 +320,37 @@
     let state = null;
     let suppressClick = false;
 
-    groupEl.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0 && event.pointerType === 'mouse') return;
-      suppressClick = false;                       // 上一次拖动若在组外松手就没 click 可吞，这里兜底清掉
-      state = beginDrag(event.clientX, groupEl.scrollLeft);
-      if (typeof groupEl.setPointerCapture === 'function') groupEl.setPointerCapture(event.pointerId);
-    });
-
-    groupEl.addEventListener('pointermove', (event) => {
+    const onMove = (event) => {
       if (!state || !state.active) return;
       state = moveDrag(state, event.clientX);
       if (!state.moved) return;
       groupEl.classList.add('is-dragging');
       groupEl.scrollLeft = state.scrollLeft;
-      event.preventDefault();                      // 拖动期间不选中图标/不触发原生图片拖拽
-    });
+      event.preventDefault();                      // 拖动期间不选中图标
+    };
 
-    const finish = (event) => {
+    const finish = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
       if (!state) return;
       suppressClick = endDrag(state).suppressClick;
       state = null;
       groupEl.classList.remove('is-dragging');
-      if (event && event.pointerId != null && typeof groupEl.releasePointerCapture === 'function'
-        && typeof groupEl.hasPointerCapture === 'function' && groupEl.hasPointerCapture(event.pointerId)) {
-        groupEl.releasePointerCapture(event.pointerId);
-      }
     };
-    groupEl.addEventListener('pointerup', finish);
-    groupEl.addEventListener('pointercancel', finish);
+
+    groupEl.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 && event.pointerType === 'mouse') return;
+      suppressClick = false;                       // 上一次拖动若在组外松手就没 click 可吞，这里兜底清掉
+      state = beginDrag(event.clientX, groupEl.scrollLeft);
+      // **绝不能用 setPointerCapture**（2026-09-18 用户报「能拖但点不动」的真凶）：指针被捕获后
+      // Chrome 会把随后的 click 改派到捕获元素上，图标自己的 click 监听器再也收不到 → 单击失效。
+      // 改成把 move/up 挂到 window 上：一样能在手滑出标签栏后继续跟手，而 click 的派发目标不受影响
+      // （拖动那一下仍由下面捕获阶段的拦截器吞掉）。监听器随每次拖动装卸，不累积。
+      window.addEventListener('pointermove', onMove, { passive: false });
+      window.addEventListener('pointerup', finish);
+      window.addEventListener('pointercancel', finish);
+    });
 
     groupEl.addEventListener('click', (event) => {
       if (!suppressClick) return;

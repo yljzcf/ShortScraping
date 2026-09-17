@@ -241,6 +241,20 @@ check('F6 site-tabs.js 拖动时加 is-dragging 类', tabsSrc.includes("classLis
 check('F7 site-tabs.js 在捕获阶段拦 click（拖完那一下不选站）',
   /addEventListener\('click',[\s\S]{0,260}?\}, true\)/.test(tabsSrc), '');
 
+// F8/F9 是 2026-09-18 线上 bug「能拖但点不动」的定影。**这两条不是风格洁癖**：
+// 指针被 setPointerCapture 捕获后，Chrome 会把随后的 click 改派到捕获元素上，
+// 图标自己的 click 监听器再也收不到 → 单击选站彻底失效，而拖动一切正常（所以很像「只是点击没反应」）。
+// 当时没被测出来，是因为 e2e 用 JS 合成的 btn.click()——那条路压根不经过 pointer 事件。
+// 真正能抓住它的是「真实鼠标序列点一下」，见 tmp/probe-tab-click.mjs 的 T1/T3。
+// 只匹配**调用**（`.setPointerCapture(`），不匹配文字——上面那段注释里就写着这个词，
+// 按裸词匹配会让守卫被自己的说明绊倒
+check('F8 site-tabs.js 绝不调用 setPointerCapture（会把 click 改派到捕获元素上，单击选站失效）',
+  !/\.setPointerCapture\s*\(/.test(tabsSrc), '源码里有 .setPointerCapture( 调用');
+check('F9 拖动的 move/up 挂在 window 上（手滑出标签栏仍跟手，且不影响 click 派发目标）',
+  /window\.addEventListener\('pointermove'/.test(tabsSrc)
+  && /window\.addEventListener\('pointerup'/.test(tabsSrc)
+  && /window\.removeEventListener\('pointermove'/.test(tabsSrc), '');
+
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);
