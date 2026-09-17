@@ -1,5 +1,6 @@
 // Existing browser unit fixtures stub importScripts; preload its new shared dependencies.
 require('../src/shared/translate-config.js');
+require('../src/shared/url-match.js'); // subscription-config 的依赖，须先于它
 require('../src/shared/subscription-config.js');
 
 // Recursive cleanup must stay inside a directory created by this test process.

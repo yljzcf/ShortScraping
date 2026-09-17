@@ -11,11 +11,20 @@
  * 扩展内部形态 { urlPattern, tags }（storage.urlTags）；文件形态 { url, tags }
  * （config/tag.json）由 toTagFileEntries 投影。两者都只输出这两个键，多余字段不透传。
  *
+ * v1.6.7 追加退订侧的两个纯函数（removedSubscriptionUrls / countDramasUnderUrls）：
+ * 设置页要在写 storage **之前**算出「这次退订会删掉几条历史」并弹确认，判定口径
+ * 必须与后台 filterDramasByConfiguredUrls 逐字一致，故同样委托 url-match.js。
+ *
  * 加载方式：后台 importScripts / 设置页 <script>（挂 globalThis.SubscriptionConfig）/
- * 同步服务 require（module.exports）。
+ * 同步服务 require（module.exports）。**须在 url-match.js 之后加载**。
  */
 (function (global) {
   'use strict';
+
+  // 依赖解析与 lark.js / site-tabs.js 同范式：Node 侧自己 require，浏览器侧取已加载的全局
+  const UrlMatch = (typeof module !== 'undefined' && module.exports)
+    ? require('./url-match.js')
+    : global.UrlMatch;
 
   const MAX_TAGS = 3;
 
@@ -51,7 +60,43 @@
     return normalizeUrlTags(rawTags).map(({ urlPattern, tags }) => ({ url: urlPattern, tags }));
   }
 
-  const api = { MAX_TAGS, normalizeUrlTags, toTagFileEntries };
+  /**
+   * 保存订阅时「这次取消掉了哪些订阅 URL」。返回**旧配置里的原始写法**（未归一），
+   * 供确认框原样展示；比对本身走 UrlMatch 的尾斜杠归一，故仅尾斜杠差异不算退订。
+   * 只改标签不改 URL 也不算退订——那是编辑，历史不该被牵连。
+   */
+  function removedSubscriptionUrls(prevUrlTags, nextUrlTags) {
+    const nextSet = UrlMatch.buildConfiguredUrlSet(
+      (Array.isArray(nextUrlTags) ? nextUrlTags : []).map(item => item && (item.urlPattern || item.url))
+    );
+    const out = [];
+    const seen = new Set();
+    for (const item of (Array.isArray(prevUrlTags) ? prevUrlTags : [])) {
+      const raw = item && (item.urlPattern || item.url);
+      const normalized = UrlMatch.normalizeListUrl(raw);
+      if (!normalized || nextSet.has(normalized) || seen.has(normalized)) continue;
+      seen.add(normalized);
+      out.push(String(raw));
+    }
+    return out;
+  }
+
+  /**
+   * 落在给定订阅 URL 下的条目数。判定复用 UrlMatch（尾斜杠归一后的**精确等值**），
+   * 与后台 filterDramasByConfiguredUrls 同口径——提示的条数必须等于实际会被清掉的条数，
+   * 否则确认框就成了假情报。缺 sourceListUrl 的条目永不命中。
+   */
+  function countDramasUnderUrls(dramas, urls) {
+    const set = UrlMatch.buildConfiguredUrlSet(urls);
+    if (set.size === 0) return 0;
+    let count = 0;
+    for (const drama of (Array.isArray(dramas) ? dramas : [])) {
+      if (drama && UrlMatch.isUrlCovered(drama.sourceListUrl, set)) count++;
+    }
+    return count;
+  }
+
+  const api = { MAX_TAGS, normalizeUrlTags, toTagFileEntries, removedSubscriptionUrls, countDramasUnderUrls };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;

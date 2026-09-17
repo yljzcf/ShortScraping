@@ -69,6 +69,60 @@ if (SC) {
   check('N12 被丢弃的无效条目不占去重名额', deepEq(invalidFirst, [{ urlPattern: 'https://a.test', tags: ['ok'] }]), show(invalidFirst));
 }
 
+// ---------- R 组：退订差集与受影响条数（v1.6.7）----------
+// 背景：2026-09-17 用户取消 Steam 订阅后 1847 条历史被静默删除。设置页要在写 storage
+// 之前算出「将删掉几条」并弹确认，判定口径必须与后台 filterDramasByConfiguredUrls
+// 逐字一致（尾斜杠归一后的**精确等值**，不是 startsWith），否则提示的条数与实际删的对不上。
+if (SC) {
+  const removed = SC.removedSubscriptionUrls;
+  const countUnder = SC.countDramasUnderUrls;
+
+  const prev = [{ urlPattern: 'https://a.test/x', tags: ['A'] }, { urlPattern: 'https://b.test/y', tags: ['B'] }];
+
+  check('R1 无删除时返回空数组', deepEq(removed(prev, prev), []), show(removed(prev, prev)));
+
+  check('R2 部分退订只返回被去掉的那条',
+    deepEq(removed(prev, [prev[0]]), ['https://b.test/y']), show(removed(prev, [prev[0]])));
+
+  check('R3 全部退订返回全部', deepEq(removed(prev, []), ['https://a.test/x', 'https://b.test/y']), show(removed(prev, [])));
+
+  check('R4 新增订阅不算删除', deepEq(removed([prev[0]], prev), []), show(removed([prev[0]], prev)));
+
+  // 尾斜杠只是手写配置的书写差异，不该被当成「退订了旧的又订了新的」
+  check('R5 仅尾斜杠差异不算删除',
+    deepEq(removed([{ urlPattern: 'https://a.test/x/', tags: ['A'] }], [{ urlPattern: 'https://a.test/x', tags: ['A'] }]), []), '');
+
+  check('R6 非数组输入不抛', deepEq(removed(null, undefined), []) && deepEq(removed('x', 42), []), '');
+
+  // 标签改了、URL 没变 —— 是编辑不是退订，历史不该被算进删除数
+  check('R7 只改标签不算删除',
+    deepEq(removed(prev, [{ urlPattern: 'https://a.test/x', tags: ['改了'] }, prev[1]]), []), '');
+
+  const dramas = [
+    { id: '1', sourceListUrl: 'https://a.test/x' },
+    { id: '2', sourceListUrl: 'https://b.test/y' },
+    { id: '3', sourceListUrl: 'https://b.test/y/' },   // 尾斜杠形态同样命中
+    { id: '4', sourceListUrl: 'https://c.test/z' },
+    { id: '5' },                                        // 缺 sourceListUrl，永不命中
+    { id: '6', sourceListUrl: '' }
+  ];
+
+  check('R8 受影响条数按精确等值统计（含尾斜杠归一）',
+    countUnder(dramas, ['https://b.test/y']) === 2, String(countUnder(dramas, ['https://b.test/y'])));
+
+  check('R9 缺 sourceListUrl / 空串的条目不计入',
+    countUnder(dramas, ['']) === 0 && countUnder(dramas, [undefined]) === 0, '');
+
+  check('R10 空删除列表返回 0', countUnder(dramas, []) === 0 && countUnder(dramas, null) === 0, '');
+
+  // 前缀串扰回归点：退订 b.test/y 不得把 b.test/yy 的历史一起算进去
+  const prefixDramas = [{ id: '1', sourceListUrl: 'https://b.test/y' }, { id: '2', sourceListUrl: 'https://b.test/yy' }];
+  check('R11 互为前缀的订阅不串扰（精确等值而非 startsWith）',
+    countUnder(prefixDramas, ['https://b.test/y']) === 1, String(countUnder(prefixDramas, ['https://b.test/y'])));
+
+  check('R12 dramas 非数组不抛', countUnder(null, ['https://a.test/x']) === 0 && countUnder('x', ['https://a.test/x']) === 0, '');
+}
+
 // ---------- W 组：接线探针（三端 + 夹具） ----------
 const read = rel => fs.readFileSync(path.join(root, rel), 'utf8');
 const bg = read('src/background/background.js');
@@ -91,6 +145,22 @@ check('W8 同步服务 normalizeTagConfig 委托共享模块', server.includes('
 
 check('W9 bootstrap.cjs 预载共享模块（noop importScripts 桩的套件依赖它）',
   read('tests/bootstrap.cjs').includes("require('../src/shared/subscription-config.js')"), '');
+
+// R 组的两个函数把归属判定委托给 url-match.js，三端的加载序都得跟上（v1.6.7）
+const urlMatchAt = settingsHtml.indexOf('src="../shared/url-match.js"');
+check('W10 settings.html 在 subscription-config 之前引入 url-match',
+  urlMatchAt >= 0 && cfgAt > urlMatchAt, `urlMatch=${urlMatchAt} cfg=${cfgAt}`);
+
+const bgUrlMatchAt = bg.indexOf("importScripts('../shared/url-match.js')");
+const bgCfgAt = bg.indexOf("importScripts('../shared/subscription-config.js')");
+check('W11 后台 importScripts 里 url-match 先于 subscription-config',
+  bgUrlMatchAt >= 0 && bgCfgAt > bgUrlMatchAt, `urlMatch=${bgUrlMatchAt} cfg=${bgCfgAt}`);
+
+check('W12 bootstrap.cjs 预载 url-match（subscription-config 的新依赖）',
+  read('tests/bootstrap.cjs').includes("require('../src/shared/url-match.js')"), '');
+
+check('W13 设置页归属归一委托 UrlMatch（不再自带 normalizeUrlForMatch 实现）',
+  !settings.includes('function normalizeUrlForMatch('), '');
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

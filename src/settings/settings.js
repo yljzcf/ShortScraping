@@ -711,9 +711,9 @@
     elements.subscriptionList.innerHTML = '';
 
     const catalog = state.subscriptionCatalog;
-    const checkedUrlSet = new Set(state.urlTags.map(item => normalizeUrlForMatch(item.urlPattern)));
-    const catalogUrlSet = new Set(catalog.map(item => normalizeUrlForMatch(item.urlPattern)));
-    state.legacyUrlTags = state.urlTags.filter(item => !catalogUrlSet.has(normalizeUrlForMatch(item.urlPattern)));
+    const checkedUrlSet = new Set(state.urlTags.map(item => UrlMatch.normalizeListUrl(item.urlPattern)));
+    const catalogUrlSet = new Set(catalog.map(item => UrlMatch.normalizeListUrl(item.urlPattern)));
+    state.legacyUrlTags = state.urlTags.filter(item => !catalogUrlSet.has(UrlMatch.normalizeListUrl(item.urlPattern)));
 
     // 按弹窗头部的同一套分组走：每组先插一条分割标题，组内再逐站点列规则
     SiteRegistry.SITE_GROUPS.forEach(groupEntry => {
@@ -818,7 +818,7 @@
     checkbox.type = 'checkbox';
     checkbox.dataset.kind = kind;
     checkbox.dataset.index = String(index);
-    checkbox.checked = checkedUrlSet.has(normalizeUrlForMatch(item.urlPattern));
+    checkbox.checked = checkedUrlSet.has(UrlMatch.normalizeListUrl(item.urlPattern));
     option.appendChild(checkbox);
 
     const tags = document.createElement('div');
@@ -855,10 +855,8 @@
     return SiteRegistry.siteOfUrl(url);
   }
 
-  function normalizeUrlForMatch(url) {
-    // 尾斜杠归一：历史 tag.json 中 my-drama.com 等无尾斜杠形态也要匹配到目录规则
-    return String(url || '').trim().replace(/\/+$/, '');
-  }
+  // 尾斜杠归一（历史 tag.json 中 my-drama.com 等无尾斜杠形态也要匹配到目录规则）
+  // 已收敛到 src/shared/url-match.js 的 normalizeListUrl，调用点直接用它（v1.6.7）
 
   async function saveSubscriptions() {
     try {
