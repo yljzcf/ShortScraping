@@ -28,7 +28,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 | NetShort | 首页板块（`?list=<板块名>`，如 `trending_now` / `exclusive_originals`） | 页内 RSC flight 数据直出，无需请求详情页 | `ns`+shortPlayId |
 | FlickReels | 首页板块（`?list=<板块名>`，如 `hot_picks` / `7_day_star`；订阅须写 `https://www.flickreels.net/?list=…` 带 www） | 页内 Nuxt `__NUXT_DATA__`（devalue 扁平格式）SSR 直出，无需请求详情页 | `fr`+playlet_id |
 | GoodShort | 板块「More」页 `/channel/<板块>`（`Most-Trending` / `Top-in-GoodShort` / `Hot-List`，各 10 条） | 同源重取服务端 HTML 解 `window.__INITIAL_STATE__`，列表字段齐全，无需请求详情页 | `gs`+sourceId |
-| Shortical | 首页 Top Recommended 板块（`?list=top_recommended`，9 条；订阅须写裸域 `https://shortical.com/`） | 纯前端渲染，等 hydrate 后读 DOM；内容类型标签尽力经官方接口补全量 | `sc`+数字 id |
+| Shortical | 首页 Top Recommended 板块（`?list=top_recommended`，9 条；订阅须写裸域 `https://shortical.com/`） | 纯前端渲染，等 hydrate 后读 DOM；作品地址取站点 sitemap 的规范形态；内容类型标签尽力经官方接口补全量 | `sc`+规范 id |
 | ShortMax | 首页板块（`?list=<板块名>`，如 `most_popular`）与 `/fandom` 文章流；订阅须带 www | 同源重取服务端 HTML 解析（实时 DOM 的轮播会按视口裁剪条目）+ 详情页补简介与类型标签 | `sm`+数字 id |
 | Netflix | Tudum Top 10 六个榜单页：`/tudum/top10`、`/tv`、`/films-non-english`、`/tv-non-english`、`/united-states`、`/united-states/tv` | 页内 `netflix.reactContext` 内联脚本 SSR 榜单数据直出；类型标签经后台代理取作品 `/title/` 页 | `nf`+videoId |
 | Apple TV | Top 10 TV Shows 与 Top 10 Movies 两个榜单页（`/us/collection/most-popular-now/uts.col.Charts{Shows,Movies}.tvs.sbd.4000`） | 页内 `serialized-server-data` JSON SSR 直出榜单；简介与类型标签经后台代理取作品详情页 | `at`+`umc.cmc.` 编号 |
@@ -42,7 +42,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 - **Netflix**：内容脚本只注入 `/tudum/top10*` 栏目页，不进 Netflix 播放/浏览页；同一作品同时上全球榜与美国榜时按作品全局去重、先到先得（订阅顺序全球榜在前，美国榜实际记录「上美国榜但未上全球榜」的作品）；标签约定 `Global`（英语榜）/ `Global-nE`（非英语榜）/ `US`；每周名次与观看量不入库，只记录首次进榜时间。内容类型标签取自作品 `/title/` 页 Netflix 自身分类（如 Thrillers / Dramas / Comedies，英文原值），由后台无 cookie 代理抓取，与你的 Netflix 登录状态无关；单次抓取失败的作品会在下轮榜单复现时自动补上。
 - **FlickReels**：首页板块按标题归一化订阅（`Hot Picks` → `hot_picks`、`7-Day Star` → `7_day_star`，无参数默认 `hot_picks`），站点改板块文案时调整订阅 `?list=` 值即可；订阅 URL 必须带 `www.`（裸域会 301 到 www，跳转后与订阅串不等就不会入库）；列表数据自带全文简介与英文标签，无需请求详情页；播放页链接的 slug 由站点服务端校验、错一字即 404，扩展逐字复刻了站点的 slug 算法；「未上线预告」条目（站内只提示 Not released yet）本轮跳过，上线后下轮自动入库；`/tc/` 是另一套繁中片库而非同片中文版，标题一律走 AI 翻译。
 - **GoodShort**：订阅的是每个板块的「More」页 `/channel/<板块>` 而不是首页——首页每个板块只给 6 条，`/channel/` 页正好 10 条且首页那 6 条是它的子集。简介、封面、内容类型标签全在列表数据里，不需要额外请求详情页（列表里结尾带「…」的简介是站点自己的原文，不是被截断）。
-- **Shortical**：站点是纯前端渲染，扩展等页面渲染完成后再读；卡片上只印一个分类，扩展会尽力再向站点接口取全量分类补上，取不到就用卡片上那一个（不影响入库）。订阅 URL 要写**裸域** `https://shortical.com/`（带 `www.` 会被 301 到裸域，跳转后与订阅串不等就不会入库）。
+- **Shortical**：站点是纯前端渲染，扩展等页面渲染完成后再读；卡片上只印一个分类，扩展会尽力再向站点接口取全量分类补上，取不到就用卡片上那一个（不影响入库）。订阅 URL 要写**裸域** `https://shortical.com/`（带 `www.` 会被 301 到裸域，跳转后与订阅串不等就不会入库）。**作品地址取站点 sitemap 的规范形态**：站点首页卡片链接里的编号和详情页实际能打开的编号是两套，直接照抄首页链接有大半会落到站点自己的 404 页（实测 9 条里 6 条），而且同一部剧的编号还会变、导致同一部剧被反复当成新卡入库。扩展改为每轮抓取先读一次站点 sitemap 换取规范地址；换不到的作品本轮不入库，等站点收录后下轮自动补上。库里已有的旧条目会在扩展更新后自动改正并合并重复项。此外，**该站首页列表需要页面完成匿名登录才会出现**——若页面显示「No series available」则扩展抓到的就是 0 条，通常是网络挡掉了 Google 鉴权域名。
 - **ShortMax**：站点首页板块在浏览器里是横向轮播、**只渲染当前可见的那几张卡**（窗口窄时 8 条会只剩 5 条），扩展改为重新取一次服务端页面来解析，条数不再受窗口宽度影响。列表本身没有简介和类型标签，两者都从作品详情页补齐；某条详情取不到时该作品本轮不入库、下轮重来（避免留下永远补不上简介的卡）。订阅 URL 须带 `www.`。
 
 > 三家新站点的域名形态各不相同，订阅 URL 写错一个字符就会静默零抓取：GoodShort 与 ShortMax 必须带 `www.`，Shortical 必须**不带**。规则目录里已按正确形态内置。
