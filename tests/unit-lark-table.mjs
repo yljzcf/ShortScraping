@@ -45,7 +45,11 @@ const POSTERS = {
   goodshort: 'https://acf.goodshort.com/videobook/202609/cover-WL7xIOUEJP.jpg?w=293&h=412',
   goodshortRaw: 'https://acf.goodshort.com/videobook/202609/cover-WL7xIOUEJP.jpg',
   // Shortical：站点只有这一种尺寸形态，无可改写
-  shortical: 'https://dirjqbe1kaah2.cloudfront.net/198/image.webp'
+  shortical: 'https://dirjqbe1kaah2.cloudfront.net/198/image.webp',
+  // DramaBox（两站共用这个封面 CDN）：站点自己就给 @w=240&h=400（240×320 ≈24KB），
+  // 剥掉尾段即原图 600×800 ≈99KB。尾段在 pathname 里，整个 URL 没有 '?'
+  dramabox: 'https://thwztchapter.dramaboxdb.com/data/cppartner/4x2/42x0/420x0/42000024547/42000024547.jpg@w=240&h=400',
+  dramaboxRaw: 'https://thwztchapter.dramaboxdb.com/data/cppartner/4x2/42x0/420x0/42000024547/42000024547.jpg'
 };
 
 // 捷径致死字符：英文逗号与百分号编码（2026-07-25 两轮对照实锤）
@@ -112,6 +116,28 @@ if (typeof pfp === 'function') {
     pfp(`${POSTERS.goodshortRaw}?w=293&v=2&h=412`) === `${POSTERS.goodshortRaw}?v=2`,
     pfp(`${POSTERS.goodshortRaw}?w=293&v=2&h=412`));
   check('P29 shortical 只有一种尺寸形态，原样透传', pfp(POSTERS.shortical) === POSTERS.shortical, pfp(POSTERS.shortical));
+
+  /* —— v1.6.11：DramaBox 剥掉 @ 尾段的尺寸参数还原原图 ————————————————
+   * 同为「库里存站内小图、推出去才放大」（v1.6.4 口径）。两点与别站不同：
+   * 尾段在 **pathname** 里（URL 没有 '?'，searchParams 用不上），且必须**按形状**匹配
+   * `@键=数字(&键=数字)*` —— 详情页用的就是 @w=360&h=640，写死 240×400 会漏。
+   */
+  check('P30 dramabox 剥掉 @w=240&h=400 还原原图',
+    pfp(POSTERS.dramabox) === POSTERS.dramaboxRaw, pfp(POSTERS.dramabox));
+  check('P31 dramabox 别的尺寸组合同样被剥（不写死 240×400）',
+    pfp(`${POSTERS.dramaboxRaw}@w=360&h=640`) === POSTERS.dramaboxRaw, pfp(`${POSTERS.dramaboxRaw}@w=360&h=640`));
+  check('P31b dramabox 单参数尾段也被剥',
+    pfp(`${POSTERS.dramaboxRaw}@w=240`) === POSTERS.dramaboxRaw, pfp(`${POSTERS.dramaboxRaw}@w=240`));
+  check('P32 dramabox 原图形态原样透传', pfp(POSTERS.dramaboxRaw) === POSTERS.dramaboxRaw, pfp(POSTERS.dramaboxRaw));
+  check('P33 dramabox 两种形态本就无逗号/百分号，改写前后都可转附件',
+    convertible(POSTERS.dramabox) && convertible(pfp(POSTERS.dramabox)), pfp(POSTERS.dramabox));
+  // 尾段不是「键=数字」形状时不许乱剥：文件名里的 @ 是合法字符
+  check('P34 dramabox 非尺寸形状的 @ 尾段不被剥',
+    pfp(`https://thwztchapter.dramaboxdb.com/data/x/cover@2x.jpg`) === 'https://thwztchapter.dramaboxdb.com/data/x/cover@2x.jpg',
+    pfp('https://thwztchapter.dramaboxdb.com/data/x/cover@2x.jpg'));
+  check('P35 别站的 @ 尺寸尾段不受波及',
+    pfp('https://example.com/img/a.jpg@w=240&h=400') === 'https://example.com/img/a.jpg@w=240&h=400',
+    pfp('https://example.com/img/a.jpg@w=240&h=400'));
 
   /* —— v1.6.4：Apple TV 尺寸码提到 1200×1800 ————————————————————
    * 采集存 400×600（73KB），机器人卡满宽渲染偏软；mzstatic 按请求尺寸裁切，

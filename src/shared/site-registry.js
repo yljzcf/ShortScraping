@@ -13,6 +13,15 @@
  *   用于 Netflix 这类只需注入某个栏目页的大站；站点归属判定（siteOfHostname/siteOfUrl）
  *   仍只按 host，后台 scripting.executeScript 强制注入兜底路径也不受 matches 限制。
  *
+ * 一个 site 键可以有多条 host 条目（v1.6.11 起，DramaBox 的 dramabox.com 与
+ * dramaboxdb.com 是同一片库的两套人工编排视图，favicon 都逐字节相同，拆两个标签
+ * 肉眼无法区分）。约定与派生规则：
+ *   - 同键的各条 name 必须一致（unit-site-registry 有守卫），否则显示名取决于遍历顺序；
+ *   - CATEGORY_SOURCES 去重——它是「站点键全集」，不去重会渲染出两个一样的标签，
+ *     并让 SITE_GROUPS 展平排列与 ADAPTERS 键集两条断言同时 RED；
+ *   - hostBySource 取**首条**（弹窗「去抓取」按钮按 host 子串挑订阅 URL，取首条即主域）；
+ *   - contentScriptMatches 逐条展开，两个域名都进 manifest。
+ *
  * 加载方式：后台 importScripts / 弹窗、设置页、共享页 <script> 标签
  * （挂 globalThis.SiteRegistry）/ 同步服务 require（module.exports）/
  * 内容脚本经 manifest content_scripts js 数组前置注入。
@@ -39,6 +48,12 @@
     { site: 'goodshort', name: 'GoodShort', host: 'goodshort.com', match: 'suffix' },
     { site: 'shortical', name: 'Shortical', host: 'shortical.com', match: 'suffix' },
     { site: 'shortmax', name: 'ShortMax', host: 'shorttv.live', match: 'suffix' },
+    // DramaBox 一个站点键挂两个域名（v1.6.11）：同一套 Next.js 代码的两次构建、共用
+    // 封面 CDN 与同一套 bookId，但两站的板块内容各自独立编排（四个目标板块 72 个位置
+    // 实测只 62 部不重复），故两站都抓、合并成一个来源。两个 host 互不为后缀
+    // （'www.dramaboxdb.com'.endsWith('dramabox.com') 为 false），条目顺序不影响匹配。
+    { site: 'dramabox', name: 'DramaBox', host: 'dramabox.com', match: 'suffix' },
+    { site: 'dramabox', name: 'DramaBox', host: 'dramaboxdb.com', match: 'suffix' },
     { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix' }
   ];
 
@@ -49,7 +64,7 @@
   // 注意 SITES 顺序本身不受此影响：manifest 推导、siteOfHostname 匹配优先级
   // 仍按 SITES，分组只管头部与设置页的展示序。
   const SITE_GROUPS = [
-    { group: 'shortdrama', name: '短剧', sites: ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax'] },
+    { group: 'shortdrama', name: '短剧', sites: ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox'] },
     { group: 'video', name: '影视', sites: ['imdb', 'netflix', 'appletv'] },
     { group: 'game', name: '游戏 · 网文', sites: ['steam', 'royalroad'] }
   ];
@@ -57,7 +72,8 @@
   // 零状态时默认展开的组
   const DEFAULT_GROUP = 'shortdrama';
 
-  const CATEGORY_SOURCES = SITES.map(entry => entry.site);
+  // 站点键全集：同键多 host（DramaBox）只出现一次，见文件头注释
+  const CATEGORY_SOURCES = [...new Set(SITES.map(entry => entry.site))];
 
   const groupBySite = {};
   for (const entry of SITE_GROUPS) {
@@ -72,7 +88,8 @@
   const hostBySource = {};
   for (const entry of SITES) {
     SOURCE_NAMES[entry.site] = entry.name;
-    hostBySource[entry.site] = entry.host;
+    // 同键多 host 取首条＝主域（弹窗「去抓取」按 host 子串挑订阅 URL）
+    if (!(entry.site in hostBySource)) hostBySource[entry.site] = entry.host;
   }
 
   function siteOfHostname(hostname) {

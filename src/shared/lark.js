@@ -201,6 +201,16 @@
       }
       return raw;
     }
+    if (/^https:\/\/[a-z0-9-]+\.dramaboxdb\.com\//i.test(raw)) {
+      // DramaBox（两站共用这个封面 CDN）：采集存站点自己给的缩略图形态
+      // `…/<bookId>.jpg@w=240&h=400`（240×320 ≈24KB），剥掉尾段即原图 600×800 ≈99KB。
+      // URL 不含逗号/百分号，两种形态捷径都能转附件——改写纯为 v1.6.4 定的「库里存小图、
+      // 推出去放大」，同 GoodShort。
+      // 尾段在 **pathname** 里（整个 URL 没有 '?'），所以不能用 searchParams.delete；
+      // 且**按形状匹配 `@键=数字(&键=数字)*`**、不写死 '@w=240&h=400'——详情页用的就是
+      // '@w=360&h=640'，站点随时可能换尺寸（同 AppleTV 尾段尺寸码的教训）。
+      return raw.replace(/@[a-z]+=\d+(?:&[a-z]+=\d+)*$/i, '');
+    }
     if (/^https:\/\/[a-z0-9-]+\.mzstatic\.com\/image\/thumb\//i.test(raw)) {
       // 尾段形如 `<w>x<h><裁切码>.<扩展名>`。**按形状匹配数字**、不写死 '400x600nr'：
       // 裁切码取自站点自己的 artwork.template（content.js 的 appleArtUrl 只替换

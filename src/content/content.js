@@ -596,6 +596,60 @@
   };
 
   /**
+   * DramaBox 适配器（v1.6.11）——**一个适配器覆盖两个域名**（source 都是 dramabox，
+   * 弹窗同一分类）：dramabox.com 与 dramaboxdb.com 是同一套 Next.js Pages Router 代码的
+   * 两次构建（buildId dramabox_prod_* / dramaboxdb_prod_*），共用封面 CDN
+   * （thwztchapter.dramaboxdb.com）与同一套 bookId，favicon 逐字节相同。
+   *
+   * **但两站的板块内容各自独立编排**（section id 1264-1266 / 1272-1274）：四个目标板块
+   * 72 个位置实测只 62 部不重复（仅 10 处重叠，dramaboxdb 的 Must-sees 恰是 dramabox 的
+   * Trending、顺序颠倒），所以两站都要抓，重叠部分靠全局去重键先到先得。
+   *
+   * **订阅的是板块列表页而不是首页**（首页 SSR 每板块只直出 6 条，列表页 18 条），
+   * 而**两站路由名不同**——dramabox 是 /more/<position>、dramaboxdb 是 /channel/<position>，
+   * 交叉使用一律 404。故 matches 按 hostname 分派路由名（同 ReelShort/ShortMax 按 pathname
+   * 分派入口的范式）。刻意不写死 must-sees|trending：日后加 hidden-gems 只改规则目录、零代码。
+   *
+   * 取数点是 script#__NEXT_DATA__ 的 props.pageProps.moreData.items（两站两种路由**同一个键**），
+   * 真机实测 hydrate 后该 script 仍在 DOM 里，故直接读 DOM、不必同源重取（GoodShort/ShortMax
+   * 那条自删脚本、视口裁剪的路不适用）；客户端翻页也不会重写 __NEXT_DATA__，读到的恒为
+   * 第 1 页——正合「板块分页只抓第一页」。
+   *
+   * 条目字段齐全**零详情请求**：introduction 与详情页 bookInfo.introduction 逐字相同
+   * （两站各抽样实测），tags/typeTwoNames 同样一致，故不标 genresFromDetail。
+   * 页面恒英文（Accept-Language: zh-CN 不改变输出，locale 仍 en），无平台中文，
+   * status 全走 new 交 AI 翻译。
+   */
+  const dramaboxAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        // 路由名按域名分派，交叉形态（/channel/ @ dramabox.com）站点自己就是 404
+        if (u.hostname.endsWith('dramaboxdb.com')) return /^\/channel\/[^/]+\/?$/.test(u.pathname);
+        if (u.hostname.endsWith('dramabox.com')) return /^\/more\/[^/]+\/?$/.test(u.pathname);
+        return false;
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return getDramaboxItems();
+    },
+    extractId(item) {
+      // bookId 是两站共用的全站规范 id（实测恒 11 位数字），加 db 前缀与全局去重键约定一致
+      const id = item && item.bookId != null ? String(item.bookId).trim() : '';
+      return /^\d{9,13}$/.test(id) ? `db${id}` : null;
+    },
+    extractBasic(item, tags, id, index) {
+      return extractDramaboxFromItem(item, index, tags, id);
+    },
+    async fetchDetail(drama) {
+      // 列表 introduction 即详情页同一份文本（逐字实测），无需二次请求
+      return drama;
+    }
+  };
+
+  /**
    * Netflix Tudum Top 10 适配器（www.netflix.com/tudum/top10 及其子榜单页，v1.5.8）：
    * 榜单数据 SSR 直出在内联脚本 `netflix.reactContext.models.graphql = JSON.parse('…')`
    * （Apollo 归一化缓存），DOM 上标题是 logo 图、无 /title/ 链接、无简介，页面全局
@@ -680,7 +734,7 @@
   };
 
   // 站点适配器注册表。
-  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, flickreels: flickreelsAdapter, goodshort: goodshortAdapter, shortical: shorticalAdapter, shortmax: shortmaxAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
+  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, flickreels: flickreelsAdapter, goodshort: goodshortAdapter, shortical: shorticalAdapter, shortmax: shortmaxAdapter, dramabox: dramaboxAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
 
   /**
    * 添加抓取按钮
@@ -2624,6 +2678,70 @@
     drama.url = episodeUrl;
     // 文章标题是「剧名：Full Guide & Streaming Options」这类 SEO 句式，以主站 h1 为准
     return await fetchShortmaxDetail(drama, { takeTitle: true });
+  }
+
+  const DRAMABOX_ORIGIN = 'https://www.dramabox.com';
+
+  /**
+   * DramaBox 板块列表页条目：script#__NEXT_DATA__ → props.pageProps.moreData.items。
+   * dramabox 的 /more/<position> 与 dramaboxdb 的 /channel/<position> 用的是**同一个
+   * moreData 键**（同一套代码的两次构建），故两站共用这一个取数路径。
+   * 取不到一律返回空数组，scrapePage 安全跳过、下轮重试。
+   */
+  function getDramaboxItems() {
+    const items = readNextData()?.props?.pageProps?.moreData?.items;
+    if (!Array.isArray(items)) {
+      console.log('[ShortScraping] DramaBox moreData.items 未找到');
+      return [];
+    }
+    return items.filter(item => item && typeof item === 'object');
+  }
+
+  /**
+   * 从板块条目提取基础信息。零详情请求：introduction 与详情页 bookInfo.introduction
+   * 逐字相同（两站各抽样实测）。
+   *
+   * genres 合并两个站点原生英文来源（2026-09-18 用户定）：typeTwoNames 是站点分类
+   * （Romance / Fantasy / Paranormal），tags 是主题标签（Billionaire / Reverse Harem），
+   * 实测 tags 与 labels 字段 72/72 完全一致故只取前者；cleanGenres 去重并 trim
+   * （站点数据里真的有 ' Thrilling Combat' 这种带前导空格的标签）。
+   * **刻意不采 typeOneName**——它只有 F-Drama / M-Drama 两个值，是受众划分不是内容类型，
+   * 60/72 条都是同一个值、无区分度。viewCount / chapterCount / ratings / shelfTime
+   * 同样不入库（对齐 Netflix「名次与观看量不入库」的裁定）。
+   *
+   * url 恒用 dramabox.com 的规范形态，**即使条目是从 dramaboxdb 抓到的**（2026-09-18
+   * 用户定「优先 dramabox.com」；实测 28/28 dramaboxdb 独有作品在 dramabox.com 上都可达）。
+   * slug 是装饰位（错 slug 仍回 200 真页面，不是 Shortical 那种 200+空壳），但须编码——
+   * replacedBookName 里有全角冒号这类字符（Tempest：The-Last-Mecha），站点自己的 href
+   * 也是 %EF%BC%9A 形态；缺失时退裸 bookId 形态，站点会 301 到规范地址。
+   */
+  function extractDramaboxFromItem(item, index, tags, dbId) {
+    const bookId = String(item.bookId || '').trim();
+    const slug = String(item.replacedBookName || '').trim();
+    const typeNames = Array.isArray(item.typeTwoNames) ? item.typeTwoNames : [];
+    const tagNames = Array.isArray(item.tags) ? item.tags : [];
+
+    return {
+      id: `dramabox_${dbId}_${index}`,
+      itemId: dbId,
+      title: String(item.bookName || item.name || '').trim(),
+      titleZh: '',
+      // 站点给的就是站内卡片同款缩略图形态（…jpg@w=240&h=400，240×320 ≈24KB），原样存；
+      // 推送侧由 lark.js 的 posterForPayload 剥掉 @ 尾段取原图（600×800 ≈99KB）
+      poster: String(item.cover || '').trim(),
+      tags,
+      genres: cleanGenres([...typeNames, ...tagNames]),
+      description: String(item.introduction || '').trim(),
+      descriptionZh: '',
+      source: 'dramabox',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      url: bookId
+        ? `${DRAMABOX_ORIGIN}/drama/${bookId}${slug ? `/${encodeURIComponent(slug)}` : ''}`
+        : '',
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
   }
 
   /**

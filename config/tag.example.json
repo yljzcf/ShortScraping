@@ -148,6 +148,22 @@
     "tags": ["ShortMax", "fandom"]
   },
   {
+    "url": "https://www.dramabox.com/more/must-sees",
+    "tags": ["DramaBox", "MustSee"]
+  },
+  {
+    "url": "https://www.dramabox.com/more/trending",
+    "tags": ["DramaBox", "Trending"]
+  },
+  {
+    "url": "https://www.dramaboxdb.com/channel/must-sees",
+    "tags": ["DramaBox", "MustSee"]
+  },
+  {
+    "url": "https://www.dramaboxdb.com/channel/trending",
+    "tags": ["DramaBox", "Trending"]
+  },
+  {
     "url": "https://www.netflix.com/tudum/top10",
     "tags": ["Netflix", "Movie", "Global"]
   },

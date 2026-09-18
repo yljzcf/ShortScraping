@@ -18,14 +18,31 @@ const deepEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // 站点顺序＝弹窗/共享页图标与设置页分组顺序（2026-09-11 用户定：Netflix 第二、RoyalRoad 末位；
 // 2026-09-12 用户定：AppleTV 紧随 Netflix 排第三）
 check('T1a CATEGORY_SOURCES 顺序与全集',
-  deepEq(SiteRegistry.CATEGORY_SOURCES, ['imdb', 'netflix', 'appletv', 'steam', 'mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'royalroad']),
+  deepEq(SiteRegistry.CATEGORY_SOURCES, ['imdb', 'netflix', 'appletv', 'steam', 'mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox', 'royalroad']),
   JSON.stringify(SiteRegistry.CATEGORY_SOURCES));
 check('T1b SOURCE_NAMES 字面量（含键序）',
-  deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', appletv: 'AppleTV', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', flickreels: 'FlickReels', goodshort: 'GoodShort', shortical: 'Shortical', shortmax: 'ShortMax', royalroad: 'RoyalRoad' }),
+  deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', appletv: 'AppleTV', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', flickreels: 'FlickReels', goodshort: 'GoodShort', shortical: 'Shortical', shortmax: 'ShortMax', dramabox: 'DramaBox', royalroad: 'RoyalRoad' }),
   JSON.stringify(SiteRegistry.SOURCE_NAMES));
+// dramabox 有两条 host 条目，hostBySource 取**首条**＝主域 dramabox.com（弹窗「去抓取」用它挑订阅 URL）
 check('T1c hostBySource 字面量（含键序）',
-  deepEq(SiteRegistry.hostBySource, { imdb: 'imdb.com', netflix: 'netflix.com', appletv: 'tv.apple.com', steam: 'store.steampowered.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com', flickreels: 'flickreels.net', goodshort: 'goodshort.com', shortical: 'shortical.com', shortmax: 'shorttv.live', royalroad: 'royalroad.com' }),
+  deepEq(SiteRegistry.hostBySource, { imdb: 'imdb.com', netflix: 'netflix.com', appletv: 'tv.apple.com', steam: 'store.steampowered.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com', flickreels: 'flickreels.net', goodshort: 'goodshort.com', shortical: 'shortical.com', shortmax: 'shorttv.live', dramabox: 'dramabox.com', royalroad: 'royalroad.com' }),
   JSON.stringify(SiteRegistry.hostBySource));
+
+// ---------- T1e 同键多 host 的注册表不变量（v1.6.11 新引入，DramaBox 两域名） ----------
+// 三条缺一即静默出错：键集不等会渲染出重复标签；同键异名会让显示名取决于遍历顺序
+{
+  const siteKeys = SiteRegistry.SITES.map(e => e.site);
+  check('T1e CATEGORY_SOURCES 是 SITES 站点键的去重序列（同键多 host 只算一次）',
+    deepEq(SiteRegistry.CATEGORY_SOURCES, [...new Set(siteKeys)]), JSON.stringify(SiteRegistry.CATEGORY_SOURCES));
+  const nameConflicts = SiteRegistry.SITES.filter(e => e.name !== SiteRegistry.SOURCE_NAMES[e.site]);
+  check('T1e2 同一 site 键的各条 host 条目 name 必须一致',
+    nameConflicts.length === 0, JSON.stringify(nameConflicts));
+  const dupKeys = [...new Set(siteKeys.filter((s, i) => siteKeys.indexOf(s) !== i))];
+  check('T1e3 当前仅 dramabox 一个键挂多 host（新增多域名站点时须一并更新本断言）',
+    deepEq(dupKeys, ['dramabox']), JSON.stringify(dupKeys));
+  check('T1e4 dramabox 的两条 host 互不为后缀（顺序不影响 siteOfHostname 判定）',
+    !'www.dramaboxdb.com'.endsWith('dramabox.com') && !'www.dramabox.com'.endsWith('dramaboxdb.com'), '');
+}
 
 // settings.js 派生的订阅分组（label===tag、icon 按 site 命名）。
 // v1.5.11 起顺序改由 SITE_GROUPS 决定（短剧组在最前），与弹窗头部折叠分组一致
@@ -41,6 +58,7 @@ const expectedGroups = [
   { site: 'goodshort', label: 'GoodShort', tag: 'GoodShort', icon: 'assets/icons/site-goodshort.png' },
   { site: 'shortical', label: 'Shortical', tag: 'Shortical', icon: 'assets/icons/site-shortical.png' },
   { site: 'shortmax', label: 'ShortMax', tag: 'ShortMax', icon: 'assets/icons/site-shortmax.png' },
+  { site: 'dramabox', label: 'DramaBox', tag: 'DramaBox', icon: 'assets/icons/site-dramabox.png' },
   { site: 'imdb', label: 'IMDB', tag: 'IMDB', icon: 'assets/icons/site-imdb.png' },
   { site: 'netflix', label: 'Netflix', tag: 'Netflix', icon: 'assets/icons/site-netflix.png' },
   { site: 'appletv', label: 'AppleTV', tag: 'AppleTV', icon: 'assets/icons/site-appletv.png' },
@@ -69,6 +87,15 @@ const cases = [
   ['https://shortical.com/drama/room-service-193', 'shortical'],  // 归属按 host，路径闸门在 adapter.matches
   ['https://www.shorttv.live/?list=most_popular', 'shortmax'],
   ['https://www.shorttv.live/fandom', 'shortmax'],
+  // DramaBox 一键两域名：两站都归 dramabox（两站板块内容各自独立编排，合并成一个来源）。
+  // 两站裸域都 301 到 www，故订阅须带 www——suffix 语义对两种形态都命中，闸门在 adapter.matches
+  ['https://www.dramabox.com/more/must-sees', 'dramabox'],
+  ['https://www.dramabox.com/more/trending', 'dramabox'],
+  ['https://www.dramaboxdb.com/channel/must-sees', 'dramabox'],
+  ['https://www.dramaboxdb.com/channel/trending', 'dramabox'],
+  ['https://dramabox.com/', 'dramabox'],                  // 裸域（301 到 www，归属仍按 suffix 命中）
+  ['https://www.dramabox.com/drama/42000024547/X', 'dramabox'],   // 归属按 host，路径闸门在 adapter.matches
+  ['https://thwztchapter.dramaboxdb.com/data/x.jpg', 'dramabox'], // 封面 CDN 同后缀；siteOfUrl 只作用于订阅 URL，无影响
   ['https://www.netflix.com/tudum/top10/united-states/tv', 'netflix'],
   ['https://www.netflix.com/browse', 'netflix'],         // 站点归属仍按 host（注入范围由 path 另管）
   ['https://tv.apple.com/us/collection/most-popular-now/uts.col.ChartsShows.tvs.sbd.4000', 'appletv'],
@@ -184,12 +211,14 @@ check('T4h 共享页静态白名单含 site-tabs', serverSrc.includes("'/shared/
 // ---------- T6 manifest matches 推导：可选 path 字段限定注入路径 ----------
 // Netflix 只注入 /tudum/top10*；AppleTV 只注入两个榜单 collection 页所在路径，
 // 且 exact 语义下无 *. 前缀（不波及 apple.com 其它子域）。
-check('T6 contentScriptMatches 按站点顺序：host 通配十一项 + Netflix/AppleTV 路径限定项',
+// DramaBox 贡献两项（同一 site 键的两条 host 条目逐条展开），故项数比站点数多一
+check('T6 contentScriptMatches 按站点顺序：host 通配项 + Netflix/AppleTV 路径限定项 + DramaBox 两域名',
   deepEq(SiteRegistry.contentScriptMatches(), [
     '*://*.imdb.com/*', '*://*.netflix.com/tudum/top10*', '*://tv.apple.com/us/collection/most-popular-now/*',
     '*://store.steampowered.com/*', '*://*.my-drama.com/*',
     '*://*.reelshort.com/*', '*://*.dramashorts.io/*', '*://*.netshort.com/*', '*://*.flickreels.net/*',
-    '*://*.goodshort.com/*', '*://*.shortical.com/*', '*://*.shorttv.live/*', '*://*.royalroad.com/*'
+    '*://*.goodshort.com/*', '*://*.shortical.com/*', '*://*.shorttv.live/*',
+    '*://*.dramabox.com/*', '*://*.dramaboxdb.com/*', '*://*.royalroad.com/*'
   ]),
   JSON.stringify(SiteRegistry.contentScriptMatches()));
 

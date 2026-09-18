@@ -31,7 +31,7 @@ check('G2a 分组顺序：短剧 → 影视 → 游戏·网文',
   JSON.stringify(SiteRegistry.SITE_GROUPS.map(g => g.group)));
 check('G2b 组内站点字面量（2026-09-12 用户定）',
   deepEq(SiteRegistry.SITE_GROUPS.map(g => g.sites), [
-    ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax'],
+    ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox'],
     ['imdb', 'netflix', 'appletv'],
     ['steam', 'royalroad']
   ]),
@@ -133,11 +133,11 @@ const shortLatest = { dramashorts: 400, mydrama: 100, netshort: 300 };  // reels
 check('S1 组内按最近更新降序排，无记录的排最后',
   deepEq(SiteTabs.resolveLayout({ visibleSites: allVisible, activeSource: 'mydrama', latestBySite: shortLatest })
     .groups.find(g => g.group === 'shortdrama').sites,
-    ['dramashorts', 'netshort', 'mydrama', 'reelshort', 'flickreels', 'goodshort', 'shortical', 'shortmax']),   // 无记录的几家彼此并列，按注册表序排在有记录的之后
+    ['dramashorts', 'netshort', 'mydrama', 'reelshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox']),   // 无记录的几家彼此并列，按注册表序排在有记录的之后
   JSON.stringify(SiteTabs.resolveLayout({ visibleSites: allVisible, activeSource: 'mydrama', latestBySite: shortLatest })
     .groups.find(g => g.group === 'shortdrama').sites));
 
-const SHORT_REGISTRY_ORDER = ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax'];
+const SHORT_REGISTRY_ORDER = ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox'];
 const allTied = Object.fromEntries(SHORT_REGISTRY_ORDER.map(site => [site, 500]));
 
 check('S2 全都无更新记录时保持注册表组内顺序（稳定排序）',
