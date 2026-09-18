@@ -49,7 +49,9 @@ const POSTERS = {
   // DramaBox（两站共用这个封面 CDN）：站点自己就给 @w=240&h=400（240×320 ≈24KB），
   // 剥掉尾段即原图 600×800 ≈99KB。尾段在 pathname 里，整个 URL 没有 '?'
   dramabox: 'https://thwztchapter.dramaboxdb.com/data/cppartner/4x2/42x0/420x0/42000024547/42000024547.jpg@w=240&h=400',
-  dramaboxRaw: 'https://thwztchapter.dramaboxdb.com/data/cppartner/4x2/42x0/420x0/42000024547/42000024547.jpg'
+  dramaboxRaw: 'https://thwztchapter.dramaboxdb.com/data/cppartner/4x2/42x0/420x0/42000024547/42000024547.jpg',
+  pinedrama: 'https://v.pinedrama.com/b1265344voduse1318177724/5eb5db755001834811001798224/vJq5RLc9BRQA.webp!15491.webp',
+  pinedramaRaw: 'https://v.pinedrama.com/b1265344voduse1318177724/5eb5db755001834811001798224/vJq5RLc9BRQA.webp'
 };
 
 // 捷径致死字符：英文逗号与百分号编码（2026-07-25 两轮对照实锤）
@@ -138,6 +140,27 @@ if (typeof pfp === 'function') {
   check('P35 别站的 @ 尺寸尾段不受波及',
     pfp('https://example.com/img/a.jpg@w=240&h=400') === 'https://example.com/img/a.jpg@w=240&h=400',
     pfp('https://example.com/img/a.jpg@w=240&h=400'));
+
+  /* —— v1.6.12：PinesDramas 剥掉 !<数字>.webp 缩略图尾缀还原原图 ————————————
+   * 同为「库里存站内小图、推出去才放大」（v1.6.4 口径）：站点卡片给的就是
+   * 200×270 ≈7.8KB 的缩略图，剥掉尾缀即 960×1478 ≈213KB 原图。尾缀在 pathname 里
+   * （URL 没有 '?'），且**按形状**匹配 `!<数字>.webp` 而非写死 !15491.webp——
+   * 同 AppleTV 尺寸码、DramaBox @ 尾段的教训。
+   */
+  check('P36 pinedrama 剥掉 !15491.webp 缩略图尾缀还原原图',
+    pfp(POSTERS.pinedrama) === POSTERS.pinedramaRaw, pfp(POSTERS.pinedrama));
+  check('P37 pinedrama 别的尾缀数字同样被剥（不写死 15491）',
+    pfp(`${POSTERS.pinedramaRaw}!20000.webp`) === POSTERS.pinedramaRaw, pfp(`${POSTERS.pinedramaRaw}!20000.webp`));
+  check('P38 pinedrama 原图形态原样透传', pfp(POSTERS.pinedramaRaw) === POSTERS.pinedramaRaw, pfp(POSTERS.pinedramaRaw));
+  check('P39 pinedrama 两种形态本就无逗号/百分号，改写前后都可转附件',
+    convertible(POSTERS.pinedrama) && convertible(pfp(POSTERS.pinedrama)), pfp(POSTERS.pinedrama));
+  // 尾缀不是「!数字.webp」形状时不许乱剥
+  check('P40 pinedrama 非尺寸形状的 ! 尾段不被剥',
+    pfp('https://v.pinedrama.com/a/b/c.webp!thumb.webp') === 'https://v.pinedrama.com/a/b/c.webp!thumb.webp',
+    pfp('https://v.pinedrama.com/a/b/c.webp!thumb.webp'));
+  check('P41 别站的 !数字.webp 尾缀不受波及',
+    pfp('https://example.com/img/a.webp!15491.webp') === 'https://example.com/img/a.webp!15491.webp',
+    pfp('https://example.com/img/a.webp!15491.webp'));
 
   /* —— v1.6.4：Apple TV 尺寸码提到 1200×1800 ————————————————————
    * 采集存 400×600（73KB），机器人卡满宽渲染偏软；mzstatic 按请求尺寸裁切，

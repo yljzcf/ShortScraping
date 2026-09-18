@@ -650,6 +650,57 @@
   };
 
   /**
+   * PinesDramas 适配器（pinedrama.com 的首页与 /novels 页，v1.6.12）：一个适配器覆盖
+   * 两个订阅页、四个板块、两类内容（小说与短剧），**入口分派只按 location.pathname**。
+   *
+   * 站点是 Next.js **App Router**，RSC flight 里是渲染后的 JSX 元素树而不是干净数据载荷
+   * （NetShort 那条 parseFlightArray 的路不适用）；四个板块 SSR 直出、hydrate 后 DOM 仍在、
+   * **与视口无关**（375px 下条目数与桌面一致），故直接读实时 DOM（DramaBox 范式），
+   * 既不必同源重取也不必走后台代理。板块内容不随访问轮换（两页各连抓三次逐次一致）。
+   *
+   * 板块靠 ?list=<归一化标题> 选（NetShort/FlickReels 同款约定，共用 normalizeSectionName）：
+   * recommended_webnovels_for_you / popular_short_dramas 在 /novels，
+   * popular_novels / editor_s_pick 在首页；加板块＝只改规则目录、零代码。
+   *
+   * **列表卡片简介覆盖不全**：Popular Novels 与 Popular Short Dramas 的卡上压根没有简介，
+   * 另两个板块的短 blurb 与详情页 Summary 又是两段不同文案（blurb ≈260 字符 SEO 短句，
+   * Summary ≈460~700 字符完整梗概），详情页还多给 2~4 个标签（列表只 1 个）→
+   * 22 条一律取详情、标 genresFromDetail，详情失败跳过该卡（2026-09-18 用户定）。
+   *
+   * 站点**无任何数字 id**，slug 即规范 id；/novels/<slug> 与 /dramas/<slug> 是两套独立
+   * 命名空间（交叉访问 404），故去重键在站点前缀 pd 之后再带一位类型字母：pdn / pdd。
+   * 订阅 URL 须写**裸域**（www.pinedrama.com 301 到裸域，同 Shortical、与 FlickReels 相反）。
+   * 页面恒英文（Accept-Language: zh-CN 不改变输出），无平台中文，status 全走 new。
+   */
+  const pinedramaAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        return u.hostname.endsWith('pinedrama.com')
+          && (u.pathname === '/' || /^\/novels\/?$/.test(u.pathname));
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return getPinedramaItems();
+    },
+    extractId(item) {
+      // 站点无数字 id，slug 即规范 id；kind 决定前缀，两套命名空间互不撞键
+      const slug = item && item.slug ? String(item.slug).trim() : '';
+      if (!PINEDRAMA_SLUG.test(slug)) return null;
+      return `${item.kind === 'drama' ? 'pdd' : 'pdn'}${slug}`;
+    },
+    extractBasic(item, tags, id, index) {
+      return extractPinedramaFromItem(item, index, tags, id);
+    },
+    genresFromDetail: true,    // 官方多值标签的权威源在详情页（列表只印第一个）
+    async fetchDetail(drama) {
+      return await fetchPinedramaDetail(drama);
+    }
+  };
+
+  /**
    * Netflix Tudum Top 10 适配器（www.netflix.com/tudum/top10 及其子榜单页，v1.5.8）：
    * 榜单数据 SSR 直出在内联脚本 `netflix.reactContext.models.graphql = JSON.parse('…')`
    * （Apollo 归一化缓存），DOM 上标题是 logo 图、无 /title/ 链接、无简介，页面全局
@@ -734,7 +785,7 @@
   };
 
   // 站点适配器注册表。
-  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, flickreels: flickreelsAdapter, goodshort: goodshortAdapter, shortical: shorticalAdapter, shortmax: shortmaxAdapter, dramabox: dramaboxAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
+  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, flickreels: flickreelsAdapter, goodshort: goodshortAdapter, shortical: shorticalAdapter, shortmax: shortmaxAdapter, dramabox: dramaboxAdapter, pinedrama: pinedramaAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
 
   /**
    * 添加抓取按钮
@@ -2742,6 +2793,248 @@
       scrapedAt: new Date().toISOString(),
       translatedAt: null
     };
+  }
+
+  /* ——— PinesDramas（pinedrama.com，v1.6.12）———————————————————————————— */
+
+  const PINEDRAMA_ORIGIN = 'https://pinedrama.com';
+  // 站点 slug 的实测形态：小写字母、数字与连字符
+  const PINEDRAMA_SLUG = /^[a-z0-9][a-z0-9-]*$/;
+
+  /**
+   * 从卡片 href 解出 { kind, slug }，解不出返回 null。两处要害：
+   *   1) **先剥查询串**——站点会把当前页的 ?list= 原样拼进每个卡片的 href
+   *      （/dramas/free-my-heart-mr-ceo?list=recommend），不剥 slug 就带着参数；
+   *   2) **取路径里的第一段而不是末段**——卡上的「Read Now」指向
+   *      /novels/<slug>/chapter-1，取末段会得到 'chapter-1'（真机实测已踩到）。
+   * /novels/category/<name> 是分类链接不是作品，单独排掉。
+   */
+  function pinedramaRefOf(href) {
+    if (!href) return null;
+    const path = String(href).split('#')[0].split('?')[0];
+    const m = path.match(/\/(novels|dramas)\/([^/]+)/);
+    if (!m) return null;
+    const slug = m[2];
+    if (m[1] === 'novels' && slug === 'category') return null;
+    if (!PINEDRAMA_SLUG.test(slug)) return null;
+    return { kind: m[1] === 'novels' ? 'novel' : 'drama', slug };
+  }
+
+  /** 某个子树内的全部作品链接（带解析出的 kind/slug）。 */
+  function pinedramaItemAnchors(root) {
+    const out = [];
+    for (const anchor of root.querySelectorAll('a[href*="/novels/"], a[href*="/dramas/"]')) {
+      const ref = pinedramaRefOf(anchor.getAttribute('href'));
+      if (ref) out.push({ el: anchor, ...ref });
+    }
+    return out;
+  }
+
+  /**
+   * 板块容器：找到标题后向上爬到**第一个含作品链接的祖先**（四个板块真机分别在
+   * 第 1/2/2/3 层——Popular Short Dramas 的 h2 还包在一个 <a href="/genres"> 里）。
+   * 爬过头会把下一个板块整段吃进来，故加一道闸门：容器里只能有这一个标题元素，
+   * 越界就当作「板块没找到」宁可不抓（下轮重试）。
+   *
+   * 标题**混用 h2/h3**（Popular Novels 是 h2、Editor's Pick 是 h3），只查 h2 会漏。
+   */
+  function pinedramaSectionElement(doc, wanted) {
+    const HEADINGS = 'h1, h2, h3, h4, h5, h6';
+    const heading = Array.from(doc.querySelectorAll(HEADINGS))
+      .find(h => normalizeSectionName(h.textContent) === wanted);
+    if (!heading) {
+      console.log(`[ShortScraping] PinesDramas 板块未找到: ${wanted}`);
+      return null;
+    }
+    let node = heading;
+    for (let i = 0; i < 6; i++) {
+      node = node.parentElement;
+      if (!node) break;
+      if (!pinedramaItemAnchors(node).length) continue;
+      if (node.querySelectorAll(HEADINGS).length > 1) {
+        console.warn(`[ShortScraping] PinesDramas 板块容器越界（含多个标题），跳过: ${wanted}`);
+        return null;
+      }
+      return node;
+    }
+    console.log(`[ShortScraping] PinesDramas 板块内未找到作品链接: ${wanted}`);
+    return null;
+  }
+
+  /**
+   * 卡片封面：从作品链接**就近向上爬**取第一张 img。两种板式都要覆盖——
+   * Recommended / Editor's Pick 的 img 在 <a> 里面，Popular Novels /
+   * Popular Short Dramas 的 img 是 <a> 的兄弟节点。一旦某层祖先里出现了别的
+   * 作品的链接就停下，免得串到隔壁卡的封面上。
+   */
+  function pinedramaPosterFor(anchor, slug, section) {
+    let node = anchor;
+    while (node) {
+      const img = node.querySelector('img');
+      const src = img && img.getAttribute('src');
+      if (src) return String(src).trim();
+      if (node === section) break;
+      const parent = node.parentElement;
+      if (!parent) break;
+      if (pinedramaItemAnchors(parent).some(a => a.slug !== slug)) break;
+      node = parent;
+    }
+    return '';
+  }
+
+  /** 订阅 URL 的 ?list= 选板块；无参数时按页面给缺省值（/novels → 推荐，首页 → 热门小说）。 */
+  function pinedramaWantedSection() {
+    const params = new URLSearchParams(window.location.search || '');
+    const wanted = normalizeSectionName(params.get('list') || '');
+    if (wanted) return wanted;
+    return /^\/novels\/?$/.test(window.location.pathname)
+      ? 'recommended_webnovels_for_you'
+      : 'popular_novels';
+  }
+
+  /**
+   * 板块条目：读**实时 DOM**（SSR 直出、hydrate 后仍在、与视口无关——375px 下条目数
+   * 与桌面一致，不是 ShortMax 那种按视口裁剪的轮播，故不必同源重取）。
+   * 同一张卡里有 2~3 个指向同一作品的链接（封面 / 标题 / 按钮），按 kind+slug 归并；
+   * 标题取 aria-label（三个链接都带，比 textContent 稳——封面链接的文本是空的）。
+   */
+  function getPinedramaItems() {
+    const wanted = pinedramaWantedSection();
+    const section = pinedramaSectionElement(document, wanted);
+    if (!section) return [];
+
+    const byKey = new Map();
+    for (const { el: anchor, kind, slug } of pinedramaItemAnchors(section)) {
+      const key = `${kind}:${slug}`;
+      if (!byKey.has(key)) byKey.set(key, { kind, slug, title: '', poster: '' });
+      const item = byKey.get(key);
+      if (!item.title) item.title = String(anchor.getAttribute('aria-label') || anchor.textContent || '').trim();
+      if (!item.poster) item.poster = pinedramaPosterFor(anchor, slug, section);
+    }
+
+    const items = [...byKey.values()];
+    console.log(`[ShortScraping] PinesDramas 板块 ${wanted}: ${items.length} 条`);
+    return items;
+  }
+
+  function extractPinedramaFromItem(item, index, tags, pdId) {
+    return {
+      id: `pinedrama_${pdId}_${index}`,
+      itemId: pdId,
+      title: String(item.title || '').trim(),
+      titleZh: '',
+      // 站点卡片同款缩略图（200×270 ≈7.8KB）原样存；推送侧由 lark.js 的 posterForPayload
+      // 剥掉 !<数字>.webp 尾缀取原图（960×1478 ≈213KB），同 DramaBox 范式
+      poster: String(item.poster || '').trim(),
+      tags,
+      genres: [],
+      description: '',
+      descriptionZh: '',
+      source: 'pinedrama',
+      sourceListUrl: window.location.href,
+      status: 'new',
+      url: `${PINEDRAMA_ORIGIN}/${item.kind === 'drama' ? 'dramas' : 'novels'}/${item.slug}`,
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
+  }
+
+  /**
+   * 简介的最小长度。**这道闸门是必需品不是调优**：小说详情页的正文块旁边还有一个移动端
+   * 「Read More」行，该作品没有简介时它就是块内最长的叶子文本，不设下限会把 'Read More'
+   * 当简介存进库（unit-pinedrama-sections D3 钉着）。真机实测简介 350~700 字符，
+   * 取 40 与两边都拉开数量级；短剧那条路同时靠它判断「爬到哪一层才是正文」。
+   */
+  const PINEDRAMA_MIN_SUMMARY = 40;
+
+  /** 子树内**最长的那个叶子 div** 的文本（同 Shortical「简介取最长的 <p>」范式）。 */
+  function pinedramaLongestLeafText(root) {
+    let best = '';
+    for (const node of root.querySelectorAll('div')) {
+      if (node.children.length) continue;
+      const text = String(node.textContent || '').trim();
+      if (text.length > best.length) best = text;
+    }
+    return best;
+  }
+
+  /**
+   * 小说详情简介：<h2>{标题} Summary</h2> 那一块里的正文。同块内还有一个空的渐变遮罩
+   * 与移动端「Read More」行，故取最长叶子而不是「第一个 div」——后者依赖节点顺序，
+   * 站点调一下版就错。og:description 是 SEO 模板文案（「…Read free on PineDrama.」），不可用。
+   */
+  function pinedramaNovelSummary(doc) {
+    const heading = Array.from(doc.querySelectorAll('h2'))
+      .find(h => /\bSummary$/.test(String(h.textContent || '').trim()));
+    if (!heading || !heading.parentElement) return '';
+    const text = pinedramaLongestLeafText(heading.parentElement);
+    return text.length >= PINEDRAMA_MIN_SUMMARY ? text : '';
+  }
+
+  /**
+   * 短剧详情简介：该页**没有** Summary 标题，正文是 h1 所在 hero 块里的一个叶子 div。
+   * 从 h1 逐层向上爬、取第一个出现成段文本的层级（真机在第 3 层）。
+   * og:description 同样是 SEO 模板（「…Stream the top mini series… Watch now!」）。
+   */
+  function pinedramaDramaSummary(doc) {
+    const h1 = doc.querySelector('h1');
+    if (!h1) return '';
+    let node = h1;
+    for (let i = 0; i < 4; i++) {
+      node = node.parentElement;
+      if (!node) break;
+      const text = pinedramaLongestLeafText(node);
+      if (text.length >= PINEDRAMA_MIN_SUMMARY) return text;
+    }
+    return '';
+  }
+
+  /**
+   * 详情页的官方多值标签（2~4 个；列表卡上只印 1 个）。两类页同一个位置——h1 的父节点，
+   * 该作用域恰好只含本条目自己的标签，页面下方相关推荐里的同类链接不在内。
+   */
+  function pinedramaDetailGenres(doc, isDrama) {
+    const h1 = doc.querySelector('h1');
+    const scope = h1 && h1.parentElement;
+    if (!scope) return [];
+    const selector = isDrama ? 'a[href*="/genres/"]' : 'a[href*="/novels/category/"]';
+    return Array.from(scope.querySelectorAll(selector)).map(a => String(a.textContent || '').trim());
+  }
+
+  /**
+   * 详情页（同源 fetch，不经后台代理）。列表卡片**简介覆盖不全**——Popular Novels 与
+   * Popular Short Dramas 压根没有简介，另两个板块的短 blurb 与详情页 Summary 又是两段
+   * 不同文案（2026-09-18 用户定：22 条一律取详情，统一口径）。
+   * **失败一律返回 null 跳过该卡**（理由同 AppleTV/ShortMax：简介只有详情页这一个来源，
+   * 存量回填只补 genres 不补简介，存下无简介的卡就永远自愈不了）。
+   */
+  async function fetchPinedramaDetail(drama) {
+    if (!drama.url) return null;
+
+    const html = await fetchServerHtml(drama.url);
+    if (html === null) {
+      console.warn(`[ShortScraping] PinesDramas 详情取不到（跳过，下轮重试）: ${drama.title}`);
+      return null;
+    }
+    const doc = parseHtmlDocument(html);
+    if (!doc) {
+      console.warn(`[ShortScraping] PinesDramas 详情解析失败（跳过，下轮重试）: ${drama.title}`);
+      return null;
+    }
+
+    const isDrama = drama.url.includes('/dramas/');
+    const description = isDrama ? pinedramaDramaSummary(doc) : pinedramaNovelSummary(doc);
+    if (!description) {
+      console.warn(`[ShortScraping] PinesDramas 详情无简介（跳过，下轮重试）: ${drama.title}`);
+      return null;
+    }
+
+    drama.description = description;
+    const genres = cleanGenres(pinedramaDetailGenres(doc, isDrama));
+    if (genres.length) drama.genres = genres;
+
+    console.log(`[ShortScraping] PinesDramas 详情: ${drama.title} | 类型: ${drama.genres.join(', ')}`);
+    return drama;
   }
 
   /**

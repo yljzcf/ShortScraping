@@ -54,7 +54,10 @@
     // （'www.dramaboxdb.com'.endsWith('dramabox.com') 为 false），条目顺序不影响匹配。
     { site: 'dramabox', name: 'DramaBox', host: 'dramabox.com', match: 'suffix' },
     { site: 'dramabox', name: 'DramaBox', host: 'dramaboxdb.com', match: 'suffix' },
-    { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix' }
+    { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix' },
+    // 同 FlickReels：首页订阅带 ?list=，Chrome 匹配模式的路径段连查询串一起匹配，
+    // '/' 匹配不到 '/?list=…'，故 path 留默认 /*（非订阅页由 adapter.matches 闸住）
+    { site: 'pinedrama', name: 'PinesDramas', host: 'pinedrama.com', match: 'suffix' }
   ];
 
   // 弹窗/共享页头部的折叠分组（2026-09-12 用户定）。数组顺序即展示顺序：
@@ -66,7 +69,8 @@
   const SITE_GROUPS = [
     { group: 'shortdrama', name: '短剧', sites: ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox'] },
     { group: 'video', name: '影视', sites: ['imdb', 'netflix', 'appletv'] },
-    { group: 'game', name: '游戏 · 网文', sites: ['steam', 'royalroad'] }
+    // PinesDramas 同时有网文与短剧两类内容，整站按 2026-09-18 用户指定归入本组
+    { group: 'game', name: '游戏 · 网文', sites: ['steam', 'royalroad', 'pinedrama'] }
   ];
 
   // 零状态时默认展开的组

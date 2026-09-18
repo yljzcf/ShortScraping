@@ -211,6 +211,14 @@
       // '@w=360&h=640'，站点随时可能换尺寸（同 AppleTV 尾段尺寸码的教训）。
       return raw.replace(/@[a-z]+=\d+(?:&[a-z]+=\d+)*$/i, '');
     }
+    if (/^https:\/\/v\.pinedrama\.com\//i.test(raw)) {
+      // PinesDramas：采集存站点卡片同款缩略图 `…<hash>.webp!15491.webp`（200×270 ≈7.8KB），
+      // 剥掉尾缀即原图 960×1478 ≈213KB。URL 不含逗号/百分号，两种形态捷径都能转附件——
+      // 改写纯为 v1.6.4 定的「库里存小图、推出去放大」，同 GoodShort / DramaBox。
+      // 尾缀在 **pathname** 里（整个 URL 没有 '?'），且**按形状匹配 `!<数字>.webp`**、
+      // 不写死 '!15491.webp'（同 AppleTV 尺寸码、DramaBox @ 尾段的教训）。
+      return raw.replace(/!\d+\.webp$/i, '');
+    }
     if (/^https:\/\/[a-z0-9-]+\.mzstatic\.com\/image\/thumb\//i.test(raw)) {
       // 尾段形如 `<w>x<h><裁切码>.<扩展名>`。**按形状匹配数字**、不写死 '400x600nr'：
       // 裁切码取自站点自己的 artwork.template（content.js 的 appleArtUrl 只替换

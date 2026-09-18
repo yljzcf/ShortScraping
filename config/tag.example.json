@@ -194,5 +194,21 @@
   {
     "url": "https://tv.apple.com/us/collection/most-popular-now/uts.col.ChartsMovies.tvs.sbd.4000",
     "tags": ["Apple", "Movie", "US"]
+  },
+  {
+    "url": "https://pinedrama.com/novels?list=recommended_webnovels_for_you",
+    "tags": ["Pines", "novel", "recommend"]
+  },
+  {
+    "url": "https://pinedrama.com/novels?list=popular_short_dramas",
+    "tags": ["Pines", "drama", "Pop"]
+  },
+  {
+    "url": "https://pinedrama.com/?list=popular_novels",
+    "tags": ["Pines", "novel", "Pop"]
+  },
+  {
+    "url": "https://pinedrama.com/?list=editor_s_pick",
+    "tags": ["Pines", "novel", "Pick"]
   }
 ]

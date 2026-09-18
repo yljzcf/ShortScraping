@@ -18,14 +18,14 @@ const deepEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // 站点顺序＝弹窗/共享页图标与设置页分组顺序（2026-09-11 用户定：Netflix 第二、RoyalRoad 末位；
 // 2026-09-12 用户定：AppleTV 紧随 Netflix 排第三）
 check('T1a CATEGORY_SOURCES 顺序与全集',
-  deepEq(SiteRegistry.CATEGORY_SOURCES, ['imdb', 'netflix', 'appletv', 'steam', 'mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox', 'royalroad']),
+  deepEq(SiteRegistry.CATEGORY_SOURCES, ['imdb', 'netflix', 'appletv', 'steam', 'mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox', 'royalroad', 'pinedrama']),
   JSON.stringify(SiteRegistry.CATEGORY_SOURCES));
 check('T1b SOURCE_NAMES 字面量（含键序）',
-  deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', appletv: 'AppleTV', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', flickreels: 'FlickReels', goodshort: 'GoodShort', shortical: 'Shortical', shortmax: 'ShortMax', dramabox: 'DramaBox', royalroad: 'RoyalRoad' }),
+  deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', appletv: 'AppleTV', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', flickreels: 'FlickReels', goodshort: 'GoodShort', shortical: 'Shortical', shortmax: 'ShortMax', dramabox: 'DramaBox', royalroad: 'RoyalRoad', pinedrama: 'PinesDramas' }),
   JSON.stringify(SiteRegistry.SOURCE_NAMES));
 // dramabox 有两条 host 条目，hostBySource 取**首条**＝主域 dramabox.com（弹窗「去抓取」用它挑订阅 URL）
 check('T1c hostBySource 字面量（含键序）',
-  deepEq(SiteRegistry.hostBySource, { imdb: 'imdb.com', netflix: 'netflix.com', appletv: 'tv.apple.com', steam: 'store.steampowered.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com', flickreels: 'flickreels.net', goodshort: 'goodshort.com', shortical: 'shortical.com', shortmax: 'shorttv.live', dramabox: 'dramabox.com', royalroad: 'royalroad.com' }),
+  deepEq(SiteRegistry.hostBySource, { imdb: 'imdb.com', netflix: 'netflix.com', appletv: 'tv.apple.com', steam: 'store.steampowered.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com', flickreels: 'flickreels.net', goodshort: 'goodshort.com', shortical: 'shortical.com', shortmax: 'shorttv.live', dramabox: 'dramabox.com', royalroad: 'royalroad.com', pinedrama: 'pinedrama.com' }),
   JSON.stringify(SiteRegistry.hostBySource));
 
 // ---------- T1e 同键多 host 的注册表不变量（v1.6.11 新引入，DramaBox 两域名） ----------
@@ -63,7 +63,8 @@ const expectedGroups = [
   { site: 'netflix', label: 'Netflix', tag: 'Netflix', icon: 'assets/icons/site-netflix.png' },
   { site: 'appletv', label: 'AppleTV', tag: 'AppleTV', icon: 'assets/icons/site-appletv.png' },
   { site: 'steam', label: 'Steam', tag: 'Steam', icon: 'assets/icons/site-steam.png' },
-  { site: 'royalroad', label: 'RoyalRoad', tag: 'RoyalRoad', icon: 'assets/icons/site-royalroad.png' }
+  { site: 'royalroad', label: 'RoyalRoad', tag: 'RoyalRoad', icon: 'assets/icons/site-royalroad.png' },
+  { site: 'pinedrama', label: 'PinesDramas', tag: 'PinesDramas', icon: 'assets/icons/site-pinedrama.png' }
 ];
 check('T1d 设置页订阅分组派生结果（按 SITE_GROUPS 顺序）', deepEq(derivedGroups, expectedGroups), JSON.stringify(derivedGroups));
 
@@ -218,7 +219,7 @@ check('T6 contentScriptMatches 按站点顺序：host 通配项 + Netflix/AppleT
     '*://store.steampowered.com/*', '*://*.my-drama.com/*',
     '*://*.reelshort.com/*', '*://*.dramashorts.io/*', '*://*.netshort.com/*', '*://*.flickreels.net/*',
     '*://*.goodshort.com/*', '*://*.shortical.com/*', '*://*.shorttv.live/*',
-    '*://*.dramabox.com/*', '*://*.dramaboxdb.com/*', '*://*.royalroad.com/*'
+    '*://*.dramabox.com/*', '*://*.dramaboxdb.com/*', '*://*.royalroad.com/*', '*://*.pinedrama.com/*'
   ]),
   JSON.stringify(SiteRegistry.contentScriptMatches()));
 
