@@ -49,9 +49,23 @@ globalThis.importScripts = () => {};
 
 const SUB = 'https://unit.test/list';
 let tagJson = [{ url: SUB, tags: ['T'] }];
+// Shortical 规范 slug 表（T5 用）：首页 href 尾段那个号不是规范 series id，
+// 详情页只认静态发布产物那套 —— 见 migrateShorticalCanonicalIds
+let shorticalSitemap = ['bound-by-fire-163', 'off-limits-177', 'room-service-193'];
+let shorticalSitemapFails = false;
+let shorticalSitemapCalls = 0;
 globalThis.fetch = async (url) => {
   const u = String(url);
   if (u.includes('tag.json')) return { ok: true, json: async () => structuredClone(tagJson) };
+  if (u.includes('/sitemaps/series.xml')) {
+    shorticalSitemapCalls++;
+    if (shorticalSitemapFails) return { ok: false, status: 503, text: async () => '' };
+    return {
+      ok: true,
+      status: 200,
+      text: async () => `<urlset>${shorticalSitemap.map(s => `<loc>https://shortical.com/drama/${s}</loc>`).join('')}</urlset>`
+    };
+  }
   throw new TypeError('unit stub: no network'); // cron/trans/lark 走默认回退
 };
 globalThis.Translator = { async translateTitleAndDesc() { return { title: '', desc: '' }; } };
@@ -105,6 +119,7 @@ const seedLegacy = async () => {
   delete rawStore.companyFieldDropped;
   delete rawStore.partialTranslationReset;
   delete rawStore.nonChineseTitleZhReset;
+  delete rawStore.shorticalCanonicalIdsMigrated;
   rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
 };
 await seedLegacy();
@@ -202,6 +217,100 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   await loadConfigFromJsonFiles().catch(() => { threw = true; }); // eslint-disable-line no-undef
   globalThis.pruneDramasOutsideConfiguredUrls = origPrune;
   check('T4d 订阅外清理抛错同样不阻断配置恢复', threw === false, `threw=${threw}`);
+}
+
+// ---------- T5 Shortical 规范 id 迁移（v1.6.10，2026-09-18） ----------
+// 首页 href 尾段的数字不是规范 series id（站点两套 id，详情页只认静态发布产物那套），
+// 所以存量既有 404 链接、又因 id 漂移把同一部剧反复当新卡入库。**再抓取不会自愈**——
+// 新 id 只会再添一条。规范源是公开 sitemap。
+{
+  const seedShortical = async (dramas) => {
+    await resetDramasCache();
+    rawStore.dramas = dramas;
+    delete rawStore.shorticalCanonicalIdsMigrated;
+    rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
+    shorticalSitemapCalls = 0;
+  };
+  const sc = (over) => ({ source: 'shortical', status: 'new', tags: ['T'], sourceListUrl: SUB, genres: [], ...over });
+  // 时间线按 scrapedAt 降序存放 → 同一部剧的两条里「先到」的是排在后面那条
+  const FULL = () => [
+    sc({ id: 'sc-late', itemId: 'sc2201', title: 'Bound by Fire', url: 'https://shortical.com/drama/bound-by-fire-2201',
+      genres: ['Second Chance'], scrapedAt: '2026-09-18T01:48:00.000Z' }),
+    sc({ id: 'sc-early', itemId: 'sc2200', title: 'Bound by Fire', url: 'https://shortical.com/drama/bound-by-fire-2200',
+      scrapedAt: '2026-09-17T16:29:00.000Z' }),
+    sc({ id: 'sc-ok', itemId: 'sc177', title: 'Off Limits', url: 'https://shortical.com/drama/off-limits-177',
+      genres: ['Romance'], scrapedAt: '2026-09-17T16:00:00.000Z' }),
+    sc({ id: 'sc-miss', itemId: 'sc2999', title: '静态产物没收录', url: 'https://shortical.com/drama/not-published-yet-2999',
+      scrapedAt: '2026-09-17T15:00:00.000Z' }),
+    { id: 'other', itemId: 'ns001', title: 'NetShort', source: 'netshort', status: 'trans', tags: ['T'],
+      url: 'https://netshort.com/episode/x-1', genres: ['Romance'], scrapedAt: '2026-09-17T14:00:00.000Z', sourceListUrl: SUB }
+  ];
+
+  await seedShortical(FULL());
+  await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
+  {
+    const dramas = rawStore.dramas || [];
+    const byId = Object.fromEntries(dramas.map(d => [d.id, d]));
+    check('T5a 高号条目改写成 sitemap 的规范 itemId 与 url（点封面不再落 404）',
+      byId['sc-early']?.itemId === 'sc163'
+      && byId['sc-early']?.url === 'https://shortical.com/drama/bound-by-fire-163',
+      JSON.stringify([byId['sc-early']?.itemId, byId['sc-early']?.url]));
+    check('T5b 同一部剧的重复按先到先得只留 scrapedAt 更早的那条',
+      !byId['sc-late'] && !!byId['sc-early'] && dramas.filter(d => d.itemId === 'sc163').length === 1,
+      JSON.stringify(dramas.map(d => [d.id, d.itemId])));
+    check('T5c 被丢弃条目的 genres 并入保留条目（仅保留条目为空时）',
+      JSON.stringify(byId['sc-early']?.genres) === JSON.stringify(['Second Chance']),
+      JSON.stringify(byId['sc-early']?.genres));
+    check('T5d 已是规范形态的条目不被误动（同一对象、genres 不被覆盖）',
+      byId['sc-ok']?.itemId === 'sc177' && byId['sc-ok']?.url === 'https://shortical.com/drama/off-limits-177'
+      && JSON.stringify(byId['sc-ok']?.genres) === JSON.stringify(['Romance']), JSON.stringify(byId['sc-ok']));
+    check('T5e sitemap 解析不到的条目原样保留、不删（不重试）',
+      byId['sc-miss']?.itemId === 'sc2999' && byId['sc-miss']?.url === 'https://shortical.com/drama/not-published-yet-2999',
+      JSON.stringify(byId['sc-miss']));
+    check('T5f 非 Shortical 条目一律不碰', byId['other']?.itemId === 'ns001', JSON.stringify(byId['other']));
+    check('T5g shorticalCanonicalIdsMigrated 已置位', rawStore.shorticalCanonicalIdsMigrated === true,
+      String(rawStore.shorticalCanonicalIdsMigrated));
+    check('T5h 迁移期间 sitemap 只取一次', shorticalSitemapCalls === 1, String(shorticalSitemapCalls));
+  }
+  {
+    // 二次唤醒：标记置位后零成本跳过
+    getLog = [];
+    shorticalSitemapCalls = 0;
+    const before = JSON.stringify(rawStore.dramas);
+    await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
+    const flagGets = getLog.filter(keys => keys.includes('shorticalCanonicalIdsMigrated'));
+    check('T5i 二次唤醒标记读取不连带 dramas、零网络、数据不动',
+      flagGets.length === 1 && flagGets[0].length === 1 && shorticalSitemapCalls === 0
+      && JSON.stringify(rawStore.dramas) === before,
+      JSON.stringify({ flagGets, calls: shorticalSitemapCalls }));
+  }
+  {
+    // sitemap 取不到：标记不置位、数据一个字节不动，下轮唤醒重试（绝不退回 href 那个号）
+    await seedShortical(FULL());
+    shorticalSitemapFails = true;
+    const before = JSON.stringify(rawStore.dramas);
+    let threw = false;
+    await loadConfigFromJsonFiles().catch(() => { threw = true; }); // eslint-disable-line no-undef
+    shorticalSitemapFails = false;
+    check('T5j sitemap 取不到 → 不阻断配置恢复、标记不置位、数据不动',
+      threw === false && rawStore.shorticalCanonicalIdsMigrated === undefined
+      && JSON.stringify(rawStore.dramas) === before,
+      JSON.stringify({ threw, flag: rawStore.shorticalCanonicalIdsMigrated }));
+    await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
+    check('T5k 下轮重试完成迁移并置标',
+      rawStore.shorticalCanonicalIdsMigrated === true
+      && (rawStore.dramas || []).some(d => d.itemId === 'sc163'),
+      JSON.stringify((rawStore.dramas || []).map(d => d.itemId)));
+  }
+  {
+    // 库里没有 Shortical 条目（绝大多数用户）：直接收口，零网络请求
+    await seedShortical([{ id: 'only', itemId: 'ns001', title: 'NetShort', source: 'netshort', status: 'trans',
+      tags: ['T'], url: 'https://netshort.com/episode/x-1', genres: [], scrapedAt: '2026-09-17T14:00:00.000Z', sourceListUrl: SUB }]);
+    await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
+    check('T5l 无 Shortical 条目时零网络请求直接置标',
+      rawStore.shorticalCanonicalIdsMigrated === true && shorticalSitemapCalls === 0,
+      JSON.stringify({ flag: rawStore.shorticalCanonicalIdsMigrated, calls: shorticalSitemapCalls }));
+  }
 }
 
 console.log = origLog; console.warn = origWarn; console.error = origError;

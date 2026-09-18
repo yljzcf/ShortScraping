@@ -105,11 +105,23 @@ const tokenRecords = token => [{ fbase_key: 'firebase:authUser:key:[DEFAULT]', v
 
 const apiRow = (id, categories) => ({ thumbnail: `${CDN}/${id}/image.webp`, series: { id: Number(id), name: 'x', description: 'y', categories } });
 
+// sitemap 是规范 slug 的唯一权威源：首页 href 尾段的数字是**另一套 id**（站点两套并行，
+// 详情页只认静态发布产物那套，详见 C 组与适配器注释）。
+const sitemapXml = slugs => `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${slugs.map(s => `  <url><loc>https://shortical.com/drama/${s}</loc></url>`).join('\n')}
+</urlset>`;
+// 默认夹具里的 href 尾段恰好就是规范 id（多数存量如此），C 组专门覆盖两者不一致的情形
+const DEFAULT_SITEMAP = ['how-to-fake-date-your-enemy-198', 'room-service-193',
+  'foul-play-with-my-brothers-best-friend-152', 'reordered-777', 'more-one-881', 'other-999'];
+
 async function runScenario({ href = `${HOME}?list=top_recommended`, subscriptions = [SUB], sections = [section('Top Recommended', DEFAULT_CARDS)],
-  dramas = [], indexedDb = makeIndexedDb({ records: tokenRecords('tok-1') }), apiImpl } = {}) {
+  dramas = [], indexedDb = makeIndexedDb({ records: tokenRecords('tok-1') }), apiImpl,
+  sitemap = DEFAULT_SITEMAP, sitemapImpl } = {}) {
   const store = { dramas: structuredClone(dramas) };
   const saveCalls = [];
   const apiCalls = [];
+  const sitemapCalls = [];
   const listeners = [];
 
   globalThis.chrome = {
@@ -133,6 +145,12 @@ async function runScenario({ href = `${HOME}?list=top_recommended`, subscription
   globalThis.DOMParser = class { parseFromString() { return documentFrom(el('html')); } };
   globalThis.indexedDB = indexedDb.idb;
   globalThis.fetch = async (url, init) => {
+    if (String(url).includes('/sitemaps/series.xml')) {
+      sitemapCalls.push(String(url));
+      return sitemapImpl
+        ? await sitemapImpl(url, init)
+        : { ok: true, status: 200, text: async () => sitemapXml(sitemap) };
+    }
     apiCalls.push({ url, auth: init?.headers?.Authorization || null });
     return apiImpl
       ? await apiImpl(url, init)
@@ -143,7 +161,7 @@ async function runScenario({ href = `${HOME}?list=top_recommended`, subscription
   const response = await new Promise(resolve => {
     for (const fn of listeners) fn({ action: 'scrape' }, { tab: { id: 1 } }, resolve);
   });
-  return { saved: store.dramas, saveCalls, apiCalls, response, idbState: indexedDb.state };
+  return { saved: store.dramas, saveCalls, apiCalls, sitemapCalls, response, idbState: indexedDb.state };
 }
 
 // ---------- F 字段映射 ----------
@@ -252,6 +270,77 @@ for (const [name, scenario] of [
     !saveCalls.some(s => s.itemId === 'sc198'), show(saveCalls.map(s => s.itemId)));
 }
 
+// ---------- C 规范 slug：首页 href 尾段的数字不是规范 id ----------
+// 站点两套 id 并行：首页卡片 href 来自实时接口（实测 2100–2250 区间的新号），而详情页只吃
+// 静态发布产物（SPA 取 /_seo/drama/<id>.json，拿不到就渲染 404）。所以 href 那个号一大半
+// 打不开，且它还被当成 itemId → 同一部剧 id 漂移、反复当新卡入库。规范源是 sitemap。
+{
+  const { saved, sitemapCalls } = await runScenario({
+    sections: [section('Top Recommended', [card({ id: '2200', title: 'Bound by Fire', slug: 'bound-by-fire' })])],
+    sitemap: ['bound-by-fire-163']
+  });
+  check('C1 url 与 itemId 都取 sitemap 的规范值，不用 href 尾段那个号',
+    eq(saved.map(d => [d.itemId, d.url]), [['sc163', 'https://shortical.com/drama/bound-by-fire-163']]),
+    show(saved.map(d => [d.itemId, d.url])));
+  check('C1b sitemap 每轮只取一次', sitemapCalls.length === 1, show(sitemapCalls));
+}
+{
+  // 实测 sc2200/sc2201、sc2227/sc2249 等 7 对重复就是这么来的
+  const { saved } = await runScenario({
+    sections: [section('Top Recommended', [
+      card({ id: '2200', title: 'Bound by Fire', slug: 'bound-by-fire' }),
+      card({ id: '2201', title: 'Bound by Fire', slug: 'bound-by-fire' })
+    ])],
+    sitemap: ['bound-by-fire-163']
+  });
+  check('C2 两个不同高号指向同一部剧 → 按规范 id 去重、只入一条',
+    eq(saved.map(d => d.itemId), ['sc163']), show(saved.map(d => d.itemId)));
+}
+{
+  const { saved, response } = await runScenario({
+    sections: [section('Top Recommended', [
+      card({ id: '2199', title: '静态产物还没收录', slug: 'not-published-yet' }),
+      card({ id: '193', title: 'Room Service', slug: 'room-service' })
+    ])],
+    sitemap: ['room-service-193']
+  });
+  check('C3 sitemap 里没有的剧跳过该卡、其余照常入库（下轮重试）',
+    response?.success === true && eq(saved.map(d => d.itemId), ['sc193']), show(saved.map(d => d.itemId)));
+}
+for (const [name, sitemapImpl] of [
+  ['C4 sitemap HTTP 500', async () => ({ ok: false, status: 500, text: async () => '' })],
+  ['C4b sitemap 抛异常', async () => { throw new Error('network down'); }],
+  ['C4c sitemap 回空壳 HTML（站点对未命中路径一律 200+空壳）',
+    async () => ({ ok: true, status: 200, text: async () => '<!doctype html><html><body><div id="root"></div></body></html>' })],
+  ['C4d sitemap 里一条 /drama/ 都没有', async () => ({ ok: true, status: 200, text: async () => sitemapXml([]) })]
+]) {
+  const { saved, response } = await runScenario({ sitemapImpl });
+  check(`${name} → 本轮零入库、不报错（绝不退回 href 尾段那个号）`,
+    response?.success === true && saved.length === 0, show(saved.length));
+}
+{
+  const { saved, apiCalls } = await runScenario({
+    sections: [section('Top Recommended', [card({ id: '2192', title: 'Owned by the Wolf', slug: 'owned-by-the-wolf', category: 'Romance' })])],
+    sitemap: ['owned-by-the-wolf-184'],
+    apiImpl: async () => ({ ok: true, status: 200, json: async () => [apiRow('2192', ['Romance', 'Billionaire', 'Fantasy', 'Werewolf / shifter romance'])] })
+  });
+  check('C5 genres 仍按 href 尾段的号匹配接口（换成规范 id 会全线失配、静默退成单标签）',
+    saved[0]?.itemId === 'sc184'
+    && eq(saved[0]?.genres, ['Romance', 'Billionaire', 'Fantasy', 'Werewolf / shifter romance']),
+    show([saved[0]?.itemId, saved[0]?.genres]));
+  check('C5b 接口仍只调一次', apiCalls.length === 1, show(apiCalls.length));
+}
+{
+  // sitemap 也会收录高号（实测有 the-maid-and-the-ice-prince-2120），按 slug 基名匹配对两种都成立
+  const { saved } = await runScenario({
+    sections: [section('Top Recommended', [card({ id: '2120', title: 'The Maid And The Ice Prince', slug: 'the-maid-and-the-ice-prince' })])],
+    sitemap: ['the-maid-and-the-ice-prince-2120']
+  });
+  check('C6 规范 id 本身就是高号时照常入库（不是「低号才对」）',
+    eq(saved.map(d => [d.itemId, d.url]), [['sc2120', 'https://shortical.com/drama/the-maid-and-the-ice-prince-2120']]),
+    show(saved.map(d => [d.itemId, d.url])));
+}
+
 // ---------- L 区块定位 ----------
 {
   const { saved } = await runScenario({
@@ -274,8 +363,10 @@ for (const [name, scenario] of [
     eq(saved.map(d => d.itemId), ['sc881']), show(saved.map(d => d.itemId)));
 }
 {
-  const { saved, response } = await runScenario({ sections: [section('Trending Now', DEFAULT_CARDS)] });
+  const { saved, response, sitemapCalls } = await runScenario({ sections: [section('Trending Now', DEFAULT_CARDS)] });
   check('L3 板块找不到 → 零入库且不报错', response?.success === true && saved.length === 0, show(saved.length));
+  check('L3b 板块都没找到就不该去取 sitemap（先等区块、再取规范表）',
+    sitemapCalls.length === 0, show(sitemapCalls));
 }
 
 // ---------- H hydrate 轮询：首轮空、随后才填上 ----------
@@ -305,7 +396,9 @@ for (const [name, scenario] of [
   globalThis.window = { location: loc(`${HOME}?list=top_recommended`) };
   globalThis.document = morphing;
   globalThis.indexedDB = makeIndexedDb({ dbNames: [] }).idb;
-  globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({}) });
+  globalThis.fetch = async url => (String(url).includes('/sitemaps/series.xml')
+    ? { ok: true, status: 200, text: async () => sitemapXml(DEFAULT_SITEMAP) }
+    : { ok: false, status: 401, json: async () => ({}) });
   (0, eval)(contentSrc);
   await new Promise(resolve => { for (const fn of listeners) fn({ action: 'scrape' }, { tab: { id: 1 } }, resolve); });
   check('H1 首轮 DOM 还空时轮询等 hydrate，填上后照常抓到',

@@ -237,7 +237,8 @@ async function loadConfigFromJsonFiles() {
     ['company 字段移除', dropCompanyField],
     ['半成品翻译复位', resetPartialTranslations],
     ['非中文译名复位', resetNonChineseTitleZh],
-    ['ReelShort 播放页 URL 迁移', migrateReelshortEpisodeUrls]
+    ['ReelShort 播放页 URL 迁移', migrateReelshortEpisodeUrls],
+    ['Shortical 规范 id 迁移', migrateShorticalCanonicalIds]
   ]) {
     await runGuarded(label, step);
   }
@@ -798,6 +799,115 @@ async function migrateReelshortEpisodeUrls() {
       await chrome.storage.local.set({ rsEpisodeUrlMigrated: true });
     }
     console.log(`[ShortScraping] ReelShort 播放页迁移完成：改写 ${changedCount} 条（候选 ${candidates.length}）`);
+  });
+}
+
+/**
+ * 取 Shortical 规范 slug 表（`slug 基名 → 规范 slug`，基名＝去掉尾部 `-<数字>`）。
+ * 解析逻辑与 content.js 的 readShorticalCanonicalSlugs 一致——SW 侧重写一份，同
+ * migrateReelshortEpisodeUrls 在 SW 内重写 __NEXT_DATA__ 抽取的先例：为一条一次性迁移
+ * 新立共享模块要同时改 manifest / importScripts / 各 HTML 顺序 / STATIC_ROUTES 四处，不划算。
+ */
+async function fetchShorticalCanonicalSlugs() {
+  const response = await fetch('https://shortical.com/sitemaps/series.xml', { headers: { 'Accept': 'application/xml' } });
+  if (!response.ok) throw new Error(`Shortical sitemap HTTP ${response.status}`);
+  const xml = await response.text();
+  const map = new Map();
+  for (const match of xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)) {
+    const slug = (match[1].match(/\/drama\/([^/?#]+)/) || [])[1] || '';
+    if (!/-\d+$/.test(slug)) continue;
+    const base = slug.replace(/-\d+$/, '');
+    if (!map.has(base)) map.set(base, slug);   // 先到先得（实测 142 条基名零碰撞）
+  }
+  // 站点对未命中路径一律回 200＋9KB 空壳，「拿到响应」不等于「拿到 sitemap」
+  if (!map.size) throw new Error('Shortical sitemap 里没有 /drama/ 条目');
+  return map;
+}
+
+/**
+ * 存量 Shortical 条目一次性改写到规范 id/url（v1.6.10，2026-09-18 线上实证）。
+ *
+ * 首页卡片 href 尾段的数字**不是**规范 series id：站点两套 id 并行，详情页只认静态发布
+ * 产物那套（SPA 取 `/_seo/drama/<id>.json`，拿不到就渲染 404）。实测库里 18 条有 14 条
+ * 封面链接是 404，且同一部剧因 id 漂移被反复当新卡入库（7 对重复）。**再抓取不会自愈**
+ * ——新 id 只会再添一条，老条目永远留着，所以必须由本迁移兜。
+ *
+ * 规范 itemId 撞上另一条时按**先到先得**丢弃较晚的那条（时间线按 scrapedAt 降序存放，
+ * 「先到」不是数组里的第一个，必须按时间挑），仅在保留条目 genres 为空时并入被丢弃条目的
+ * genres——与 saveDramaRecord 去重命中分支逐字同语义。解析不到规范 slug 的条目原样保留、
+ * 不删也不重试（同 rsEpisodeUrlMigrated「不重试失败条目」）。
+ *
+ * 独立标记 shorticalCanonicalIdsMigrated，理由同 companyFieldDropped——
+ * runLegacyDramaMigrations 在存量机器上早已置位，挂进去永远不会执行。
+ * 网络阶段在单写队列之外进行，只把最终改写入队。
+ */
+async function migrateShorticalCanonicalIds() {
+  // 标记单独先读：置位后直接返回，不连带反序列化整张 dramas 表（SW 每次唤醒都走这里）
+  const { shorticalCanonicalIdsMigrated } = await chrome.storage.local.get('shorticalCanonicalIdsMigrated');
+  if (shorticalCanonicalIdsMigrated) return;
+  const { dramas = [] } = await chrome.storage.local.get('dramas');
+  // 没有 Shortical 条目就直接收口：绝大多数用户走这条路，零网络请求
+  if (!dramas.some(drama => drama && drama.source === 'shortical')) {
+    await chrome.storage.local.set({ shorticalCanonicalIdsMigrated: true });
+    return;
+  }
+
+  // 取不到规范表就抛：runGuarded 兜住、标记不置位、下轮唤醒重试。
+  // **绝不退回 href 那个号**——那正是本缺陷本身
+  const canonical = await fetchShorticalCanonicalSlugs();
+
+  return enqueueDramaWrite('Shortical 规范 id 迁移', async () => {
+    const current = await getDramasInQueue();
+    const target = new Map();     // 下标 → { itemId, url }
+    const groups = new Map();     // 规范 itemId → 下标数组
+    let unresolved = 0;
+
+    current.forEach((drama, index) => {
+      if (!drama || drama.source !== 'shortical') return;
+      const slug = (String(drama.url || '').match(/\/drama\/([^/?#]+)/) || [])[1] || '';
+      const canonicalSlug = slug ? canonical.get(slug.replace(/-\d+$/, '')) : '';
+      const id = canonicalSlug ? (canonicalSlug.match(/-(\d+)$/) || [])[1] : '';
+      if (!id) { unresolved++; return; }
+      const itemId = `sc${id}`;
+      target.set(index, { itemId, url: `https://shortical.com/drama/${canonicalSlug}` });
+      if (!groups.has(itemId)) groups.set(itemId, []);
+      groups.get(itemId).push(index);
+    });
+
+    const at = value => { const ms = Date.parse(value || ''); return Number.isFinite(ms) ? ms : Infinity; };
+    const dropped = new Set();
+    const genresFrom = new Map();   // 保留下标 → 被丢弃条目的 genres（仅保留条目为空时启用）
+    for (const indexes of groups.values()) {
+      if (indexes.length < 2) continue;
+      const keep = indexes.reduce((a, b) => (at(current[b].scrapedAt) < at(current[a].scrapedAt) ? b : a));
+      for (const index of indexes) {
+        if (index === keep) continue;
+        dropped.add(index);
+        const spare = Array.isArray(current[index].genres) ? current[index].genres : [];
+        if (spare.length && !(genresFrom.get(keep) || []).length) genresFrom.set(keep, spare);
+      }
+    }
+
+    let rewritten = 0;
+    const migrated = [];
+    current.forEach((drama, index) => {
+      if (dropped.has(index)) return;
+      const next = target.get(index);
+      if (!next) { migrated.push(drama); return; }
+      const spare = genresFrom.get(index) || [];
+      const fillGenres = spare.length > 0 && !(Array.isArray(drama.genres) && drama.genres.length > 0);
+      if (drama.itemId === next.itemId && drama.url === next.url && !fillGenres) { migrated.push(drama); return; }
+      rewritten++;
+      migrated.push(fillGenres ? { ...drama, ...next, genres: [...spare] } : { ...drama, ...next });
+    });
+
+    if (rewritten > 0 || dropped.size > 0) {
+      await writeDramasInQueue(migrated, { shorticalCanonicalIdsMigrated: true });
+    } else {
+      // flag-only 写不碰 dramas，保持直写、不动缓存
+      await chrome.storage.local.set({ shorticalCanonicalIdsMigrated: true });
+    }
+    console.log(`[ShortScraping] Shortical 规范 id 迁移完成：改写 ${rewritten} 条、合并重复 ${dropped.size} 条、解析不到 ${unresolved} 条`);
   });
 }
 

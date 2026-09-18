@@ -498,7 +498,12 @@
   /**
    * Shortical 适配器（shortical.com 首页，Vite+React 纯前端渲染，v1.6.9）：
    * 服务端只回 9KB 空壳（<div id="root">），**只能读 hydrate 后的 DOM**（同 MyDrama
-   * 范式轮询等条目数稳定）。「Top Recommended」区块是栅格不是轮播，9 张卡与视口宽度无关。
+   * 范式轮询等条目数稳定）。「Top Recommended」区块恒 9 张卡（容器是 overflow-x-auto
+   * 横滚行，条目数与视口宽度无关）；板块内容每次请求都轮换，复跑有新增属站点行为。
+   *
+   * **itemId 与 url 都取 sitemap 的规范 slug，不是首页 href 尾段那个数字**（v1.6.10 修）：
+   * 站点两套 id 并行，href 那套打不开详情页。取数细节见 readShorticalCanonicalSlugs 与
+   * getShorticalItems 的注释；存量由后台 migrateShorticalCanonicalIds 一次性改写。
    *
    * genres 两段式（2026-09-17 用户定「DOM 为主，token 可用时补」）：卡片上只印**第一个**
    * 分类，官方接口 /api/v1/series/top-recommendations 给全量 2~4 个但匿名调用 401——
@@ -522,7 +527,8 @@
       return await getShorticalItems();
     },
     extractId(item) {
-      // 详情页 URL 尾段的数字是站点全站规范 id，加 sc 前缀与全局去重键约定一致
+      // item.id 是 sitemap 规范 slug 的尾段数字（**不是**首页 href 的尾段数字，那套号
+      // 会漂移、同一部剧被反复当新卡入库）；加 sc 前缀与全局去重键约定一致
       const id = item && item.id ? String(item.id) : '';
       return /^\d+$/.test(id) ? `sc${id}` : null;
     },
@@ -2173,12 +2179,58 @@
     };
   }
 
+  const SHORTICAL_ORIGIN = 'https://shortical.com';
+
+  /**
+   * Shortical 规范 slug 表：`slug 基名 → 规范 slug`（基名＝去掉尾部 `-<数字>`）。
+   *
+   * **首页卡片 href 尾段的数字不是规范 series id**（2026-09-18 线上实证）：站点两套 id
+   * 并行——首页由实时接口驱动、给 2100–2250 区间的新号，而详情页只吃静态发布产物
+   * （SPA 取 `/_seo/drama/<id>.json`，拿不到就渲染 404）。实测 9 张卡里 5 张的 href
+   * 打不开，`/drama/bound-by-fire-2200` 是 404 而 `-163` 才是真页面。
+   *
+   * `sitemaps/series.xml` 与 `_seo` 是同一次静态发布的产物、集合严格一致，所以它就是
+   * 「能打开的那套 id」的权威源：公开免鉴权、一次请求约 34KB、142 条**基名零碰撞**。
+   * 失败返回 null，调用方本轮放弃——**绝不退回 href 那个号**，那正是本缺陷本身。
+   */
+  async function readShorticalCanonicalSlugs() {
+    try {
+      const response = await fetch('/sitemaps/series.xml', { headers: { 'Accept': 'application/xml' } });
+      if (!response.ok) {
+        console.log(`[ShortScraping] Shortical sitemap HTTP ${response.status}`);
+        return null;
+      }
+      const xml = await response.text();
+      const map = new Map();
+      for (const match of xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)) {
+        const slug = (match[1].match(/\/drama\/([^/?#]+)/) || [])[1] || '';
+        if (!/-\d+$/.test(slug)) continue;
+        const base = slug.replace(/-\d+$/, '');
+        if (!map.has(base)) map.set(base, slug);   // 先到先得（实测零碰撞）
+      }
+      // 站点对未命中路径一律回 200＋9KB 空壳，所以「拿到响应」不等于「拿到 sitemap」
+      if (!map.size) {
+        console.log('[ShortScraping] Shortical sitemap 里没有 /drama/ 条目（疑似空壳响应）');
+        return null;
+      }
+      return map;
+    } catch (e) {
+      console.log('[ShortScraping] Shortical sitemap 读取失败:', e.message);
+      return null;
+    }
+  }
+
   /**
    * Shortical「Top Recommended」区块条目（读 hydrate 后的 DOM）。
    * 区块按 ?list= 归一化后的标题定位（缺省 top_recommended），从 h2 向上找到第一个
-   * 含 /drama/ 链接的祖先即区块本身。每卡：/drama/<slug>-<id> 给 id 与标题，img 给封面，
+   * 含 /drama/ 链接的祖先即区块本身。每卡：img 给封面，链接文本给标题，
    * **简介取卡内最长的 <p>**——另一个 <p> 是「19.5K」这类观看量，按顺序取第一个会踩雷。
-   * 取完 DOM 再尽力用官方接口补全量 categories（见 backfillShorticalGenres）。
+   *
+   * **id 三个键必须分开**（2026-09-18）：`apiId`＝href 尾段那个号，只用来匹配官方接口
+   * 返回的 `series.id`（接口与首页同源、用的就是这套号）；`slug`/`id`＝sitemap 给的规范值，
+   * itemId 与 url 都取它。混用会出两种事故：用 href 号做 url ＝ 点封面落到 404；
+   * 用规范号匹配接口 ＝ genres 补全全线失配、静默退化成卡片上那一个标签。
+   * 规范 slug 查不到的卡跳过、下轮重试（同 FlickReels「造不出 slug 就跳过该条」）。
    */
   async function getShorticalItems() {
     const list = new URLSearchParams(window.location.search).get('list') || '';
@@ -2190,12 +2242,27 @@
       return [];
     }
 
+    const canonical = await readShorticalCanonicalSlugs();
+    if (!canonical) {
+      console.log('[ShortScraping] Shortical 规范 slug 表取不到，本轮跳过（下轮重试）');
+      return [];
+    }
+
     const items = [];
     const seen = new Set();
     for (const link of section.querySelectorAll('a[href*="/drama/"]')) {
       const href = link.getAttribute('href') || '';
-      const id = (href.match(/-(\d+)\/?$/) || [])[1];
-      if (!id || seen.has(id)) continue;          // 同一卡的封面与标题可能各是一个链接
+      const hrefSlug = (href.match(/\/drama\/([^/?#]+)/) || [])[1] || '';
+      const apiId = (hrefSlug.match(/-(\d+)$/) || [])[1];
+      if (!apiId) continue;
+      const slug = canonical.get(hrefSlug.replace(/-\d+$/, ''));
+      if (!slug) {
+        console.log(`[ShortScraping] Shortical sitemap 无此剧、跳过该卡（下轮重试）: ${hrefSlug}`);
+        continue;
+      }
+      const id = (slug.match(/-(\d+)$/) || [])[1];
+      // 按规范 id 去重：同一卡的封面与标题各是一个链接，两个不同 href 号也可能是同一部剧
+      if (seen.has(id)) continue;
       seen.add(id);
 
       // 从链接向上找到既含图又含简介的卡片根
@@ -2213,11 +2280,12 @@
 
       items.push({
         id,
+        apiId,   // 只用于匹配接口返回的 series.id，别拿它拼 url
+        slug,
         title: (link.textContent || '').trim() || (img ? img.getAttribute('alt') || '' : ''),
         poster: img ? (img.getAttribute('src') || '') : '',
         description,
-        categories: cleanGenres([category]),
-        href
+        categories: cleanGenres([category])
       });
     }
 
@@ -2280,7 +2348,9 @@
       }
       let filled = 0;
       for (const item of items) {
-        const full = byId.get(item.id);
+        // 按 apiId 查（＝首页 href 尾段那个号）：接口与首页同源、用的就是这套号。
+        // 换成规范 id 会全线失配，表现是「genres 静默退化成卡片上那一个标签」
+        const full = byId.get(item.apiId);
         if (full && full.length) {
           item.categories = full;
           filled++;
@@ -2346,8 +2416,9 @@
       source: 'shortical',
       sourceListUrl: window.location.href,
       status: 'new',
-      // 订阅与入库都用裸域（www.shortical.com 会 301 到裸域）
-      url: item.href ? new URL(item.href, 'https://shortical.com').href : '',
+      // 规范 slug 来自 sitemap，不是首页 href（那个号一大半是 404）；裸域形态，
+      // 订阅与入库同口径（www.shortical.com 会 301 到裸域）
+      url: item.slug ? `${SHORTICAL_ORIGIN}/drama/${item.slug}` : '',
       scrapedAt: new Date().toISOString(),
       translatedAt: null
     };
