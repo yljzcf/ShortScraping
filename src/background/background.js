@@ -12,9 +12,6 @@ importScripts('../shared/translate-config.js');
 importScripts('../shared/translator.js');
 importScripts('../shared/lark.js');
 
-// 翻译接口默认配置。实际配置来自 config/trans.json。
-const DEFAULT_TRANSLATE_CONFIG = TranslateConfig.DEFAULT_CONFIG;
-
 // 运行状态。抓取走串行队列：手动单站刷新与定时全量并发触发时排队执行，
 // 避免双开同一 URL 的标签页；activeScrapeCount 覆盖「排队+运行中」的整个
 // 区间，抓取后翻译线据此判断抓取是否仍在进行（此前用布尔，两次抓取并行时
@@ -40,6 +37,28 @@ let translateManualWaiter = false;
 let translateRunStateMirror = null;
 
 const CSV_SYNC_ENDPOINT = 'http://127.0.0.1:31919/sync';
+// 空时间线跳过推送的告警每个 SW 生命周期只打一次：空库状态下每次 dramas 变化都会走到护栏
+let emptySyncSkipWarned = false;
+// scheduleCsvSync 的调用序号：一次推送结束时序号没变＝推送期间没有新的同步被安排，
+// 这时才可摘 allowEmptySync（见 syncTimelineToCsv 末尾）
+let csvSyncScheduleSeq = 0;
+
+// 四个配置文件 ↔ storage 键 ↔ 同步服务写回端点 POST /config/<key>。请求体 { <storage 键>: 值 }
+// 与设置页 trySync*Config 同形；configAheadOfFile（设置页写了 storage 但写回文件失败的标记）
+// 的键名即这里的 key。
+const CONFIG_FILES = {
+  tag: { file: 'config/tag.json', storageKey: 'urlTags' },
+  cron: { file: 'config/cron.json', storageKey: 'scheduleConfig' },
+  trans: { file: 'config/trans.json', storageKey: 'translateConfig' },
+  lark: { file: 'config/lark.json', storageKey: 'larkConfig' }
+};
+const CONFIG_SYNC_BASE_URL = 'http://127.0.0.1:31919/config/';
+// 写回挂在 SW 唤醒路径上，服务没开时不能拖住后续迁移与闹钟安装
+const CONFIG_WRITE_BACK_TIMEOUT_MS = 3000;
+
+// 订阅外清理的回收站（storage.pruneTrash）只留最近几批：一批可能是整库，攒多了占空间
+const PRUNE_TRASH_MAX_BATCHES = 3;
+
 // 本文件的 setTimeout 延时（本常量与 CSV 500ms 防抖）均远小于 MV3 SW 的
 // ~30s 空闲回收阈值；极端情况下 SW 连同定时器被杀时，SW 下次唤醒的顶层
 // scheduleCsvSync 与 translate-task alarm 会兜底。评估后不迁移 chrome.alarms
@@ -140,13 +159,15 @@ chrome.runtime.onStartup.addListener(async () => {
   await setupAlarms();
 });
 
-// service worker 被唤醒时也恢复一次配置，确保 JSON 是配置源。
+// service worker 被唤醒时也恢复一次配置，确保 JSON 是配置源（configAheadOfFile 标记的项
+// 例外：本地领先于文件，改为推回文件，见 loadConfigFromJsonFiles）。
 loadConfigFromJsonFiles().then(setupAlarms).catch(error => {
   console.error('[ShortScraping] 从 JSON 恢复配置失败:', error);
 });
 
 // SW 每次启动预热一次共享快照：扩展重载/同步服务重启后局域网共享页
 // 立即有数据，无需等下一次抓取；服务端对相同内容不会广播刷新。
+// 本地时间线为空且无 allowEmptySync 时不推（空库护栏，见 syncTimelineToCsv）。
 scheduleCsvSync();
 
 // SW 重启孤儿清理：storage 里 running:true 但本实例没有在跑的轮，说明上一
@@ -196,36 +217,70 @@ async function cleanupOrphanTranslateRunState() {
  * 从扩展 config 目录的 tag.json / cron.json / trans.json / lark.json 恢复配置。
  */
 async function loadConfigFromJsonFiles() {
-  const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw, larkConfigRaw] = await Promise.all([
-    fetchJsonFile('config/tag.json', null),
-    fetchJsonFile('config/cron.json', ScheduleConfig.DEFAULT_CONFIG),
-    fetchJsonFile('config/trans.json', DEFAULT_TRANSLATE_CONFIG),
-    fetchJsonFile('config/lark.json', Lark.DEFAULT_CONFIG)
+  const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw, larkConfigRaw, stored] = await Promise.all([
+    fetchJsonFile(CONFIG_FILES.tag.file, null),
+    fetchJsonFile(CONFIG_FILES.cron.file, null),
+    fetchJsonFile(CONFIG_FILES.trans.file, null),
+    fetchJsonFile(CONFIG_FILES.lark.file, null),
+    chrome.storage.local.get([...Object.values(CONFIG_FILES).map(c => c.storageKey), 'configAheadOfFile'])
   ]);
 
-  const scheduleConfig = ScheduleConfig.normalizeConfig(scheduleConfigRaw);
-  const translateConfig = TranslateConfig.normalizeConfig(translateConfigRaw);
-  const larkConfig = Lark.normalizeConfig(larkConfigRaw);
+  const ahead = isPlainObject(stored.configAheadOfFile) ? stored.configAheadOfFile : {};
+  const updates = {};    // 本轮要从文件写进 storage 的配置（一次 set 落库）
+  const aheadKeys = [];  // 本地领先于文件、要推回文件的配置
 
-  // tag.json 读取失败（fetch 异常 / JSON 损坏 / 结构不是数组）≠ 用户清空订阅：
-  // 保留 storage 里上一次的订阅并跳过 prune，避免把全部历史误清成空库。
-  // 只有成功读到数组（含合法的空数组）才允许覆盖订阅并清理界外历史。
-  let urlTags;
-  if (Array.isArray(tagConfigRaw)) {
-    urlTags = normalizeUrlTags(tagConfigRaw);
-    await chrome.storage.local.set({
-      urlTags,
-      scheduleConfig,
-      translateConfig,
-      larkConfig
-    });
-    await runGuarded('订阅外历史清理', () => pruneDramasOutsideConfiguredUrls(urlTags));
-  } else {
-    const stored = await chrome.storage.local.get('urlTags');
-    urlTags = Array.isArray(stored.urlTags) ? stored.urlTags : [];
-    console.warn('[ShortScraping] tag.json 读取失败，保留上次订阅配置并跳过历史清理');
-    await chrome.storage.local.set({ scheduleConfig, translateConfig, larkConfig });
+  // 每个配置三选一（null 是「读取/解析失败」的哨兵，四个文件同一口径）：
+  //   ① configAheadOfFile[key]：设置页写了 storage 但写回文件失败，文件是旧的——不许它覆盖
+  //      storage（tag 则不按文件订阅清理历史：服务没开时新增订阅、抓了卡，旧文件回滚后会把
+  //      新订阅下的历史静默删光），改为把 storage 推回文件，成功后摘标记；
+  //   ② 文件读成功 → 文件是配置源，覆盖 storage（既有语义）；
+  //   ③ 读取/解析失败 ≠ 用户改了配置：保留 storage 上次的值，storage 也没有时才用默认值。
+  //      此前 cron/trans/lark 失败即回落默认值并覆盖 storage——trans.json 多个逗号就静默切回
+  //      MyMemory，lark.json 写坏则机器人被关、larkBotState 连同重试队列被清空。
+  const pick = (key, raw, isValid, normalize, seedDefault) => {
+    const { file, storageKey } = CONFIG_FILES[key];
+    const storedValue = stored[storageKey];
+    // 本地值结构也得像样才算「领先」：坏值推回去只会被服务端 400，标记永远摘不掉，
+    // 文件也永远进不来——这种情况按未标记处理，让文件接管
+    if (ahead[key] === true && isValid(storedValue)) {
+      aheadKeys.push(key);
+      console.warn(`[ShortScraping] ${file} 落后于扩展本地配置（上次写回失败），保留本地配置并尝试写回`);
+      return { value: normalize(storedValue), fromFile: false };
+    }
+    if (isValid(raw)) {
+      const value = normalize(raw);
+      updates[storageKey] = value;
+      return { value, fromFile: true };
+    }
+    if (storedValue !== undefined) {
+      console.warn(`[ShortScraping] ${file} 读取或解析失败，保留扩展里上次的配置${key === 'tag' ? '并跳过历史清理' : ''}`);
+      return { value: normalize(storedValue), fromFile: false };
+    }
+    console.warn(`[ShortScraping] ${file} 读取或解析失败，扩展里也没有旧配置，使用默认配置`);
+    const value = normalize(undefined);
+    if (seedDefault) updates[storageKey] = value;
+    return { value, fromFile: false };
+  };
+
+  // tag.json 结构不是数组也算读取失败（≠ 用户清空订阅）；只有成功读到数组（含合法的空数组）
+  // 才允许覆盖订阅并清理界外历史。storage 也没有订阅时不种 []：那会经 onChanged 触发清库
+  const tag = pick('tag', tagConfigRaw, Array.isArray, normalizeUrlTags, false);
+  const urlTags = tag.value;
+  const scheduleConfig = pick('cron', scheduleConfigRaw, isPlainObject, ScheduleConfig.normalizeConfig, true).value;
+  const translateConfig = pick('trans', translateConfigRaw, isPlainObject, TranslateConfig.normalizeConfig, true).value;
+  const larkConfig = pick('lark', larkConfigRaw, isPlainObject, Lark.normalizeConfig, true).value;
+
+  if (Object.keys(updates).length > 0) {
+    await chrome.storage.local.set(updates);
   }
+  if (tag.fromFile) {
+    await runGuarded('订阅外历史清理', () =>
+      pruneDramasOutsideConfiguredUrls(urlTags, { reason: 'SW 唤醒回读 config/tag.json' }));
+  }
+  // 写回与下面的迁移并行（服务没开时最多等 3s），函数返回前收口，失败只记日志、标记保留
+  const writeBackRun = aheadKeys.length > 0
+    ? runGuarded('本地领先配置写回文件', () => writeBackAheadConfigs(aheadKeys, stored))
+    : null;
 
   // 水位线同步与一次性迁移各自兜底：任一抛错只记日志、下轮唤醒重试（各自的完成标记未置位）。
   // 它们的失败不能向上冒泡——setupAlarms 挂在本函数之后（顶层 .then 与 onInstalled/onStartup
@@ -243,10 +298,73 @@ async function loadConfigFromJsonFiles() {
   ]) {
     await runGuarded(label, step);
   }
+  await writeBackRun;
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
 
   return { urlTags, scheduleConfig, translateConfig };
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * 把「本地领先于文件」的配置推回同步服务（POST /config/<key>，请求体与设置页 trySync*Config
+ * 同形），逐个成功才摘 configAheadOfFile[key]。摘标记前重读 storage：写回在飞期间设置页可能
+ * 又存了新值，本地值已变的键不摘、反而重新置位——设置页的退订是「先写文件、同次 set 清标记」，
+ * 这边迟到的旧值 POST 可能正好把它刚写好的 tag.json 盖回旧订阅；标记若随之消失，下次唤醒
+ * 旧文件就会复活已退订的订阅。置位后下次唤醒按 storage 的现值再推一次，文件终会追平。
+ */
+async function writeBackAheadConfigs(keys, stored) {
+  const done = [];
+  await Promise.all(keys.map(async key => {
+    const { file, storageKey } = CONFIG_FILES[key];
+    try {
+      await postConfigToSyncServer(key, { [storageKey]: stored[storageKey] });
+      done.push(key);
+      console.log(`[ShortScraping] 已把扩展本地配置写回 ${file}`);
+    } catch (e) {
+      console.warn(`[ShortScraping] 写回 ${file} 仍失败（保留本地领先标记，下次唤醒重试）:`, e?.message || e);
+    }
+  }));
+  if (done.length === 0) return;
+
+  const latest = await chrome.storage.local.get(['configAheadOfFile', ...done.map(key => CONFIG_FILES[key].storageKey)]);
+  const next = { ...(isPlainObject(latest.configAheadOfFile) ? latest.configAheadOfFile : {}) };
+  let changed = false;
+  for (const key of done) {
+    const { storageKey } = CONFIG_FILES[key];
+    if (JSON.stringify(latest[storageKey]) !== JSON.stringify(stored[storageKey])) {
+      if (next[key] !== true) { next[key] = true; changed = true; }
+      continue;
+    }
+    if (!(key in next)) continue;
+    delete next[key];
+    changed = true;
+  }
+  if (changed) await chrome.storage.local.set({ configAheadOfFile: next });
+}
+
+async function postConfigToSyncServer(key, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CONFIG_WRITE_BACK_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${CONFIG_SYNC_BASE_URL}${key}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    if (!result?.ok) throw new Error(result?.error || '同步服务返回失败');
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new Error(`同步服务 ${CONFIG_WRITE_BACK_TIMEOUT_MS / 1000}s 内无响应`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** 旁路步骤的统一兜底：失败只 warn，不向上冒泡（见 loadConfigFromJsonFiles 内注释）。 */
@@ -264,7 +382,8 @@ async function fetchJsonFile(fileName, fallback) {
     if (!response.ok) throw new Error(`${fileName} HTTP ${response.status}`);
     return await response.json();
   } catch (e) {
-    console.warn(`[ShortScraping] 读取 ${fileName} 失败，使用默认配置:`, e.message);
+    // 取舍（保留旧值 / 用默认值）由调用方按 fallback 哨兵决定，这里只记原因
+    console.warn(`[ShortScraping] 读取 ${fileName} 失败:`, e.message);
     return fallback;
   }
 }
@@ -411,7 +530,7 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
   if (namespace !== 'local') return;
 
   if (changes.urlTags) {
-    pruneDramasOutsideConfiguredUrls(changes.urlTags.newValue || []).catch(error => {
+    pruneDramasOutsideConfiguredUrls(changes.urlTags.newValue || [], { reason: '订阅变更（storage.urlTags）' }).catch(error => {
       console.warn('[ShortScraping] 清理非订阅来源历史记录失败:', error.message);
     });
   }
@@ -506,7 +625,7 @@ async function performScrapeOnce({ site = null } = {}) {
     // 指纹闸门约束，不会再兜这一手。重读 urlTags 而非用开轮时的快照，退订正是发生在
     // 这段时间里。失败只记日志，不影响本轮抓取结果。
     const { urlTags: latestUrlTags = [] } = await chrome.storage.local.get('urlTags');
-    await pruneDramasOutsideConfiguredUrls(latestUrlTags, { force: true }).catch(e =>
+    await pruneDramasOutsideConfiguredUrls(latestUrlTags, { force: true, reason: '抓取结束强制清理' }).catch(e =>
       console.warn('[ShortScraping] 抓取后订阅外清理失败:', e?.message || e));
 
     if (totalNewCount > 0) {
@@ -565,8 +684,9 @@ function configuredUrlFingerprint(urlTags) {
  * onChanged + 显式调用」的双清理）。force 供抓取结束时调用——退订时抓取仍在飞、迟到的
  * saveDrama 会把界外卡写回，而那一刻队列缓存必热，强制过一遍零 storage 读。
  * 指纹只在本轮清理完成后落库；写入失败向上抛、指纹不更新，下轮照常重试。
+ * 被删条目与删除同次写进 storage.pruneTrash（回收站），见 nextPruneTrash。
  */
-function pruneDramasOutsideConfiguredUrls(urlTags, { force = false } = {}) {
+function pruneDramasOutsideConfiguredUrls(urlTags, { force = false, reason = '订阅外清理' } = {}) {
   return enqueueDramaWrite('清理非订阅来源', async () => {
     const fingerprint = configuredUrlFingerprint(urlTags);
     const { pruneFingerprint } = await chrome.storage.local.get('pruneFingerprint');
@@ -576,12 +696,31 @@ function pruneDramasOutsideConfiguredUrls(urlTags, { force = false } = {}) {
     const filtered = filterDramasByConfiguredUrls(dramas, urlTags);
 
     if (filtered.length !== dramas.length) {
-      await writeDramasInQueue(filtered, { pruneFingerprint: fingerprint });
+      const keptSet = new Set(filtered);
+      const pruneTrash = await nextPruneTrash(reason, dramas.filter(drama => !keptSet.has(drama)));
+      // 回收站与删除同一次 set：要么都落库、要么都不落。分两次写时删除那次失败会留下一批
+      // 「没删成却进了回收站」的条目，下轮重试再进一次，重复批把回收站里真正删过的旧批挤掉
+      await writeDramasInQueue(filtered, { pruneFingerprint: fingerprint, pruneTrash });
       console.log(`[ShortScraping] 已清理 ${dramas.length - filtered.length} 条非订阅来源历史记录`);
     } else if (pruneFingerprint !== fingerprint) {
       await chrome.storage.local.set({ pruneFingerprint: fingerprint });
     }
   });
+}
+
+/**
+ * 订阅外清理的回收站：本清理有三条入口（SW 唤醒回读 tag.json / urlTags 的 onChanged /
+ * 抓取结束的强制清理），只有设置页退订那一条路径有确认框和导出备份。手改 tag.json 的笔误、
+ * 服务没开时新增订阅被旧文件回滚，都会走到这里静默删掉整条订阅的历史（与 2026-09-17 事故
+ * 同类）。所以把整批条目追加进 storage.pruneTrash（最新在尾、最多 PRUNE_TRASH_MAX_BATCHES
+ * 批），设置页「数据存档」可导出成导入恢复认的 JSON。返回追加后的新数组，由调用方与删除
+ * 同一次 set 落库：写失败即整次失败、本轮不删——宁可不清理，也不在没有留底的情况下删历史。
+ */
+async function nextPruneTrash(reason, removed) {
+  const { pruneTrash } = await chrome.storage.local.get('pruneTrash');
+  const urls = [...new Set(removed.map(drama => drama && drama.sourceListUrl).filter(Boolean).map(String))];
+  const entry = { at: new Date().toISOString(), reason, urls, dramas: removed };
+  return [...(Array.isArray(pruneTrash) ? pruneTrash : []), entry].slice(-PRUNE_TRASH_MAX_BATCHES);
 }
 
 /**
@@ -1419,6 +1558,8 @@ function saveDramaRecord(drama) {
 
 /**
  * 清空 dramas 表（仅安装初始化使用；弹窗「清除数据」入口已移除）。
+ * 刻意不写 allowEmptySync：重装 / 新 profile 时同步服务上那份时间线正是要保护的对象，
+ * 空库推送护栏见 syncTimelineToCsv。
  */
 function clearAllDramas() {
   return enqueueDramaWrite('清空数据', () => writeDramasInQueue([], {
@@ -1557,7 +1698,11 @@ function pruneDramaRecords({ sites, beforeIso, dryRun = false, previewToken } = 
     const currentToken = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
     if (!dryRun && previewToken !== currentToken) throw new Error('清理范围已变化或尚未预览，请重新预览后确认');
     if (!dryRun && matched > 0) {
-      await writeDramasInQueue(kept); // 删除经 onChanged 自动触发 CSV 同步
+      // 用户在设置页预览并确认过的清理若清空了要推送的时间线，与删除同次 set 写入
+      // allowEmptySync，随后的 CSV 同步才会带 allowEmpty 把空时间线推给服务端（见 syncTimelineToCsv）
+      const { urlTags = [] } = await chrome.storage.local.get('urlTags');
+      const emptiesTimeline = filterDramasByConfiguredUrls(kept, urlTags).length === 0;
+      await writeDramasInQueue(kept, emptiesTimeline ? { allowEmptySync: true } : {}); // 删除经 onChanged 自动触发 CSV 同步
     }
 
     return dryRun
@@ -1644,6 +1789,7 @@ async function loadTranslator() {
  * 因此需要运行 `node server/sync-server.js` 负责写入 db/timeline.csv。
  */
 function scheduleCsvSync() {
+  csvSyncScheduleSeq++;
   if (csvSyncTimer) clearTimeout(csvSyncTimer);
   csvSyncTimer = setTimeout(() => {
     csvSyncTimer = null;
@@ -1654,9 +1800,24 @@ function scheduleCsvSync() {
 }
 
 async function syncTimelineToCsv() {
-  const { urlTags = [] } = await chrome.storage.local.get('urlTags');
+  const scheduleSeq = csvSyncScheduleSeq;
+  const { urlTags = [], allowEmptySync } = await chrome.storage.local.get(['urlTags', 'allowEmptySync']);
   const dramas = await getDramasSnapshot();
   const configuredDramas = filterDramasByConfiguredUrls(dramas, urlTags);
+  const isEmpty = configuredDramas.length === 0;
+
+  // 空库护栏：新 profile / 重装扩展后 storage 为空，SW 启动的顶层预热推送会把 [] 推给同步
+  // 服务，连同局域网共享页一起清空 db/timeline.*——用户想从 db/timeline.json 导入恢复时文件
+  // 已经空了。空时间线只在用户于扩展页确认过会清空库的操作（退订、按条件清理）留下
+  // allowEmptySync 标记时才推，并带 allowEmpty 让服务端放行（服务端对未声明的空推送回 409）。
+  // 跳过时不记签名：标记随后落库并再次触发同步时必须照常推送。
+  if (isEmpty && allowEmptySync !== true) {
+    if (!emptySyncSkipWarned) {
+      emptySyncSkipWarned = true;
+      console.warn('[ShortScraping] CSV 同步跳过：本地时间线为空且没有「用户主动清空」标记，不覆盖同步服务上的数据');
+    }
+    return;
+  }
 
   const serialized = JSON.stringify(configuredDramas);
   if (serialized === lastCsvSyncSerialized) {
@@ -1668,8 +1829,17 @@ async function syncTimelineToCsv() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     // 字符串拼接复用 serialized，免对约 1.5MB 的数组做第二次 stringify
-    body: `{"dramas":${serialized},"syncedAt":${JSON.stringify(new Date().toISOString())}}`
+    body: `{"dramas":${serialized}${isEmpty ? ',"allowEmpty":true' : ''},"syncedAt":${JSON.stringify(new Date().toISOString())}}`
   });
+
+  if (response.status === 409) {
+    // 服务端拒绝覆盖（如 EMPTY_REJECTED）且什么都没写：同内容重推只会再被拒，记下签名
+    // 不再重试这份内容；内容一变（或弹窗补喂清签名）照常推送
+    lastCsvSyncSerialized = serialized;
+    const result = await response.json().catch(() => null);
+    console.warn(`[ShortScraping] CSV 同步被同步服务拒绝（${result?.code || 'HTTP 409'}）：${result?.error || ''}`);
+    return;
+  }
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
@@ -1679,6 +1849,14 @@ async function syncTimelineToCsv() {
   lastCsvSyncSerialized = serialized;
   const result = await response.json();
   console.log(`[ShortScraping] CSV 同步完成：${result.count} 条 -> ${result.csvPath}`);
+
+  // 非空推送成功＝库回到有内容的常态，一次性的清空授权作废，免得日后某条非用户操作的路径
+  // （如 tag.json 回读清库）借着残留标记把空时间线推上去。推送在飞期间 dramas 又变了
+  // （防抖同步待发，或已发出、与本次并行在飞）时不删，交给那一次判定：它可能正是用户这次
+  // 确认的清空——并行的那次若失败，残留标记还要留给下次唤醒的重推
+  if (!isEmpty && allowEmptySync !== undefined && !csvSyncTimer && scheduleSeq === csvSyncScheduleSeq) {
+    await chrome.storage.local.remove('allowEmptySync');
+  }
 }
 
 /* —— Lark 群机器人：有新内容即时推一张卡到群（v1.5.14） ——————————————
@@ -2160,7 +2338,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'importDramas') {
-    importDramaRecords(request.dramas).then((result) => {
+    // 经 Promise.resolve().then 调用：importDramaRecords 的逐条校验是同步执行的，任一条抛错
+    // （如日历非法的时间戳）会在 return true 之前冒出监听器，sendResponse 永远不回、设置页
+    // 卡在「后台无响应」。包一层后同步异常也转成 reject，走下面的 catch 回 success:false
+    Promise.resolve().then(() => importDramaRecords(request.dramas)).then((result) => {
       sendResponse({ success: true, ...result });
     }).catch((error) => {
       sendResponse({ success: false, error: error.message });
@@ -2169,7 +2350,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'pruneDramas') {
-    pruneDramaRecords(request).then((result) => {
+    // 同 importDramas：参数校验里的同步异常也必须回 sendResponse
+    Promise.resolve().then(() => pruneDramaRecords(request)).then((result) => {
       sendResponse({ success: true, ...result });
     }).catch((error) => {
       sendResponse({ success: false, error: error.message });

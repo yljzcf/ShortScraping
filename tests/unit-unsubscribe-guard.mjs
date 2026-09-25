@@ -9,6 +9,12 @@ import './bootstrap.cjs';
 //
 // 本套件钉死三件事：① 有删除必先确认；② 备份下载严格早于任何 storage 写；
 // ③ 有删除一律文件优先（tag.json 写失败就整体放弃，绝不先动 storage）。
+// 2026-09-25 审计补三件：
+// A1 退订确认后的那次 storage 写同时带 allowEmptySync:true（后台默认拒推空时间线）；
+// A2 纯新增/改标签（storage 优先）同一次写乐观置 configAheadOfFile.tag，写回成功再清，
+//    失败则保留——后台见标记不再拿旧 tag.json 回滚订阅、连带删新订阅下的历史；
+// A3 差集基准是 storage 里此刻的订阅而不是页面快照 state.urlTags；别处改了订阅，
+//    列表跟着刷新，本页有未保存勾选时明确提示。
 // 用法：node tests/unit-unsubscribe-guard.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,6 +24,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SubscriptionConfig = require(path.join(root, 'src/shared/subscription-config.js'));
+const UrlMatch = require(path.join(root, 'src/shared/url-match.js'));
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
@@ -36,6 +43,14 @@ function grab(head) {
 const fnSrc = grab('async function saveSubscriptions');
 const confirmTextSrc = grab('function buildUnsubscribeConfirmText');
 const exportDoomedSrc = grab('function exportDoomedDramas');
+const downloadBackupSrc = grab('function downloadBackupFile');
+const configAheadPatchSrc = grab('async function configAheadPatch');
+const clearConfigAheadSrc = grab('async function clearConfigAhead');
+const externalChangeSrc = grab('function handleExternalUrlTagsChange');
+const urlKeySrc = grab('function subscriptionUrlKey');
+const aheadKeyMatch = src.match(/const CONFIG_AHEAD_KEY = '([^']+)';/);
+// eslint-disable-next-line no-unused-vars
+const CONFIG_AHEAD_KEY = aheadKeyMatch?.[1];
 
 // ---------- 桩：被 saveSubscriptions 引用的全部外部名字 ----------
 const SUB_A = 'https://a.test/list';
@@ -50,9 +65,11 @@ let storageWrites;
 let statusMessages;
 let syncTagResult;
 let syncTagCalls;
-let storedDramas;
+let store;        // chrome.storage.local 的全部内容（get 按键取、set 合并）
 
-function reset({ urlTags, dramas, confirm: reply = true, sync = { ok: true } }) {
+// urlTags＝页面快照 state.urlTags；stored＝storage 里此刻的订阅（缺省与快照一致，
+// 不同即模拟「别的标签页/后台已改过订阅」的过期页面）；ahead＝预置的领先标记
+function reset({ urlTags, stored = urlTags, dramas, confirm: reply = true, sync = { ok: true }, ahead }) {
   trace = [];
   state = { urlTags: SubscriptionConfig.normalizeUrlTags(urlTags) };
   confirmReply = reply;
@@ -62,8 +79,10 @@ function reset({ urlTags, dramas, confirm: reply = true, sync = { ok: true } }) 
   statusMessages = [];
   syncTagResult = sync;
   syncTagCalls = [];
-  storedDramas = dramas;
+  store = { urlTags: SubscriptionConfig.normalizeUrlTags(stored), dramas: structuredClone(dramas) };
+  if (ahead) store[CONFIG_AHEAD_KEY] = structuredClone(ahead);
 }
+const urlTagWrites = () => storageWrites.filter(write => 'urlTags' in write);
 
 // eslint-disable-next-line no-unused-vars
 const normalizeUrlTags = rawTags => SubscriptionConfig.normalizeUrlTags(rawTags);
@@ -92,6 +111,7 @@ const triggerDownload = (filename, blob) => {
 const formatStamp = () => '20260917-1200';
 
 globalThis.SubscriptionConfig = SubscriptionConfig;
+globalThis.UrlMatch = UrlMatch;
 globalThis.window = {
   confirm(text) { trace.push('confirm'); confirmTexts.push(text); return confirmReply; }
 };
@@ -103,14 +123,14 @@ globalThis.chrome = {
   storage: {
     local: {
       async get(keys) {
-        trace.push(`get:${Array.isArray(keys) ? keys.join(',') : keys}`);
-        return (keys === 'dramas' || (Array.isArray(keys) && keys.includes('dramas')))
-          ? { dramas: structuredClone(storedDramas) }
-          : {};
+        const list = Array.isArray(keys) ? keys : [keys];
+        trace.push(`get:${list.join(',')}`);
+        return Object.fromEntries(list.filter(key => key in store).map(key => [key, structuredClone(store[key])]));
       },
       async set(obj) {
         trace.push('set');
         storageWrites.push(structuredClone(obj));
+        Object.assign(store, structuredClone(obj));
       }
     }
   }
@@ -120,6 +140,15 @@ globalThis.chrome = {
 const buildUnsubscribeConfirmText = eval(`(${confirmTextSrc})`);
 // eslint-disable-next-line no-unused-vars
 const exportDoomedDramas = eval(`(${exportDoomedSrc})`);
+// eslint-disable-next-line no-unused-vars
+const downloadBackupFile = eval(`(${downloadBackupSrc})`);
+// eslint-disable-next-line no-unused-vars
+const configAheadPatch = eval(`(${configAheadPatchSrc})`);
+// eslint-disable-next-line no-unused-vars
+const clearConfigAhead = eval(`(${clearConfigAheadSrc})`);
+// eslint-disable-next-line no-unused-vars
+const subscriptionUrlKey = eval(`(${urlKeySrc})`);
+const handleExternalUrlTagsChange = eval(`(${externalChangeSrc})`);
 const saveSubscriptions = eval(`(${fnSrc.replace('async function saveSubscriptions', 'async function')})`);
 
 const dramasFixture = [
@@ -137,7 +166,7 @@ reset({ urlTags: onlyA, dramas: dramasFixture });
 domSubscriptions = bothSubs;              // 新增 B，纯新增
 await saveSubscriptions();
 check('G1a 纯新增不弹确认、不下载', !trace.includes('confirm') && downloads.length === 0, trace.join('>'));
-check('G1b 纯新增仍写 storage 并回写 tag.json', storageWrites.length === 1 && syncTagCalls.length === 1, trace.join('>'));
+check('G1b 纯新增仍写 storage 并回写 tag.json', urlTagWrites().length === 1 && syncTagCalls.length === 1, trace.join('>'));
 check('G1c 纯新增沿用 storage 优先（set 早于 syncTag）',
   trace.indexOf('set') < trace.indexOf('syncTag'), trace.join('>'));
 
@@ -211,7 +240,135 @@ reset({ urlTags: bothSubs, dramas: dramasFixture });
 domSubscriptions = [{ urlPattern: SUB_A, tags: ['改了'] }, { urlPattern: SUB_B, tags: ['B'] }];
 await saveSubscriptions();
 check('G7 改标签不触发确认与备份',
-  confirmTexts.length === 0 && downloads.length === 0 && storageWrites.length === 1, trace.join('>'));
+  confirmTexts.length === 0 && downloads.length === 0 && urlTagWrites().length === 1, trace.join('>'));
+check('G7b 改标签不放行空时间线推送', storageWrites.every(write => !('allowEmptySync' in write)), JSON.stringify(storageWrites));
+
+// ---------- A3：过期页面——差集基准必须是 storage 里此刻的订阅 ----------
+const SUB_C = 'https://c.test/list';
+// 页面快照只有 A；别的标签页已加了 B 并抓进 3 条历史。用户在本页（B 未勾）为了加 C 点保存：
+// 拿快照算差集 removed=[]，会不确认不备份直接写 {A,C}，后台随即删光 B 的历史
+reset({ urlTags: onlyA, stored: bothSubs, dramas: dramasFixture });
+domSubscriptions = [{ urlPattern: SUB_A, tags: ['A'] }, { urlPattern: SUB_C, tags: ['C'] }];
+await saveSubscriptions();
+check('G8a 过期页面保存：以 storage 为基准识别出退订 B 并弹确认',
+  confirmTexts.length === 1 && confirmTexts[0].includes(SUB_B) && confirmTexts[0].includes('3 条'), trace.join('>'));
+check('G8b 过期页面保存：B 下 3 条历史先备份',
+  deepEq(JSON.parse(downloads[0]?.blob?.text || '{}').dramas?.map(d => d.id), ['b1', 'b2', 'b3']), trace.join('>'));
+check('G8c 基准读取早于确认', trace.indexOf('get:urlTags') >= 0 && trace.indexOf('get:urlTags') < trace.indexOf('confirm'),
+  trace.join('>'));
+check('G8d 按退订走文件优先', trace.indexOf('syncTag') < trace.indexOf('set'), trace.join('>'));
+
+reset({ urlTags: onlyA, stored: bothSubs, dramas: dramasFixture, confirm: false });
+domSubscriptions = [{ urlPattern: SUB_A, tags: ['A'] }, { urlPattern: SUB_C, tags: ['C'] }];
+await saveSubscriptions();
+check('G8e 过期页面保存：用户取消即零写入', storageWrites.length === 0 && syncTagCalls.length === 0, trace.join('>'));
+
+// 反向：快照多、storage 少（别处已退订 B、其历史已删）。基准＝storage ∪ 快照，只会多确认不会
+// 少确认：眼前这页 B 未勾，照样按退订走确认 + 文件优先，只是提示零历史、不产生空备份
+reset({ urlTags: bothSubs, stored: onlyA, dramas: dramasFixture.filter(d => d.sourceListUrl === SUB_A) });
+domSubscriptions = [{ urlPattern: SUB_A, tags: ['A'] }, { urlPattern: SUB_C, tags: ['C'] }];
+await saveSubscriptions();
+check('G8f 快照里有、storage 已无的订阅被勾掉：仍确认（零历史不备份）且文件优先',
+  confirmTexts.length === 1 && confirmTexts[0].includes('暂无历史') && downloads.length === 0
+    && trace.indexOf('syncTag') < trace.indexOf('set'), trace.join('>'));
+
+// storage 缺席（页面按 tag.json 兜底渲染）时快照仍兜住退订
+reset({ urlTags: bothSubs, stored: [], dramas: dramasFixture });
+domSubscriptions = onlyA;
+await saveSubscriptions();
+check('G8g storage 无订阅时以快照兜底识别退订并备份',
+  confirmTexts.length === 1 && deepEq(JSON.parse(downloads[0]?.blob?.text || '{}').dramas?.map(d => d.id), ['b1', 'b2', 'b3']),
+  trace.join('>'));
+
+// ---------- A1：退订确认后的那次写放行空时间线推送 ----------
+reset({ urlTags: bothSubs, dramas: dramasFixture });
+domSubscriptions = onlyA;
+await saveSubscriptions();
+check('G9a 部分退订：urlTags 与 allowEmptySync:true 在同一次 set 里',
+  urlTagWrites().length === 1 && urlTagWrites()[0].allowEmptySync === true, JSON.stringify(storageWrites));
+
+reset({ urlTags: bothSubs, dramas: dramasFixture });
+domSubscriptions = [];
+await saveSubscriptions();
+check('G9b 全退订：同一次 set 带 allowEmptySync:true 且订阅清空',
+  urlTagWrites().length === 1 && urlTagWrites()[0].allowEmptySync === true && deepEq(urlTagWrites()[0].urlTags, []),
+  JSON.stringify(storageWrites));
+
+reset({ urlTags: onlyA, dramas: dramasFixture });
+domSubscriptions = bothSubs;
+await saveSubscriptions();
+check('G9c 纯新增不放行空时间线推送', storageWrites.every(write => !('allowEmptySync' in write)), JSON.stringify(storageWrites));
+
+reset({ urlTags: bothSubs, dramas: dramasFixture, sync: { ok: false, error: '服务未启动' } });
+domSubscriptions = [];
+await saveSubscriptions();
+check('G9d 退订写文件失败：不写 allowEmptySync', !('allowEmptySync' in store), JSON.stringify(store));
+
+// ---------- A2：storage 优先的保存带领先标记，写回成功才清 ----------
+reset({ urlTags: onlyA, dramas: dramasFixture, sync: { ok: false, error: '服务未启动' }, ahead: { trans: true } });
+domSubscriptions = bothSubs;
+await saveSubscriptions();
+check('G10a 纯新增写回失败：标记与 urlTags 在同一次 set 里置位',
+  urlTagWrites().length === 1 && urlTagWrites()[0][CONFIG_AHEAD_KEY]?.tag === true, JSON.stringify(storageWrites));
+check('G10b 纯新增写回失败：tag 标记保留、其它标记不被冲掉',
+  deepEq(store[CONFIG_AHEAD_KEY], { trans: true, tag: true }), JSON.stringify(store[CONFIG_AHEAD_KEY]));
+check('G10c 失败提示改为「本地保留、自动写回」，不再说会回读旧订阅',
+  statusMessages.at(-1)?.ok === false && statusMessages.at(-1).text.includes('自动写回')
+    && !statusMessages.at(-1).text.includes('回读'), statusMessages.at(-1)?.text);
+
+reset({ urlTags: onlyA, dramas: dramasFixture, ahead: { trans: true, tag: true } });
+domSubscriptions = bothSubs;
+await saveSubscriptions();
+check('G10d 纯新增写回成功：先乐观置位（早于 POST），成功后清掉 tag、保留 trans',
+  urlTagWrites()[0]?.[CONFIG_AHEAD_KEY]?.tag === true && trace.indexOf('set') < trace.indexOf('syncTag')
+    && deepEq(store[CONFIG_AHEAD_KEY], { trans: true }), `${trace.join('>')} ${JSON.stringify(store[CONFIG_AHEAD_KEY])}`);
+
+reset({ urlTags: bothSubs, dramas: dramasFixture, ahead: { tag: true, lark: true } });
+domSubscriptions = onlyA;
+await saveSubscriptions();
+check('G10e 退订（文件已先写成）：同一次 set 清掉 tag 标记、保留 lark',
+  urlTagWrites().length === 1 && deepEq(urlTagWrites()[0][CONFIG_AHEAD_KEY], { lark: true }), JSON.stringify(storageWrites));
+
+reset({ urlTags: bothSubs, dramas: dramasFixture, sync: { ok: false, error: '服务未启动' }, ahead: { tag: true } });
+domSubscriptions = onlyA;
+await saveSubscriptions();
+check('G10f 退订写文件失败：标记原样不动', deepEq(store[CONFIG_AHEAD_KEY], { tag: true }) && storageWrites.length === 0,
+  JSON.stringify(store[CONFIG_AHEAD_KEY]));
+check('G10g 退订失败提示点明要先写成配置文件、需启动同步服务',
+  statusMessages.at(-1)?.text.includes('启动同步服务') && statusMessages.at(-1).text.includes('必须先写成配置文件'),
+  statusMessages.at(-1)?.text);
+
+// ---------- A3：别处改了订阅 → 列表刷新；有未保存勾选时提示 ----------
+reset({ urlTags: bothSubs, dramas: [] });
+domSubscriptions = bothSubs;
+handleExternalUrlTagsChange(structuredClone(state.urlTags));
+check('G11a 本页自己写入的回声事件等值短路（不重渲染、不提示）',
+  !trace.includes('render') && statusMessages.length === 0, trace.join('>'));
+
+reset({ urlTags: onlyA, dramas: [] });
+domSubscriptions = onlyA;
+handleExternalUrlTagsChange(bothSubs);
+check('G11b 无未保存改动：state 刷新为 storage 新值并重渲染、不打扰',
+  deepEq(state.urlTags.map(t => t.urlPattern), [SUB_A, SUB_B]) && trace.includes('render') && statusMessages.length === 0,
+  `${trace.join('>')} ${JSON.stringify(statusMessages)}`);
+
+reset({ urlTags: onlyA, dramas: [] });
+domSubscriptions = [{ urlPattern: SUB_A, tags: ['A'] }, { urlPattern: SUB_C, tags: ['C'] }]; // 本页勾了 C 未保存
+handleExternalUrlTagsChange(bothSubs);
+check('G11c 有未保存勾选：刷新并明确提示「已在别处变更」',
+  deepEq(state.urlTags.map(t => t.urlPattern), [SUB_A, SUB_B]) && trace.includes('render')
+    && statusMessages.at(-1)?.ok === false && statusMessages.at(-1).text.includes('别处'),
+  `${trace.join('>')} ${JSON.stringify(statusMessages)}`);
+
+reset({ urlTags: bothSubs, dramas: [] });
+domSubscriptions = bothSubs;
+handleExternalUrlTagsChange(undefined);
+check('G11d 订阅键被移除按空订阅刷新', deepEq(state.urlTags, []) && trace.includes('render'), trace.join('>'));
+
+// 接线：页面必须真的挂了 onChanged，且 urlTags 变更路由到上面的处理函数
+check('G12 init 挂 storage.onChanged，urlTags 变更交给 handleExternalUrlTagsChange',
+  /bindStorageEvents\(\);/.test(grab('function init')) && /chrome\.storage\.onChanged\.addListener/.test(grab('function bindStorageEvents'))
+    && /changes\.urlTags\) handleExternalUrlTagsChange\(changes\.urlTags\.newValue\)/.test(grab('function bindStorageEvents')), '');
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

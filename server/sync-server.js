@@ -236,6 +236,15 @@ function writeTagConfig(rawTags) {
   return tags.length;
 }
 
+// 翻译 / Lark / 定时三个写回接口的请求体形态闸：必须是 { <key>: 普通对象 }，缺键、null、数组、
+// 键名写错一律返回 null（路由回 400、不落盘）。旧写法 `payload.X || {}` 会把缺键规范化成默认配置
+// 原子覆盖文件：API Key、webhook、App Secret 静默清空，且这三份没有 history 备份，
+// SW 下次唤醒还会把清空后的文件回灌进 storage。设置页 trySync* 始终发完整对象，不受影响
+function pickConfigObject(payload, key) {
+  const value = payload?.[key];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
 function writeTransConfig(rawConfig) {
   const config = TranslateConfig.normalizeConfig(rawConfig);
 
@@ -635,6 +644,16 @@ async function handleRequest(req, res) {
         return sendJson(res, 400, { ok: false, error: '缺少有效的 dramas 数组' });
       }
       const dramas = payload.dramas;
+      // 空库护栏：新 profile / 重装扩展后 storage 为空，SW 启动的预热推送会带着 []
+      // 把 db/timeline.* 与共享页一起清空。「原始就是空数组」只在扩展声明 allowEmpty:true
+      // （用户在扩展页确认过的清空/退订）时才接受；共享快照本就为空时无可覆盖，照常放行。
+      // 只看原始数组：非空推送被 tag.json 过滤成空（订阅已取消）仍走下方的告警 + drop 档留痕。
+      // 409 拒绝不写任何文件（连备份都不留），扩展端据此不重试这份内容
+      if (dramas.length === 0 && payload.allowEmpty !== true && latestDramas.length > 0) {
+        const error = `拒绝用空时间线覆盖现有 ${latestDramas.length} 条（未带 allowEmpty）`;
+        console.warn(`[ShortScraping Sync] ${error}——如确需清空，请在扩展设置页操作`);
+        return sendJson(res, 409, { ok: false, code: 'EMPTY_REJECTED', error });
+      }
       const configured = filterDramasByTagConfig(dramas);
       // 同内容跳过 CSV 重写：扩展 SW 每次唤醒都预热推送，绝大多数与上次内容一致，
       // 无谓的磁盘重写全部拦在这里；existsSync 守卫保住「CSV 被手删后下次推送自愈」的行为
@@ -647,11 +666,12 @@ async function handleRequest(req, res) {
         dropBackups = backupBeforeOverwrite(configured.length, latestDramas.length, latestSerialized);
       }
 
-      // 合法空推送或订阅已取消导致清空时留痕；配置读取失败已在过滤阶段拒绝。
+      // 带 allowEmpty 的空推送或订阅已取消导致清空时留痕；配置读取失败已在过滤阶段拒绝。
       if (configured.length === 0 && latestDramas.length > 0) {
         console.warn(
           `[ShortScraping Sync] 警告：收到空时间线推送（原始 ${dramas.length} 条 / 过滤后 0 条），` +
-          `现有快照 ${latestDramas.length} 条即将被清空——若非主动清空订阅，请检查扩展数据与 config/tag.json` +
+          `现有快照 ${latestDramas.length} 条即将被清空——` +
+          (dramas.length === 0 ? '扩展声明为用户主动清空（allowEmpty）' : '若非主动清空订阅，请检查扩展数据与 config/tag.json') +
           (dropBackups.length > 0 ? `；覆盖前的快照已备份到 ${dropBackups.join('、')}` : '')
         );
       }
@@ -702,7 +722,9 @@ async function handleRequest(req, res) {
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
-      const config = writeTransConfig(payload.translateConfig || {});
+      const rawConfig = pickConfigObject(payload, 'translateConfig');
+      if (!rawConfig) return sendJson(res, 400, { ok: false, error: '缺少有效的 translateConfig 对象，未写入' });
+      const config = writeTransConfig(rawConfig);
       return sendJson(res, 200, { ok: true, config, configPath: TRANS_CONFIG_PATH });
     } catch (error) {
       console.error('[ShortScraping Sync] 写入翻译接口配置失败:', error);
@@ -714,7 +736,9 @@ async function handleRequest(req, res) {
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
-      const config = writeLarkConfig(payload.larkConfig || {});
+      const rawConfig = pickConfigObject(payload, 'larkConfig');
+      if (!rawConfig) return sendJson(res, 400, { ok: false, error: '缺少有效的 larkConfig 对象，未写入' });
+      const config = writeLarkConfig(rawConfig);
       return sendJson(res, 200, { ok: true, config, configPath: LARK_CONFIG_PATH });
     } catch (error) {
       console.error('[ShortScraping Sync] 写入 Lark 推送配置失败:', error);
@@ -726,7 +750,9 @@ async function handleRequest(req, res) {
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
-      const config = writeCronConfig(payload.scheduleConfig || {});
+      const rawConfig = pickConfigObject(payload, 'scheduleConfig');
+      if (!rawConfig) return sendJson(res, 400, { ok: false, error: '缺少有效的 scheduleConfig 对象，未写入' });
+      const config = writeCronConfig(rawConfig);
       return sendJson(res, 200, { ok: true, config, configPath: CRON_CONFIG_PATH });
     } catch (error) {
       console.error('[ShortScraping Sync] 写入定时任务配置失败:', error);

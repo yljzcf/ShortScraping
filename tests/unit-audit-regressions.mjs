@@ -105,6 +105,33 @@ const Config = require('../src/shared/translate-config.js');
   assert.equal(warnings.some(w => w.includes('原文含乱码')), false);
 }
 
+// 导入/清理消息分支：处理函数里的同步异常（如逐条校验遇到日历非法的时间戳抛 RangeError）
+// 也必须回 sendResponse——此前异常在 return true 之前冒出监听器，设置页永远等不到应答。
+{
+  const bg = await background();
+  const send = request => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${request.action} 未回 sendResponse`)), 1000);
+    try {
+      bg.listeners.message(request, {}, resp => { clearTimeout(timer); resolve(resp); });
+    } catch (error) { clearTimeout(timer); reject(error); }
+  });
+  // 共享校验模块是否已把非法日期计入 invalid 不影响这里：直接让校验同步抛错
+  const validate = bg.run('TimelineCsv.validateImportDrama');
+  bg.run('TimelineCsv.validateImportDrama = () => { throw new RangeError("Invalid time value"); }');
+  const resp = await send({ action: 'importDramas', dramas: [card('tt1', { scrapedAt: '2026-13-45T25:59Z' })] });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /Invalid time value/);
+  bg.context.validate = validate;
+  bg.run('TimelineCsv.validateImportDrama = validate');
+  // 真实数据：无论校验模块计 invalid 还是抛错，都必须有应答
+  const real = await send({ action: 'importDramas', dramas: [card('tt2', { scrapedAt: '2026-13-01T00:00Z' }), card('tt3')] });
+  assert.equal(typeof real.success, 'boolean');
+  // pruneDramas 同一包装：参数非法照常经 sendResponse 回 success:false
+  const pruned = await send({ action: 'pruneDramas', sites: ['nope'], dryRun: true });
+  assert.equal(pruned.success, false);
+  assert.match(pruned.error, /未知站点/);
+}
+
 // Preview tokens bind both criteria and membership, including same-count replacements.
 {
   const bg = await background();

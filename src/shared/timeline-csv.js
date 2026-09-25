@@ -73,6 +73,27 @@
 
   const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})$/;
 
+  function daysInMonth(year, month) {
+    if (month === 2) return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0 ? 29 : 28;
+    return [4, 6, 9, 11].includes(month) ? 30 : 31;
+  }
+
+  /**
+   * 形状合法 ≠ 日历合法：Date.parse 对 2026-13-01、23:60 这类值返回 NaN（直接
+   * toISOString 会抛 RangeError，整批导入连同后台的 sendResponse 一起炸掉，几万条合法
+   * 数据一条也进不去）；对 2026-02-30 则静默进位成 03-02，卡片落进错误的日期分组。
+   * 两类都返回 null，由调用方计入 invalid，绝不抛出。
+   */
+  function normalizeImportTimestamp(text) {
+    if (!ISO_TIMESTAMP.test(text)) return null;
+    const ms = Date.parse(text);
+    if (Number.isNaN(ms)) return null;
+    // 月份 00/13、日期 00 已被 Date.parse 判 NaN；只剩「日期超出当月天数」会被进位
+    const [year, month, day] = text.slice(0, 10).split('-').map(Number);
+    if (day > daysInMonth(year, month)) return null;
+    return new Date(ms).toISOString();
+  }
+
   function isHttpUrl(value) {
     try {
       return ['http:', 'https:'].includes(new URL(value).protocol);
@@ -106,8 +127,9 @@
     // 机器上导入出不同时刻，卡片落到错误的日期分组
     for (const key of ['scrapedAt', 'translatedAt']) {
       if (result[key]) {
-        if (!ISO_TIMESTAMP.test(result[key])) return null;
-        result[key] = new Date(result[key]).toISOString();
+        const iso = normalizeImportTimestamp(result[key]);
+        if (!iso) return null;
+        result[key] = iso;
       }
     }
     // 结构性链接非法即判无效；封面只丢字段不丢记录——渲染端本就有默认海报兜底

@@ -82,13 +82,14 @@ const mk = (n) => ({
   scrapedAt: '2026-08-01T00:00:00.000Z', translatedAt: ''
 });
 const many = (n) => Array.from({ length: n }, (_, i) => mk(i + 1));
-const postSync = async (dramas) => {
+// extra 合入请求体：空推送要清空非空快照必须带 allowEmpty:true，否则 409（批次 A1）
+const postSync = async (dramas, extra = {}) => {
   const res = await fetch(`${BASE}/sync`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dramas, syncedAt: '2026-08-01T00:00:00.000Z' })
+    body: JSON.stringify({ dramas, syncedAt: '2026-08-01T00:00:00.000Z', ...extra })
   });
-  return res.json();
+  return { status: res.status, ...(await res.json()) };
 };
 
 const today = (() => {
@@ -136,9 +137,9 @@ try {
   check('B4c drop 档同时留了 json 快照',
     fs.existsSync(path.join(historyDir, drops[0].replace(/\.csv$/, '.json'))), ls().join(','));
 
-  // ---------- B5 空推送 → drop 档 + 警告行指明备份路径 ----------
+  // ---------- B5 空推送（带 allowEmpty，用户确认过的清空）→ drop 档 + 警告行指明备份路径 ----------
   serverOut = '';
-  await postSync([]);
+  await postSync([], { allowEmpty: true });
   await sleep(300);
   check('B5a 空推送再留一份 drop 档', dropCsvs().length === 2, ls().join(','));
   check('B5b 既有的空推送警告仍在', /警告：收到空时间线推送/.test(serverOut), serverOut.trim().slice(0, 200));
@@ -221,6 +222,22 @@ try {
   const b10c = await postSync(many(4));
   check('B10c 两份一致时重启，同内容推送不重写 CSV', b10c.ok === true && b10c.count === 4
     && fs.statSync(csvPath).mtimeMs === csvMtime, `${JSON.stringify(b10c)} ${csvMtime} -> ${fs.statSync(csvPath).mtimeMs}`);
+
+  // ---------- B11 空库护栏在重启后同样生效：快照从 timeline.json 恢复，未带 allowEmpty 的空推送 409 ----------
+  // 正是事故形态：服务刚被 launchd 拉起，重装后的扩展 SW 启动即推 []。409 分支在备份之前返回，
+  // 连每日档 / drop 档都不产生（没有覆盖就没有留痕）
+  await restartServer();
+  fs.rmSync(path.join(historyDir, `timeline-${today}.csv`), { force: true });  // 让「会不会留每日档」可观测
+  fs.rmSync(path.join(historyDir, `timeline-${today}.json`), { force: true });
+  const historyBefore = ls().join(',');
+  const csvBefore = fs.readFileSync(csvPath, 'utf8');
+  const jsonBefore = fs.readFileSync(jsonPath, 'utf8');
+  const b11 = await postSync([]);
+  check('B11a 重启后未带 allowEmpty 的空推送 409', b11.status === 409 && b11.code === 'EMPTY_REJECTED'
+    && /现有 4 条/.test(b11.error), JSON.stringify(b11));
+  check('B11b CSV / json 原样', fs.readFileSync(csvPath, 'utf8') === csvBefore && fs.readFileSync(jsonPath, 'utf8') === jsonBefore, '');
+  check('B11c 拒绝时不留任何备份', ls().join(',') === historyBefore, `${historyBefore} -> ${ls().join(',')}`);
+  check('B11d 共享页仍是 4 条', (await getTimeline()).dramas.length === 4, '');
 } finally {
   child.kill();
   await sleep(200);

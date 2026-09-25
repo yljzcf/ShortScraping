@@ -71,7 +71,7 @@ check('G3b 指纹更新为新集合', bg.data.pruneFingerprint === SUB2, String(
 // ---------- G6 静态探针：抓取结束处强制清理（重读最新订阅） ----------
 const bgSrc = fs.readFileSync(new URL('../src/background/background.js', import.meta.url), 'utf8');
 check('G6 performScrapeOnce 结束处 force 清理并重读最新 urlTags',
-  bgSrc.includes('pruneDramasOutsideConfiguredUrls(latestUrlTags, { force: true })'), '');
+  bgSrc.includes('pruneDramasOutsideConfiguredUrls(latestUrlTags, { force: true'), '');
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

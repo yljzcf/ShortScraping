@@ -535,7 +535,7 @@
           <div class="section-header">
             <div class="section-title"><span>📄</span> 配置文件</div>
           </div>
-          <p class="help-text">网页订阅、定时任务和翻译接口分别来自项目 <code>config/</code> 目录下的独立 JSON 文件。扩展启动、刷新扩展或点击“重新读取配置”时，会从这些文件恢复配置。</p>
+          <p class="help-text">网页订阅、定时任务和翻译接口分别来自项目 <code>config/</code> 目录下的独立 JSON 文件。扩展启动或刷新扩展时，会从这些文件恢复配置（设置页保存时写回失败的配置例外：保留在扩展里，待同步服务启动后自动写回文件）；点击“重新读取配置”则一律以文件为准。文件读取或解析失败时沿用上一次的配置。</p>
           <ul class="config-list">
             <li><strong>网页订阅：</strong><code>config/tag.json</code></li>
             <li><strong>定时任务：</strong><code>config/cron.json</code></li>
@@ -587,7 +587,7 @@
             <button class="btn btn-primary" id="btnSaveSubscriptions">保存订阅配置</button>
             <button class="btn btn-secondary" id="btnOpenTagFromSubscriptions">查看 config/tag.json</button>
           </div>
-          <p class="help-text">说明：浏览器扩展不能直接写项目文件。保存时会先更新扩展本地配置，并尝试通过本地同步服务写回 <code>config/tag.json</code>；若同步服务未启动，会提示仅本地临时生效。</p>
+          <p class="help-text">说明：浏览器扩展不能直接写项目文件。新增订阅或改标签时会先更新扩展本地配置，再尝试通过本地同步服务写回 <code>config/tag.json</code>；若同步服务未启动，本地配置会保留，并在同步服务启动后（扩展下次唤醒时）自动写回文件。取消订阅会删除该订阅下的历史，必须先成功写回文件才会生效（需同步服务）。</p>
         </div>
       </section>
 
@@ -642,7 +642,7 @@
           <div class="actions">
             <button class="btn btn-primary" id="btnSaveSchedule">保存定时任务配置</button>
           </div>
-          <p class="help-text">说明：保存时会校验配置（非法 Cron 表达式拒绝保存）、更新扩展本地配置并立即重排定时任务，再尝试通过本地同步服务写回 <code>config/cron.json</code>；若同步服务未启动，写回失败的配置会在扩展下次重启时被文件中的旧配置覆盖。</p>
+          <p class="help-text">说明：保存时会校验配置（非法 Cron 表达式拒绝保存）、更新扩展本地配置并立即重排定时任务，再尝试通过本地同步服务写回 <code>config/cron.json</code>；若同步服务未启动，本地配置会保留，并在同步服务启动后（扩展下次唤醒时）自动写回文件。</p>
         </div>
       </section>
 
@@ -721,7 +721,7 @@
           <div class="actions">
             <button class="btn btn-primary" id="btnSaveTranslate">保存翻译接口配置</button>
           </div>
-          <p class="help-text">说明：保存时会先更新扩展本地配置，并尝试通过本地同步服务写回 <code>config/trans.json</code>；若同步服务未启动，会提示仅本地临时生效。</p>
+          <p class="help-text">说明：保存时会先更新扩展本地配置，并尝试通过本地同步服务写回 <code>config/trans.json</code>；若同步服务未启动，本地配置会保留，并在同步服务启动后（扩展下次唤醒时）自动写回文件。</p>
         </div>
       </section>
 
@@ -763,7 +763,7 @@
             <button class="btn btn-primary" id="btnSaveLark">保存 Lark 配置</button>
             <button class="btn btn-secondary" id="btnLarkTestSend">发送测试</button>
           </div>
-          <p class="help-text">说明：保存时会先更新扩展本地配置，并尝试通过本地同步服务写回 <code>config/lark.json</code>；若同步服务未启动，会提示仅本地临时生效。「发送测试」使用当前表单草稿（无需先保存），发送时间线最新一条卡片数据，时间线为空时发送内置样例。</p>
+          <p class="help-text">说明：保存时会先更新扩展本地配置，并尝试通过本地同步服务写回 <code>config/lark.json</code>；若同步服务未启动，本地配置会保留，并在同步服务启动后（扩展下次唤醒时）自动写回文件。「发送测试」使用当前表单草稿（无需先保存），发送时间线最新一条卡片数据，时间线为空时发送内置样例。</p>
         </div>
 
         <div class="section">
@@ -826,7 +826,7 @@
           <div class="section-header">
             <div>
               <div class="section-title"><span>📦</span> 导出与恢复</div>
-              <p class="help-text">JSON 备份包含全部条目、可导入恢复；CSV 仅供表格软件查看，不支持回导。导入按条目 ID 去重——已存在的条目跳过不覆盖，订阅范围之外的条目不会导入。</p>
+              <p class="help-text">JSON 备份包含全部条目、可导入恢复；CSV 仅供表格软件查看，不支持回导。导入按条目 ID 去重——已存在的条目跳过不覆盖，订阅范围之外的条目不会导入。<br>扩展按订阅范围自动清理历史（取消订阅、按 <code>config/tag.json</code> 回读订阅等）前，会把被删条目存进「自动清理回收站」（只保留最近 3 批）；回收站有内容时才显示导出按钮，导出的文件同样用「导入 JSON 恢复」写回，恢复前要先把对应订阅加回来。</p>
             </div>
           </div>
           <div class="actions">
@@ -834,6 +834,7 @@
             <button class="btn btn-secondary" id="btnExportCsv">导出 CSV</button>
             <button class="btn btn-secondary" id="btnImportJson">导入 JSON 恢复</button>
             <input type="file" id="importFileInput" accept=".json,application/json" hidden>
+            <button class="btn btn-secondary" id="btnExportPruneTrash" hidden disabled title="导出自动清理删掉的最近几批条目，可用「导入 JSON 恢复」写回">导出自动清理回收站</button>
           </div>
         </div>
 

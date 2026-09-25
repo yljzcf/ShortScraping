@@ -7,10 +7,15 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { card, SUB } from './background-fixture.mjs';
 import { freePort } from './free-port.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
+const TranslateConfig = require('../src/shared/translate-config.js');
+const Lark = require('../src/shared/lark.js');
+const ScheduleConfig = require('../src/shared/schedule-config.js');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'shortscraping-safety-'));
 for (const rel of ['server', 'src/shared', 'config', 'db']) fs.mkdirSync(path.join(directory, rel), { recursive: true });
 fs.copyFileSync(path.join(root, 'server/sync-server.js'), path.join(directory, 'server/sync-server.js'));
@@ -62,8 +67,43 @@ try {
   assert.equal((await post('/sync', {})).status, 400);
   assert.equal((await post('/sync', { dramas: [null] })).status, 400);
   assert.equal((await post('/config/tag', {})).status, 500);
+  // An empty push may only replace a non-empty shared snapshot when the extension declares allowEmpty
+  // (a user-confirmed clear); otherwise a fresh profile's warm-up push of [] would wipe db/timeline.*.
+  const emptyPush = await post('/sync', { dramas: [] });
+  assert.equal(emptyPush.status, 409);
+  assert.equal(emptyPush.body.code, 'EMPTY_REJECTED');
   assert.equal(fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8'), csv);
   assert.equal(fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8'), snapshot);
+
+  // Config write-backs need the matching key holding a plain object. A missing, null, array or misspelled
+  // key used to be normalized into defaults and atomically overwrite the file, silently wiping the API key,
+  // webhooks and App Secret (no history backup; the next SW wake copies the wiped file into storage).
+  // Valid payloads keep writing exactly the normalized config.
+  const configCases = [
+    ['/config/trans', 'translateConfig', 'config/trans.json',
+      { translateMode: 'ai', aiEndpoint: 'https://ai.invalid/v1', aiApiKey: 'sk-audit', delayMs: 0 }, TranslateConfig.normalizeConfig],
+    ['/config/lark', 'larkConfig', 'config/lark.json',
+      { webhookUrl: 'https://open.feishu.cn/audit-flow', botWebhookUrl: 'https://open.feishu.cn/audit-bot', botEnabled: true,
+        feishuAppId: 'cli_audit', feishuAppSecret: 'secret-audit' }, Lark.normalizeConfig],
+    ['/config/cron', 'scheduleConfig', 'config/cron.json',
+      { scheduleMode: 'cron', scrapeInterval: 6, translateInterval: 1, scrapeCron: '10 3 * * *', translateCron: '20 3 * * *' },
+      raw => ScheduleConfig.validateConfig(raw).config]
+  ];
+  for (const [route, key, rel, valid, normalize] of configCases) {
+    const file = path.join(directory, rel);
+    const saved = await post(route, { [key]: valid });
+    assert.equal(saved.status, 200, `${route} ${JSON.stringify(saved.body)}`);
+    assert.deepEqual(saved.body.config, normalize(valid));
+    const written = fs.readFileSync(file, 'utf8');
+    assert.equal(written, `${JSON.stringify(normalize(valid), null, 2)}\n`);
+    for (const bad of [{}, { [key]: null }, { [key]: [] }, { [key]: 'x' }, { [key]: 0 }, { [`${key}s`]: valid }, null]) {
+      const refused = await post(route, bad);
+      assert.equal(refused.status, 400, `${route} ${JSON.stringify(bad)}`);
+      assert.equal(refused.body.ok, false);
+      assert.equal(fs.readFileSync(file, 'utf8'), written, `${route} ${JSON.stringify(bad)} must not touch ${rel}`);
+    }
+    assert.equal(fs.existsSync(`${file}.tmp`), false);
+  }
 
   // Invalid hostnames cannot expose data; malformed URL input gets 400 and leaves service alive.
   const hostStatus = await new Promise((resolve, reject) => {

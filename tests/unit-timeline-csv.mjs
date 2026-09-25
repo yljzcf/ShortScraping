@@ -57,6 +57,35 @@ check('T10 company 已从列与白名单移除', !TimelineCsv.CSV_COLUMNS.includ
   && !('company' in TimelineCsv.normalizeDrama({ company: 'x' })), '');
 check('T11 入参带 company 也不漏进产物', !content.includes('Studio'), '');
 
+// A6（2026-09-25 审计）：形状合法但日历非法的时间戳必须判无效（返回 null），不能抛
+// RangeError——后台导入循环不在 try 里，一抛就整批失败、sendResponse 永不回
+const importCard = (extra) => ({ itemId: 'tt9', sourceListUrl: SUB, ...extra });
+const safeValidate = (raw) => {
+  try { return { value: TimelineCsv.validateImportDrama(raw) }; } catch (error) { return { threw: error }; }
+};
+for (const [label, value] of [
+  ['月份 13', '2026-13-01T00:00Z'],
+  ['全面溢出', '2026-13-45T25:99Z'],
+  ['分钟 60', '2026-01-01T23:60Z'],
+  ['偏移 +24:00', '2026-01-01T10:00+24:00']
+]) {
+  for (const key of ['scrapedAt', 'translatedAt']) {
+    const out = safeValidate(importCard({ [key]: value }));
+    check(`T12 ${label}（${key}）判无效而不抛`, !out.threw && out.value === null,
+      out.threw ? `threw ${out.threw.name}: ${out.threw.message}` : JSON.stringify(out.value));
+  }
+}
+for (const value of ['2026-02-30T10:00Z', '2025-02-29T00:00Z', '2026-04-31T00:00:00.000Z']) {
+  const out = safeValidate(importCard({ scrapedAt: value }));
+  check(`T13 日期进位 ${value} 判无效（不静默挪到下月）`, !out.threw && out.value === null,
+    out.threw ? `threw ${out.threw.message}` : JSON.stringify(out.value?.scrapedAt));
+}
+check('T14 闰年 2 月 29 日仍合法', TimelineCsv.validateImportDrama(importCard({ scrapedAt: '2024-02-29T00:00Z' }))?.scrapedAt
+  === '2024-02-29T00:00:00.000Z', '');
+check('T15 带偏移的合法时间戳照常换算成 UTC', TimelineCsv.validateImportDrama(importCard({ translatedAt: '2026-09-05T01:00:00+08:00' }))?.translatedAt
+  === '2026-09-04T17:00:00.000Z', '');
+check('T16 无偏移时间戳仍判无效（原有语义不变）', TimelineCsv.validateImportDrama(importCard({ scrapedAt: '2026-09-05T01:00:00' })) === null, '');
+
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);
