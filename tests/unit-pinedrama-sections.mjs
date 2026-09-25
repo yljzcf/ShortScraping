@@ -295,6 +295,15 @@ async function runScenario({ href = NOVELS, subscriptions = SUBS, live, docs = d
     response?.success === true && saved.length === 0 && fetchCalls.length === 0, show([saved.length, fetchCalls.length]));
 }
 {
+  // ?list= 值归一后为空（纯标点）：以前退回页面缺省板块（Recommended），把它记到这条订阅名下
+  const href = `${ORIGIN}/novels?list=%21%21`;
+  const { saved, response, fetchCalls } = await runScenario({
+    href, subscriptions: [{ urlPattern: href, tags: ['Pines', 'novel'] }], live: novelsPage('?list=%21%21')
+  });
+  check('L7b ?list= 归一后为空 → 零入库、零请求，不退回缺省板块',
+    response?.success === true && saved.length === 0 && fetchCalls.length === 0, show([saved.map(d => d.itemId), fetchCalls.length]));
+}
+{
   // 板块容器里混进第二个标题＝爬过头，会把下一个板块的卡吃进来 → 宁可不抓
   const bad = page([el('div', { class: 'max-w-7xl' }, [
     el('div', { class: 'head-wrap' }, [el('h2', {}, [], 'Popular Novels')]),

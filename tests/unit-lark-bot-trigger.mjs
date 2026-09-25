@@ -17,6 +17,8 @@ const botPosts = [];          // 捕获发往机器人的请求
 const botPostTimes = [];      // 每次请求的时刻（S 组测节流）
 const alarmStore = new Map();
 let botFailCount = 0;         // 还需失败多少次（Q 组制造推送失败）
+let botGate = null;           // 非空时机器人请求先挂在这个 promise 上（R 组制造「处理进行中」的窗口）
+let botGateReached = null;    // 有请求挂上闸门时回调（R 组据此在处理中途插入入队）
 
 function pickKeys(keys) {
   const wanted = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys ?? rawStore);
@@ -76,6 +78,7 @@ globalThis.importScripts = (...paths) => {
 const BOT_HOOK = 'https://open.larksuite.com/open-apis/bot/v2/hook/unit-test';
 globalThis.fetch = async (url, options) => {
   if (String(url) === BOT_HOOK) {
+    if (botGate) { botGateReached?.(); await botGate; }
     botPosts.push(JSON.parse(options?.body || '{}'));
     botPostTimes.push(Date.now());
     if (botFailCount > 0) { botFailCount -= 1; throw new Error('unit stub: 机器人不可达'); }
@@ -317,6 +320,111 @@ await pushTrans('okcard');
 check('Q12 推送成功不入队、不建闹钟',
   queueOf().length === 0 && !alarmStore.has(RETRY_ALARM),
   `queue=${JSON.stringify(queueOf())}`);
+
+// ---------- R 组：重试处理与入队并发（审查 bot-retry-queue-overwrite / bot-retry-queue-lost-update） ----------
+// 逐条重推要跑好几分钟（每条请求超时 15s、最多 50 条），这期间翻译线照常失败入队、并建 1 分钟后的闹钟。
+// 此前收尾拿开轮快照整体写回：期间入队的卡连同闹钟一起丢；期间闹钟触发的第二轮读到未写回的整队，
+// 已推成功的卡再推一遍（群里重复卡片）。闸门把第一条重推请求挂住，制造「处理进行中」的窗口。
+const armGate = () => {
+  let open, reached;
+  const hit = new Promise(r => { reached = r; });
+  botGate = new Promise(r => { open = r; });
+  botGateReached = reached;
+  return {
+    hit: Promise.race([hit, sleep(3000)]),   // 兜底：闸门没被撞上也别把整套件挂死
+    release: () => { botGate = null; botGateReached = null; open(); }
+  };
+};
+const startRetryRun = () => chromeStub.__onAlarm?.({ name: RETRY_ALARM });
+const retryIds = () => queueOf().map(e => `${e.dramaId}:${e.attempts}`).join(',');
+const postCount = text => botPosts.filter(p => JSON.stringify(p).includes(text)).length;
+
+await resetDramasCache(); await setupBot();
+botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botFailCount = 99;
+await pushTrans('r-old');
+botFailCount = 0;
+botPosts.length = 0;
+{
+  const gate = armGate();
+  const run = startRetryRun();
+  await gate.hit;                                   // 正在重推 r-old
+  await enqueueBotRetry('r-new', 1);                // eslint-disable-line no-undef -- 翻译线此刻推送失败入队
+  gate.release();
+  await run; await sleep(100);
+}
+check('R1 处理期间新入队的条目在收尾写回后仍在（不被开轮快照覆盖）',
+  retryIds() === 'r-new:1', `queue=${retryIds()}`);
+check('R1b 合并后队列非空：重试闹钟保留，不被清掉',
+  alarmStore.get(RETRY_ALARM)?.delayInMinutes === 1, JSON.stringify([...alarmStore.keys()]));
+check('R1c 本轮处理过的条目照常出队（r-old 推成功一次）',
+  botPosts.length === 1 && postCount('中·r-old') === 1, `posts=${botPosts.length}`);
+
+// 本轮推失败的条目与期间入队的条目并存：失败的次数 +1 留在前面（入队更早），新条目排在后面
+await resetDramasCache(); await setupBot();
+botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botFailCount = 99;
+await pushTrans('r-fail');
+botFailCount = 0;
+{
+  const gate = armGate();
+  const run = startRetryRun();
+  await gate.hit;
+  await enqueueBotRetry('r-new2', 1);               // eslint-disable-line no-undef
+  botFailCount = 1;                                 // 挂住的这次重推失败
+  gate.release();
+  await run; await sleep(100);
+}
+check('R2 本轮失败的条目（次数 +1）与期间新入队的条目合并保留',
+  retryIds() === 'r-fail:2,r-new2:1' && alarmStore.has(RETRY_ALARM), `queue=${retryIds()} alarms=${[...alarmStore.keys()]}`);
+
+// 并发：第一轮还挂在请求上，期间入队建的闹钟又触发一轮——第二轮必须直接返回，不重复推
+await resetDramasCache(); await setupBot();
+botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botFailCount = 99;
+await pushTrans('c1');
+await pushTrans('c2');
+botFailCount = 0;
+botPosts.length = 0;
+{
+  const gate = armGate();
+  const first = startRetryRun();
+  await gate.hit;
+  const second = startRetryRun();                   // 第一轮尚未写回
+  await sleep(300);
+  gate.release();
+  await Promise.all([first, second]); await sleep(100);
+}
+check('R3 两轮重试并发时每张卡只推一次（第二轮被内存标记挡下）',
+  botPosts.length === 2 && postCount('中·c1') === 1 && postCount('中·c2') === 1,
+  `posts=${botPosts.length} c1=${postCount('中·c1')} c2=${postCount('中·c2')}`);
+check('R3b 全部推成功后队列清空、闹钟清除', queueOf().length === 0 && !alarmStore.has(RETRY_ALARM),
+  `queue=${retryIds()} alarms=${[...alarmStore.keys()]}`);
+botPosts.length = 0;
+await pushTrans('c3', {});                          // 推成功，不入队
+rawStore.larkBotState = { ...rawStore.larkBotState, retryQueue: [{ dramaId: 'c3', attempts: 1 }] };
+await fireRetryAlarm();
+check('R3c 处理标记随收尾复位：下一次闹钟照常处理', botPosts.length === 2 && queueOf().length === 0,
+  `posts=${botPosts.length} queue=${retryIds()}`);
+
+// 处理期间同一张卡被重新入队（attempts 回到 1，与开轮值不同）：按新条目保留，并顶掉本轮给它留的旧重试
+await resetDramasCache(); await setupBot();
+botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botFailCount = 0;
+await pushTrans('e1');
+rawStore.larkBotState = { ...rawStore.larkBotState, retryQueue: [{ dramaId: 'e1', attempts: 2 }] };
+{
+  const gate = armGate();
+  const run = startRetryRun();
+  await gate.hit;
+  await enqueueBotRetry('e1', 1);                   // eslint-disable-line no-undef
+  botFailCount = 1;
+  gate.release();
+  await run; await sleep(100);
+}
+check('R4 同一张卡处理期间重新入队：只留最新一条（与 enqueueBotRetry 同 id 只留一条同口径）',
+  retryIds() === 'e1:1' && alarmStore.has(RETRY_ALARM), `queue=${retryIds()}`);
+botGate = null; botGateReached = null; botFailCount = 0;
 
 // ---------- S 组：发送节流（飞书自定义机器人 5 次/秒、100 次/分钟，超限 11232） ----------
 // 翻译线一批 10 条跑完一起回填，10 次推送会在同一个循环里连发，很容易打满「5 次/秒」。

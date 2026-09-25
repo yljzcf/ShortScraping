@@ -144,6 +144,11 @@ await runTranslateRound();
   check('P4 整条没回 → 保持 new、不写任何译文',
     m.empty?.status === 'new' && !m.empty?.titleZh && !m.empty?.descriptionZh && !m.empty?.translatedAt,
     JSON.stringify(m.empty));
+  // 2026-09-25 体检 B2：空结果与半成品共用重试额度（同批有条目翻成功＝接口正常，错在这条自己）。
+  // 此前空结果不计次，永远空着的条目每轮陪跑、翻译线等不到 pendingCount 归零；
+  // 失败归因与熔断的完整矩阵见 unit-translate-failures
+  check('P4b 整条没回也累加 translateAttempts（与半成品共用上限）', m.empty?.translateAttempts === 1,
+    JSON.stringify(m.empty));
 }
 
 // ---------- 第二轮：半成品补齐 ----------

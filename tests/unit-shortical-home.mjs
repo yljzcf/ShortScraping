@@ -368,6 +368,25 @@ for (const [name, sitemapImpl] of [
   check('L3b 板块都没找到就不该去取 sitemap（先等区块、再取规范表）',
     sitemapCalls.length === 0, show(sitemapCalls));
 }
+{
+  // 审查 list-param-silent-default-fallback：大小写/空格写法以前正则不过、悄悄抓 top_recommended
+  const { saved } = await runScenario({
+    href: `${HOME}?list=More%20Recommended`,
+    subscriptions: [{ urlPattern: `${HOME}?list=More%20Recommended`, tags: ['Shortical', 'More'] }],
+    sections: [section('Top Recommended', DEFAULT_CARDS),
+      section('More Recommended', [card({ id: '881', title: '更多推荐', slug: 'more-one' })])]
+  });
+  check('L4 ?list=More%20Recommended 归一后命中本板块，不退回 top_recommended',
+    eq(saved.map(d => d.itemId), ['sc881']), show(saved.map(d => d.itemId)));
+}
+{
+  const { saved, response, sitemapCalls } = await runScenario({
+    href: `${HOME}?list=%F0%9F%94%A5`,
+    subscriptions: [{ urlPattern: `${HOME}?list=%F0%9F%94%A5`, tags: ['Shortical', 'Top'] }]
+  });
+  check('L5 ?list= 归一后为空（纯 emoji）→ 零入库、不取 sitemap，不退回 top_recommended',
+    response?.success === true && saved.length === 0 && sitemapCalls.length === 0, show([saved.map(d => d.itemId), sitemapCalls]));
+}
 
 // ---------- H hydrate 轮询：首轮空、随后才填上 ----------
 {

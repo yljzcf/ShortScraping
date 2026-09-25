@@ -228,7 +228,12 @@ const STAR_ITEMS = [playlet({ id: 9709, title: 'Star A' })];
 }
 {
   const { saved } = await runScenario({ location: loc(`${HOME}?list=Hot%20Picks!`), subscriptions: [SUB_HOME], document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
-  check('S3 非法 ?list 值回落默认 hot_picks', eq(saved.map(d => d.itemId), ['fr8098', 'fr7822']), show(saved.map(d => d.itemId)));
+  check('S3 ?list 值先归一化再比对（大小写/空格/标点不影响，Hot Picks! → hot_picks）', eq(saved.map(d => d.itemId), ['fr8098', 'fr7822']), show(saved.map(d => d.itemId)));
+}
+{
+  // 归一后为空（纯 emoji）：以前悄悄退回默认 hot_picks、把热门板块记到这条订阅名下
+  const { saved, response } = await runScenario({ location: loc(`${HOME}?list=%F0%9F%94%A5`), subscriptions: [SUB_HOME], document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
+  check('S3b ?list 值归一后为空 → 0 条，不退回默认 hot_picks', saved.length === 0 && response?.success === true, show(saved.map(d => d.itemId)));
 }
 {
   const { saved, response } = await runScenario({ location: loc(`${HOME}?list=no_such`), subscriptions: [SUB_HOME], document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });

@@ -37,38 +37,52 @@ globalThis.Translator = (() => {
     if (config.translateMode === 'ai') {
       return await translateWithAI(title, description, config);
     } else {
-      // API 模式分别翻译
-      const titleZh = await translateWithAPI(title, config);
-      const descZh = description ? await translateWithAPI(description, config) : '';
-      return { title: titleZh, desc: descZh };
+      // API 模式分别翻译。某个字段的请求在传输层失败时该字段仍回空串（调用方契约不变），
+      // 另把原因带在 transportError 上：后台翻译线据此把「接口故障」（不计重试次数，接口
+      // 恢复后照常翻）与「服务答了但没给出译文」（如片名「1923」译文与原文相同被滤掉，
+      // 计次数、达上限收口）分开——两者此前都是空串，分不出来
+      let transportError = '';
+      const translateField = async (text) => {
+        try {
+          return await translateWithAPI(text, config);
+        } catch (e) {
+          console.warn('[ShortScraping] API 翻译失败:', e.message);
+          transportError = transportError || e.message;
+          return '';
+        }
+      };
+      const titleZh = await translateField(title);
+      const descZh = description ? await translateField(description) : '';
+      return transportError
+        ? { title: titleZh, desc: descZh, transportError }
+        : { title: titleZh, desc: descZh };
     }
   }
 
   /**
-   * API 模式翻译（MyMemory 等免费 API）
+   * API 模式翻译（MyMemory 等免费 API）。
+   * 错误语义：传输层失败（超时 / 网络 / HTTP 非 200 / 响应非 JSON / responseStatus 非 200
+   * 或额度告警）抛异常；服务正常应答但没有可用译文（缺字段、译文与原文相同）返回空串。
    */
   async function translateWithAPI(text, config, targetLang = 'zh-CN') {
-    try {
-      const url = `${config.apiEndpoint}?q=${encodeURIComponent(text)}&langpair=en|${targetLang}`;
-      const response = await fetchWithTimeout(url, {}, config.requestTimeoutSec);
+    const url = `${config.apiEndpoint}?q=${encodeURIComponent(text)}&langpair=en|${targetLang}`;
+    const response = await fetchWithTimeout(url, {}, config.requestTimeoutSec);
 
-      if (!response.ok) return '';
+    if (!response.ok) throw new Error(`翻译接口 HTTP ${response.status}`);
 
-      const data = await response.json();
+    const data = await response.json().catch(() => {
+      throw new Error('翻译接口响应不是合法 JSON');
+    });
+    const translated = data.responseData?.translatedText || '';
 
-      if (data.responseStatus === 200 && data.responseData?.translatedText) {
-        const translated = data.responseData.translatedText;
-        // 过滤无效翻译
-        if (translated && translated !== text && !translated.includes('MYMEMORY')) {
-          return translated;
-        }
-      }
-
-      return '';
-    } catch (e) {
-      console.warn('[ShortScraping] API 翻译失败:', e.message);
-      return '';
+    // MyMemory 额度用尽、参数不合法时仍回 HTTP 200，错误落在 responseStatus（可能是字符串）
+    // 或直接把 MYMEMORY WARNING 告警塞进译文字段：都算接口故障，不是这条内容的问题
+    if (Number(data.responseStatus) !== 200 || translated.includes('MYMEMORY')) {
+      throw new Error(`翻译接口返回 ${data.responseStatus}${data.responseDetails ? `：${data.responseDetails}` : ''}`);
     }
+
+    // 过滤无效翻译（与原文相同）
+    return translated && translated !== text ? translated : '';
   }
 
   /**
@@ -227,9 +241,9 @@ globalThis.Translator = (() => {
    * 调用方负责分批（每批条数/字符预算），本函数只把收到的这一批用一次请求译出来。
    * 非 AI 模式退化为逐条 translateTitleAndDesc，保证调用方总能拿到对齐结果。
    *
-   * 错误语义：传输层失败（未配置端点密钥 / 超时 / HTTP 非 200 / 响应非 JSON）
-   * 抛异常，调用方据此向用户报告失败原因；模型返回内容解析不出（格式跑偏）
-   * 仍返回空串数组，条目保持待翻译下轮重试。
+   * 错误语义：传输层失败（未配置端点密钥 / 超时 / HTTP 非 200 / 响应非 JSON / 缺 choices）
+   * 抛异常，调用方据此向用户报告失败原因（HTTP 非 200 带 error.status）；模型返回内容
+   * 解析不出（格式跑偏）仍返回空串数组，由后台翻译线按「应答了却没给出译文」处理。
    */
   async function translateBatchAI(items) {
     const list = Array.isArray(items) ? items : [];
@@ -272,22 +286,31 @@ globalThis.Translator = (() => {
     console.log(`[ShortScraping] 批量 AI 请求耗时: ${Math.round(performance.now() - startAt)}ms`);
 
     if (!response.ok) {
-      throw new Error(`AI 接口 HTTP ${response.status}`);
+      // 带上状态码：后台翻译线据此区分「这批内容被拒收」（400 内容审核 / 413 超长 / 422，
+      // 拆单条重试可隔离毒条目）与「通道故障」（鉴权 / 额度 / 限流 / 5xx，不计重试次数）
+      const error = new Error(`AI 接口 HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
     }
 
     const data = await response.json().catch(() => {
       throw new Error('AI 接口响应不是合法 JSON');
     });
-    const content = data.choices?.[0]?.message?.content?.trim() || '';
+    // 有的中转服务出错时仍回 HTTP 200、正文是 {"error":…}：没有 choices 就不是模型的应答，
+    // 按传输层失败处理（后台不计重试次数），否则会被当成「模型答了但没给译文」计次收口
+    if (!Array.isArray(data?.choices)) {
+      throw new Error(`AI 接口响应缺少 choices${data?.error?.message ? `：${data.error.message}` : ''}`);
+    }
+    const content = data.choices[0]?.message?.content?.trim() || '';
     const byId = parseAIBatchResponse(content);
 
-    // 按 id 回填；缺失 id 的条目留空串，调用方据此保留 status:'new' 下轮重试
+    // 按 id 回填；缺失 id 的条目留空串，后台翻译线按「应答了却没给出这条的译文」处理（计次、达上限收口）
     return list.map((_, i) => byId.get(i + 1) || { title: '', desc: '' });
   }
 
   /**
    * 解析 AI 批量返回的 JSON 数组，返回 Map<id, {title, desc}>。
-   * 解析失败或非数组返回空 Map（整批留待下一轮重试）。
+   * 解析失败或非数组返回空 Map（整批按「应答了却没给出译文」处理，后台同轮拆单条重试，见 translateBatchAI）。
    */
   function parseAIBatchResponse(content) {
     const map = new Map();

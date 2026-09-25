@@ -301,18 +301,45 @@
     return text.replace(/[\t\r\n]+/g, ' ');
   }
 
+  const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+  const strictText = (value) => (typeof value === 'string' ? value.trim() : '');
+
+  /** 行/条目的去重键（与 buildTimelineCsv 同语义：itemId||id，旧字段名 imdbId 兼容）。 */
+  function tableRowKey(drama) {
+    const normalized = TimelineCsv.normalizeDrama(drama || {});
+    return normalized.itemId || normalized.id;
+  }
+
   /**
-   * 条目数组 → 表格行数组（16 键，键序即 TABLE_COLUMNS）。
+   * 增量导出拿来与水位线比较的时刻：入库时间 savedAt 优先，旧条目（无 savedAt）退回 scrapedAt。
+   * 不直接用 scrapedAt：它是内容脚本提取列表时写的，要等详情请求回来才入库（秒级），
+   * 复制恰好落在这个窗口里的卡，下次会因 scrapedAt 早于水位线被永久漏掉。
+   * savedAt 只由后台 saveDramaRecord 在新卡入库时写；导入恢复刻意不写——补回的旧条目
+   * 多半已在 Base 里，按旧 scrapedAt 留在水位线之前，不当增量重导。
+   */
+  function exportStamp(drama) {
+    const d = drama || {};
+    return strictText(d.savedAt) || strictText(d.scrapedAt);
+  }
+
+  /**
+   * 条目数组 → 表格行数组（15 键，键序即 TABLE_COLUMNS）。
    * 先按 since/sources 过滤再去重：seen 只记真正产出的行，避免范围外的重复
    * 条目把范围内的同 itemId 条目挤掉。
    *
    * @param {object[]} dramas
-   * @param {{since?: string, sources?: string[]}} [options] since 为 ISO 时间戳，
-   *        取 `scrapedAt >= since`（含边界）；sources 为站点白名单，空/缺省＝全部。
+   * @param {{since?: string, sinceBySource?: Object<string, string>, excludeKeys?: string[],
+   *          sources?: string[]}} [options]
+   *        since 为 ISO 时间戳，取 `(savedAt || scrapedAt) >= since`（含边界，见 exportStamp）；
+   *        sinceBySource 为按站点的水位线，命中的站点以它代替 since（设置页只勾部分站点复制时记下的）；
+   *        excludeKeys 为已导出、不再重导的去重键（水位线安全余量造成的重叠窗口，见 nextExportState）；
+   *        sources 为站点白名单，空/缺省＝全部。
    */
   function buildTableRows(dramas, options) {
     const opts = options || {};
     const since = asText(opts.since);
+    const sinceBySource = opts.sinceBySource && typeof opts.sinceBySource === 'object' ? opts.sinceBySource : {};
+    const exclude = new Set(Array.isArray(opts.excludeKeys) ? opts.excludeKeys : []);
     const sources = Array.isArray(opts.sources) && opts.sources.length ? new Set(opts.sources) : null;
     const seen = new Set();
     const rows = [];
@@ -322,8 +349,11 @@
       const key = normalized.itemId || normalized.id;
       if (!key) continue;
       if (sources && !sources.has(normalized.source)) continue;
-      // 无 scrapedAt 的条目带 since 条件时保守排除（与按条件清理的日期谓词同向）
-      if (since && !(normalized.scrapedAt && normalized.scrapedAt >= since)) continue;
+      const floor = (hasOwn(sinceBySource, normalized.source) && strictText(sinceBySource[normalized.source])) || since;
+      // 两个时刻都没有的条目带 since 条件时保守排除（与按条件清理的日期谓词同向）
+      const stamp = exportStamp(drama);
+      if (floor && !(stamp && stamp >= floor)) continue;
+      if (exclude.has(key)) continue;
       if (seen.has(key)) continue;
       seen.add(key);
 
@@ -331,6 +361,94 @@
     }
 
     return rows;
+  }
+
+  /* ——— 增量复制的水位线（设置页「复制为表格格式」，存 storage 的 larkExportState）———
+   * { lastCopiedAt, sites, overlapKeys, previous }
+   * - lastCopiedAt：上次「全部站点」复制的时刻（ISO）；
+   * - sites：{ [站点]: ISO }，只勾部分站点复制时各站自己的水位线，优先于 lastCopiedAt；
+   *   全站复制一次就清空（各站都追平了）。曾经只有一条全局水位线、不管勾了哪些站都推进：
+   *   只勾 Steam 复制一次，其余站点在上一段区间里的新条目就永远导不出去。也不取「部分复制
+   *   不推进」这个更省事的办法：按站点分表粘贴的用法，每次复制同一站都会把上一批再导一遍，
+   *   Base 不去重，重复即多出行。
+   * - overlapKeys：已导出、但入库时刻不早于当前水位线的条目键。设置页把水位线取在读库之前
+   *   再退一个安全余量（读库与后台入库并发时，快照之后才落库的卡 savedAt 可能略早于读库时刻），
+   *   余量窗口里已导出的条目靠它排除，下次不重导；
+   * - previous：「撤销上次复制」退回的状态（同形、不再嵌套），恰好让下一次留空日期的复制
+   *   重来上一批。
+   * 旧版只存 { lastCopiedAt, previousCopiedAt } 两个字符串，按「无分站水位线、无重叠」读入。
+   */
+  function normalizeExportMark(raw) {
+    const r = raw && typeof raw === 'object' ? raw : {};
+    const sites = r.sites && typeof r.sites === 'object' && !Array.isArray(r.sites)
+      ? Object.fromEntries(Object.entries(r.sites)
+        .map(([site, at]) => [site, strictText(at)])
+        .filter(([site, at]) => site && at))
+      : {};
+    const overlapKeys = Array.isArray(r.overlapKeys)
+      ? [...new Set(r.overlapKeys.map(strictText).filter(Boolean))]
+      : [];
+    return { lastCopiedAt: strictText(r.lastCopiedAt), sites, overlapKeys };
+  }
+
+  function normalizeExportState(raw) {
+    const r = raw && typeof raw === 'object' ? raw : {};
+    const previous = r.previous && typeof r.previous === 'object'
+      ? normalizeExportMark(r.previous)
+      : normalizeExportMark({ lastCopiedAt: r.previousCopiedAt });
+    return { ...normalizeExportMark(r), previous };
+  }
+
+  /** 该站点当前生效的水位线（分站优先、退回全局；'' 表示从未复制过＝导出全部）。 */
+  function exportSinceFor(mark, source) {
+    const m = mark || {};
+    const sites = m.sites && typeof m.sites === 'object' ? m.sites : {};
+    return (hasOwn(sites, source) && strictText(sites[source])) || strictText(m.lastCopiedAt);
+  }
+
+  /**
+   * 复制成功后的下一份水位线状态（纯函数；调用方只在剪贴板确实写入后才落盘）。
+   *
+   * @param {object} state 复制前的 larkExportState（任意形态，先归一）
+   * @param {{dramas: object[], rows: object[], sites?: string[], copiedAt: string, since?: string}} batch
+   *        dramas 为本次读到的全库快照、rows 为本次复制出的行；sites 为勾选的站点（空＝全部）；
+   *        copiedAt 为新水位线（已含安全余量）；since 为日期框的显式起点（留空＝按水位线复制的）。
+   */
+  function nextExportState(state, batch) {
+    const current = normalizeExportState(state);
+    const b = batch || {};
+    const copiedAt = strictText(b.copiedAt);
+    const explicitSince = strictText(b.since);
+    const selected = [...new Set((Array.isArray(b.sites) ? b.sites : []).map(strictText).filter(Boolean))];
+    const partial = selected.length > 0;
+    const stampSelected = (at) => Object.fromEntries(selected.map(site => [site, at]));
+
+    const mark = partial
+      ? { lastCopiedAt: current.lastCopiedAt, sites: { ...current.sites, ...stampSelected(copiedAt) } }
+      : { lastCopiedAt: copiedAt, sites: {} };
+
+    // 重叠窗口：本批与更早批次导出过、且入库时刻不早于新水位线的条目——下一次留空日期的
+    // 复制仍会被水位线放进来，记下来排除。其余已导出的条目都在水位线之前，不必再记
+    const batchKeys = new Set((b.rows || []).map(tableRowKey).filter(Boolean));
+    const exported = new Set([...current.overlapKeys, ...batchKeys]);
+    const overlap = new Set();
+    for (const drama of b.dramas || []) {
+      const key = tableRowKey(drama);
+      if (!key || !exported.has(key)) continue;
+      const floor = exportSinceFor(mark, TimelineCsv.normalizeDrama(drama).source);
+      const stamp = exportStamp(drama);
+      if (floor && stamp && stamp >= floor) overlap.add(key);
+    }
+
+    // 撤销＝退回到「能重来这一批」的状态：日期框显式起点复制的，退回到那个起点
+    let previous;
+    if (!explicitSince) previous = { lastCopiedAt: current.lastCopiedAt, sites: current.sites };
+    else if (partial) previous = { lastCopiedAt: current.lastCopiedAt, sites: { ...current.sites, ...stampSelected(explicitSince) } };
+    else previous = { lastCopiedAt: explicitSince, sites: {} };
+    // 本批导出的条目不能再被排除，否则撤销后重来会少掉它们
+    previous.overlapKeys = current.overlapKeys.filter(key => !batchKeys.has(key));
+
+    return { ...mark, overlapKeys: [...overlap], previous };
   }
 
   /** 行数组 → 制表符分隔文本（剪贴板粘贴追加用：无表头、无 BOM、无引号包裹）。 */
@@ -665,7 +783,11 @@
     uploadCoverImage,
     pushBotCard,
     __resetTokenCache,
+    exportStamp,
     buildTableRows,
+    normalizeExportState,
+    exportSinceFor,
+    nextExportState,
     toTsv,
     toCsv,
     fetchWithTimeout,

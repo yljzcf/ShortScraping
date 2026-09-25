@@ -561,6 +561,8 @@ function performScrape(options = {}) {
   scrapeQueue = run.then(() => {}, () => {});
   return run.finally(() => {
     activeScrapeCount--;
+    // 最后一个抓取收尾时翻译线若已提前退出，再安排一次（见 resumePostScrapeTranslateLoop）
+    resumePostScrapeTranslateLoop();
   });
 }
 
@@ -1144,40 +1146,65 @@ async function runLegacyDramaMigrations() {
 }
 
 /**
- * 在后台打开一个非活动标签页抓取，完成后关闭。
+ * 单页抓取的整页期限。后台等内容脚本的 'scrape' 回复本身不设期限：页面里一个请求挂住
+ * （回了响应头、正文迟迟不发完），sendMessage 就永远等不到回复，标签页关不掉，串行的
+ * scrapeQueue 后面所有定时 / 手动抓取跟着堵死（审查 no-fetch-timeout-hangs-scrape-queue）。
+ * 内容脚本已给每个 fetch 设 25 秒期限，这里再兜一层整页的：正常一页连同详情补抓多在
+ * 一两分钟内完成（兜底路径最长 30s 加载等待 + 120s 轮询），5 分钟只拦真正挂死的。
+ */
+const SCRAPE_PAGE_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * 在后台打开一个非活动标签页抓取，完成后关闭。超过整页期限按失败抛出（performScrapeOnce
+ * 记入该 URL 的失败结果、继续下一个 URL），finally 照常关标签页——内容脚本随页面一起销毁。
  */
 async function scrapeUrlInTab(url) {
   const tab = await chrome.tabs.create({ url, active: false });
+  // 超时后败下阵的那条抓取链还在后台跑：标签页关掉后它别再起「强制注入 + 轮询」对着已关的页空转 2 分钟
+  const page = { closed: false };
+  let timer = null;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`整页抓取超时（${SCRAPE_PAGE_TIMEOUT_MS / 60000} 分钟内未完成），已关闭标签页`));
+    }, SCRAPE_PAGE_TIMEOUT_MS);
+  });
 
   try {
-    try {
-      await waitForTabComplete(tab.id);
-      // 给内容脚本一点注入和页面渲染时间
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      return await chrome.tabs.sendMessage(tab.id, { action: 'scrape' });
-    } catch (e) {
-      // 快路径失败的两种实测场景，统一走「强制注入 + 轮询」兜底：
-      // 1) 重媒体页（如 reelshort 首页视频横幅）在后台节流标签页里媒体加载不完，
-      //    load 永不触发（status 恒 loading），冷缓存时 DOMContentLoaded（即
-      //    document_end 注入时机）可晚于 147s → waitForTabComplete 超时；
-      // 2) 扩展刚加载完的最初几秒，内容脚本注册未传播到新 renderer，页面正常
-      //    complete 但接收端不存在 → 首次 sendMessage 失败。
-      // scripting.executeScript 只要文档已提交即可注入（不等 DCL），
-      // content.js 自带防重注入护栏，与 manifest 注入并存安全。
-      console.warn(`[ShortScraping] ${e.message}，强制注入后轮询触发抓取: ${url}`);
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        // 与 manifest content_scripts 的 js 数组保持一致：共享模块先于 content.js
-        // （漏一个共享模块＝content.js 在兜底注入路径上直接 ReferenceError，
-        //  而这条路径正是后台节流标签页的常态入口。unit-site-registry T4a/T4b 守着）
-        files: ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/content/content.js']
-      }).catch(err => console.warn(`[ShortScraping] 强制注入失败（继续轮询）: ${err.message}`));
-      return await sendScrapeWhenReady(tab.id);
-    }
+    return await Promise.race([scrapeLoadedTab(tab.id, url, page), expired]);
   } finally {
+    clearTimeout(timer);
+    page.closed = true;
     if (tab.id) {
       await chrome.tabs.remove(tab.id).catch(() => {});
     }
+  }
+}
+
+async function scrapeLoadedTab(tabId, url, page) {
+  try {
+    await waitForTabComplete(tabId);
+    // 给内容脚本一点注入和页面渲染时间
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    return await chrome.tabs.sendMessage(tabId, { action: 'scrape' });
+  } catch (e) {
+    if (page.closed) throw e;
+    // 快路径失败的两种实测场景，统一走「强制注入 + 轮询」兜底：
+    // 1) 重媒体页（如 reelshort 首页视频横幅）在后台节流标签页里媒体加载不完，
+    //    load 永不触发（status 恒 loading），冷缓存时 DOMContentLoaded（即
+    //    document_end 注入时机）可晚于 147s → waitForTabComplete 超时；
+    // 2) 扩展刚加载完的最初几秒，内容脚本注册未传播到新 renderer，页面正常
+    //    complete 但接收端不存在 → 首次 sendMessage 失败。
+    // scripting.executeScript 只要文档已提交即可注入（不等 DCL），
+    // content.js 自带防重注入护栏，与 manifest 注入并存安全。
+    console.warn(`[ShortScraping] ${e.message}，强制注入后轮询触发抓取: ${url}`);
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      // 与 manifest content_scripts 的 js 数组保持一致：共享模块先于 content.js
+      // （漏一个共享模块＝content.js 在兜底注入路径上直接 ReferenceError，
+      //  而这条路径正是后台节流标签页的常态入口。unit-site-registry T4a/T4b 守着）
+      files: ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/content/content.js']
+    }).catch(err => console.warn(`[ShortScraping] 强制注入失败（继续轮询）: ${err.message}`));
+    return await sendScrapeWhenReady(tabId, 40, 3000, page);
   }
 }
 
@@ -1187,12 +1214,12 @@ async function scrapeUrlInTab(url) {
  * 标签页冷缓存加载 reelshort 这类重页时，DOMContentLoaded（即 document_end
  * 注入时机）实测可晚于 90s。
  */
-async function sendScrapeWhenReady(tabId, attempts = 40, intervalMs = 3000) {
+async function sendScrapeWhenReady(tabId, attempts = 40, intervalMs = 3000, page = null) {
   for (let i = 0; i < attempts; i++) {
     try {
       return await chrome.tabs.sendMessage(tabId, { action: 'scrape' });
     } catch (e) {
-      if (i === attempts - 1) throw e;
+      if (i === attempts - 1 || page?.closed) throw e;
       await new Promise(r => setTimeout(r, intervalMs));
     }
   }
@@ -1235,6 +1262,34 @@ function performTranslate({ source = 'auto' } = {}) {
     translateRun = null;
   });
   return translateRun;
+}
+
+// 同一轮内连续这么多次翻译请求失败就提前结束本轮（密钥过期 / 端点挂了 / 额度用尽）：
+// 此前每批失败后只等 delayMs 就发下一批，库里 3000 条 new 时每轮白发 300 个必败请求
+const TRANSLATE_ABORT_AFTER_FAILURES = 3;
+
+// 服务端审过内容才拒收的状态码（内容审核 data_inspection_failed / 超长 / 不可处理）：
+// 错在这条内容本身。其余传输失败（网络 / 超时 / 鉴权 / 额度 / 限流 / 5xx）算通道故障。
+const ITEM_LEVEL_TRANSLATE_HTTP_STATUSES = new Set([400, 413, 422]);
+
+function isItemLevelTranslateError(error) {
+  return ITEM_LEVEL_TRANSLATE_HTTP_STATUSES.has(Number(error?.status));
+}
+
+/**
+ * 译文语言守卫：不含汉字的片名/简介译文按空处理（判据复用 TranslateConfig.hasChineseChars，
+ * 与 resetNonChineseTitleZh 同口径）。模型把输入原样回显（{"title":"Revenge Bride",…}）时，
+ * pickTitleDesc 会回退到 title/desc 键把英文收下，此前照单全收、标 trans 永久定格。
+ * 「NBA 2K27」这类合法的无汉字译名随之变成空结果：按失败计次、达上限收口，卡片显示
+ * 英文原名，与译名本来的样子一致。其余字段（transportError 等）丢弃，调用方先读再洗。
+ */
+function keepChineseTranslation(result) {
+  const title = String(result?.title || '');
+  const desc = String(result?.desc || '');
+  return {
+    title: TranslateConfig.hasChineseChars(title) ? title : '',
+    desc: TranslateConfig.hasChineseChars(desc) ? desc : ''
+  };
 }
 
 /**
@@ -1322,30 +1377,100 @@ async function performTranslateOnce(source) {
       translatedCount
     });
 
+    // 请求失败的归因与熔断。「失败」＝某条的最后一次尝试没拿到任何译文。取舍：只有错在
+    // 这条自己才计 translateAttempts，全局问题一律不计（接口恢复 / 配置改对后照常翻）：
+    //   · 通道故障（网络 / 超时 / 鉴权 / 额度 / 限流 / 5xx、API 模式的 transportError）从不计。
+    //     抓取后翻译线约 1 秒一轮，若照计，几秒的断网就能把整库待翻译卡烧满额度、以未翻译
+    //     状态收口 trans（单卡 🌍 同理不计，见 handleTranslateSingle / unit-translate-single S7b、S8b）；
+    //   · 条目级拒收（ITEM_LEVEL_TRANSLATE_HTTP_STATUSES，只认只含这一条的请求）与「应答了
+    //     却没给出这条的译文」先暂记、轮末定夺：本轮有别的条目翻成功（接口和模型都正常）→
+    //     落账；一条都没翻成时，只剩一两条的（库里落单的毒条目 / 片名「1923」）落账，更多就
+    //     更像提示词或模型的全局问题，作废；
+    //   · 连败熔断：同轮连续 TRANSLATE_ABORT_AFTER_FAILURES 次失败（传输失败，或整批失败后
+    //     拆出的单条仍没译文）即结束本轮；本轮还一条都没翻成时，这条连败链上暂记的作废（密钥
+    //     失效之外，模型名填错这类全局 400、提示词让模型整体答非所问，也长这样）。会被拆单条
+    //     重试的整批失败不计入连败；
+    //   · 本轮已有条目翻成功（progressedCount>0，接口、模型、提示词都正常）之后：拆出的单条
+    //     「应答了却没给出译文」只能是这条自己的问题，直接暂记、不计入连败；请求级失败（单条
+    //     400 等）仍计入连败以兜住中途变成全局 400 的请求风暴，但熔断时链上暂记的照常落账。
+    //     旧卡排在库尾，几条毒条目会自成一批：若照样连败 3 次就熔断作废，它们每轮都在熔断里
+    //     作废、永远收不了口，每轮还报错停掉抓取后翻译线。
+    let failStreak = 0;
+    let streakFailures = []; // 当前连败链上暂记的失败：链被翻成功的条目打断才转入 failures，熔断时本轮无进展则作废
+    const failures = [];     // 与连败链无关（或已被打断确认）的暂记失败，轮末统一定夺
+    let aborted = false;
+
+    // 记一次失败（不写库）。attributable：错在这条自己，暂记待轮末定夺；streak：计入连败
+    const noteFailure = (dramasInRequest, { attributable, streak }) => {
+      processedCount += dramasInRequest.length;
+      if (attributable) (streak ? streakFailures : failures).push(...dramasInRequest);
+      if (!streak) return;
+      failStreak++;
+      if (failStreak >= TRANSLATE_ABORT_AFTER_FAILURES) {
+        aborted = true;
+        if (progressedCount > 0) failures.push(...streakFailures);
+        streakFailures = [];
+        console.warn(`[ShortScraping] 连续 ${failStreak} 次翻译请求失败（密钥失效或接口不可用？），本轮提前结束: ${lastError || '模型未给出译文'}`);
+      }
+    };
+
+    const requestFailed = (error, dramasInRequest) => {
+      lastError = error?.message || String(error);
+      const attributable = dramasInRequest.length === 1 && isItemLevelTranslateError(error);
+      if (!attributable) console.warn(`[ShortScraping] 翻译请求失败（通道故障，不计重试次数）: ${lastError}`);
+      noteFailure(dramasInRequest, { attributable, streak: true });
+    };
+
     // 回填一条翻译结果并计进度：按 drama.id 精确定位，不依赖数组顺序（批量保对应的锚点）
     //
     // 完成判据（「该翻的都翻出来了」）在 updateSingleDramaTranslation 队列内按合并后的
     // 记录统一计算：只回一半的留 status='new' 下轮补另一半（updated=false），不再像
     // 此前那样一律标 trans 把半成品永久定格。
+    //
+    // 调用前提：这条的请求拿到了应答。空结果＝服务答了却没给出这条的译文（漏 id / 回显
+    // 英文被语言守卫洗掉 / 译文与原文相同被滤掉），暂记为失败；有译文则打断连败链。
     const applyOne = async (drama, result) => {
       const hasTranslation = Boolean(result?.title || result?.desc);
-      if (hasTranslation) {
-        const updated = await updateSingleDramaTranslation(drama.id, result, { fillOnly: true });
-        progressedCount++;
-        if (updated) {
-          translatedCount++;
-          // 触发点①：翻完一条即推（队列外，失败只记日志）。读回落库后的那条，
-          // 卡片里才有刚写进去的译文。
-          const saved = (await getDramasSnapshot()).find(d => d.id === drama.id);
-          await maybeBotPush(saved);
-        } else {
-          console.warn(`[ShortScraping] 翻译只补到一半，保持待翻译状态下轮重试: ${drama.title}`);
-        }
+      if (!hasTranslation) {
+        noteFailure([drama], { attributable: true, streak: false });
+        return;
+      }
+      failStreak = 0;
+      failures.push(...streakFailures);
+      streakFailures = [];
+
+      const updated = await updateSingleDramaTranslation(drama.id, result, { fillOnly: true });
+      progressedCount++;
+      if (updated) {
+        translatedCount++;
+        // 触发点①：翻完一条即推（队列外，失败只记日志）。读回落库后的那条，
+        // 卡片里才有刚写进去的译文。
+        const saved = (await getDramasSnapshot()).find(d => d.id === drama.id);
+        await maybeBotPush(saved);
       } else {
-        console.warn(`[ShortScraping] 翻译结果为空，保持待翻译状态: ${drama.title}`);
+        console.warn(`[ShortScraping] 翻译只补到一半，保持待翻译状态下轮重试: ${drama.title}`);
       }
       processedCount++;
     };
+
+    // 失败落账：在写队列内也累加 translateAttempts，达 MAX_PARTIAL_TRANSLATE_ATTEMPTS 与
+    // 半成品同口径收口（status='trans'、写 translatedAt、清计数，已有的译文保留），离开待翻译
+    // 集合，翻译线才能等到 pendingCount 归零收尾。此前空结果 / 整批失败都不计次：毒条目
+    // 连同同批邻居永久卡在 new，每次抓取后翻译线都白跑满轮。收口的卡照常过触发点①（与
+    // 半成品收口一致，否则它永远不会被推群），但不计入 translatedCount——它一个字都没翻出来。
+    const recordTranslateFailure = async (drama) => {
+      const done = await updateSingleDramaTranslation(drama.id, { title: '', desc: '' }, { fillOnly: true });
+      if (done) {
+        console.warn(`[ShortScraping] 连续 ${MAX_PARTIAL_TRANSLATE_ATTEMPTS} 次没拿到译文，收口不再重试: ${drama.title}`);
+        const saved = (await getDramasSnapshot()).find(d => d.id === drama.id);
+        await maybeBotPush(saved);
+      } else {
+        console.warn(`[ShortScraping] 翻译结果为空，保持待翻译状态下轮重试: ${drama.title}`);
+      }
+    };
+
+    const pause = () => new Promise(r => setTimeout(r, config.delayMs ?? 200));
+    const toItem = d => ({ title: d.title, desc: d.description });
 
     const mode = config.translateMode;
 
@@ -1356,39 +1481,87 @@ async function performTranslateOnce(source) {
       console.log(`[ShortScraping] AI 批量翻译：${newDramas.length} 条分 ${batches.length} 批（每批≤${maxItems}）`);
 
       for (const chunk of batches) {
-        let results;
+        if (aborted) break;
+        let results = null;
+        let batchError = null;
         try {
-          results = await Translator.translateBatchAI(chunk.map(d => ({ title: d.title, desc: d.description })));
+          results = (await Translator.translateBatchAI(chunk.map(toItem))).map(keepChineseTranslation);
         } catch (e) {
-          console.warn('[ShortScraping] 批量翻译异常:', e);
-          lastError = e?.message || String(e);
-          results = chunk.map(() => ({ title: '', desc: '' }));
+          batchError = e;
         }
 
-        // 按批内下标 j 取 results[j]（translateBatchAI 保证等长、同序，缺失填空串）
-        for (let j = 0; j < chunk.length; j++) {
-          await applyOne(chunk[j], results[j] || { title: '', desc: '' });
+        // 整批失败（请求抛错，或应答了但一条都没给出）且不止一条：同轮拆成单条各重试一次。
+        // 一条触发内容审核的简介（HTTP 400）或让模型整批拒答的条目，不再拖着同批最多 9 个
+        // 邻居每轮陪跑——分批按数组顺序确定，不拆的话它们下轮还会被分在一起
+        const wholeBatchFailed = batchError || results.every(r => !r.title && !r.desc);
+        if (chunk.length > 1 && wholeBatchFailed) {
+          if (batchError) lastError = batchError.message || String(batchError);
+          console.warn(`[ShortScraping] 批量翻译整批${batchError ? `失败（${lastError}）` : '无译文'}，拆成 ${chunk.length} 条逐条重试`);
+          for (const drama of chunk) {
+            if (aborted) break;
+            try {
+              const [single] = await Translator.translateBatchAI([toItem(drama)]);
+              const result = keepChineseTranslation(single);
+              if (result.title || result.desc) {
+                await applyOne(drama, result);
+              } else {
+                // 本轮已有进展＝提示词与模型正常，单条仍没译文只能怪这条自己：不计入连败（见上方取舍）
+                noteFailure([drama], { attributable: true, streak: progressedCount === 0 });
+              }
+            } catch (e) {
+              requestFailed(e, [drama]);
+            }
+            heartbeat();
+            await pause();
+          }
+          continue;
+        }
+
+        if (batchError) {
+          console.warn('[ShortScraping] 批量翻译异常:', batchError);
+          requestFailed(batchError, chunk);
+        } else {
+          // 按批内下标 j 取 results[j]（translateBatchAI 保证等长、同序，缺失填空串）
+          for (let j = 0; j < chunk.length; j++) {
+            await applyOne(chunk[j], results[j] || { title: '', desc: '' });
+          }
         }
 
         // 一批一次心跳；不 await，同上下文 storage 写按序落库
         heartbeat();
 
         // 批间延迟避免接口限流
-        await new Promise(r => setTimeout(r, config.delayMs ?? 200));
+        await pause();
       }
     } else {
       // API 模式（MyMemory 等）无批量端点，保持逐条翻译
       for (const drama of newDramas) {
-        let result = { title: '', desc: '' };
+        if (aborted) break;
+        let raw;
         try {
-          result = await Translator.translateTitleAndDesc(drama.title, drama.description);
+          raw = await Translator.translateTitleAndDesc(drama.title, drama.description);
         } catch (e) {
           console.warn(`[ShortScraping] 翻译失败: ${drama.title}`, e);
+          raw = { title: '', desc: '', transportError: e?.message || String(e) };
         }
-        await applyOne(drama, result);
+        const result = keepChineseTranslation(raw);
+        if (!result.title && !result.desc && raw?.transportError) {
+          // 一个字段都没拿到且请求在传输层失败：通道故障，不计次数
+          requestFailed(new Error(raw.transportError), [drama]);
+        } else {
+          await applyOne(drama, result);
+        }
         heartbeat();
-        await new Promise(r => setTimeout(r, config.delayMs ?? 200));
+        await pause();
       }
+    }
+
+    // 轮末定夺暂记的失败（见上方「请求失败的归因与熔断」）
+    if (!aborted) failures.push(...streakFailures);
+    if (progressedCount > 0 || failures.length < TRANSLATE_ABORT_AFTER_FAILURES) {
+      for (const drama of failures) await recordTranslateFailure(drama);
+    } else {
+      console.warn(`[ShortScraping] 本轮一条都没翻成、却有 ${failures.length} 条没拿到译文，更像接口或提示词的全局问题，不计重试次数`);
     }
 
     await chrome.storage.local.set({
@@ -1399,6 +1572,13 @@ async function performTranslateOnce(source) {
 
     if (translatedCount > 0) {
       showNotification(`已翻译 ${translatedCount} 部短剧`);
+    }
+
+    // 熔断提前结束：哪怕前面几批翻成了，剩下的也没翻，照样报错；aborted 供抓取后翻译线
+    // 停线（接口不可用时每秒再起一轮只会重复撞墙）
+    if (aborted) {
+      runError = `连续 ${TRANSLATE_ABORT_AFTER_FAILURES} 次翻译请求失败，本轮提前结束：${lastError || '模型未给出译文'}`;
+      return { pendingCount, translatedCount, error: runError, aborted: true };
     }
 
     // 有待翻译却一条译文都没写进去＝接口/配置有问题：把错误写进 summary，
@@ -1511,8 +1691,9 @@ async function handleTranslateSingle(dramaId) {
 
   try {
     await loadTranslator();
-    const result = await Translator.translateTitleAndDesc(drama.title, drama.description);
-    if (!result?.title && !result?.desc) {
+    // 语言守卫与批量线同口径：模型回显英文不得覆盖既有中文译名
+    const result = keepChineseTranslation(await Translator.translateTitleAndDesc(drama.title, drama.description));
+    if (!result.title && !result.desc) {
       return { success: false, error: '翻译结果为空，请检查翻译接口配置或控制台错误' };
     }
 
@@ -1551,7 +1732,12 @@ function saveDramaRecord(drama) {
       return false;
     }
 
-    await writeDramasInQueue([drama, ...existing], { lastScrape: new Date().toISOString() });
+    // savedAt＝入库时刻，只在这里（新卡首次入库）写，库里已有的卡不动、导入恢复也不写：
+    // 多维表格增量导出按 savedAt || scrapedAt 比水位线（Lark.exportStamp）。scrapedAt 是内容
+    // 脚本提取列表时定的，要等详情补抓完才入库，复制恰好落在这几秒里的卡会被水位线永久挡掉。
+    // 调用方传来的 savedAt 一律覆盖（内容脚本不写该字段，不信任外来值）
+    const savedAt = new Date().toISOString();
+    await writeDramasInQueue([{ ...drama, savedAt }, ...existing], { lastScrape: savedAt });
     return true;
   });
 }
@@ -1711,6 +1897,11 @@ function pruneDramaRecords({ sites, beforeIso, dryRun = false, previewToken } = 
   });
 }
 
+// 抓取后翻译线的墙钟上限。抓取进行中的空转轮不计入 maxRounds（见 runPostScrapeTranslateLoop），
+// 这里兜住「某个抓取挂住、activeScrapeCount 迟迟不归零」时线也会收尾；定得宽，正常的
+// 全量抓取（几十个订阅 URL，每个几秒到几十秒）远到不了
+const POST_SCRAPE_TRANSLATE_MAX_MS = 2 * 60 * 60 * 1000;
+
 /**
  * 抓取任务开始后，延迟 10 秒启动一轮翻译工作线。
  * 抓取线仍在继续时，翻译线会并行扫描已新增的 new 卡片。
@@ -1735,27 +1926,42 @@ async function runPostScrapeTranslateLoop() {
   let emptyScans = 0;
   let rounds = 0;
   const maxRounds = 30; // 安全阈值，避免接口持续失败导致无限循环
+  const startedAt = Date.now();
+  let stopReason = '';
 
   try {
     console.log('[ShortScraping] 抓取后翻译线启动');
 
     while (emptyScans < 3 && rounds < maxRounds) {
-      rounds++;
       const result = await performTranslate();
 
       if (result?.pendingCount === 0) {
         if (activeScrapeCount > 0) {
+          // 抓取仍在进行、暂无待翻译：空转轮既不计空扫描，也不计 maxRounds。此前照计
+          // 轮数，约 30 秒就耗尽 30 轮退出，抓取后半程入库的卡要等整点 translate-task
           console.log('[ShortScraping] 当前无待翻译卡片，但抓取仍在进行，空扫描不计数');
         } else {
+          rounds++;
           emptyScans++;
           console.log(`[ShortScraping] 第 ${emptyScans}/3 次扫描无待翻译卡片`);
         }
       } else {
+        rounds++;
         emptyScans = 0;
         console.log(`[ShortScraping] 第 ${rounds} 轮翻译：待翻译 ${result?.pendingCount ?? '未知'}，完成 ${result?.translatedCount ?? 0}`);
 
         // 如果有待翻译但本轮一个都没翻成，仍按用户要求继续下一轮扫描；
-        // maxRounds 会防止接口持续失败时无限循环。
+        // maxRounds 会防止接口持续失败时无限循环。本轮连败熔断（接口不可用）则直接停线：
+        // 每秒再起一轮只会重复撞墙，抓取收尾时 resumePostScrapeTranslateLoop 会再给一次机会
+        if (result?.aborted) {
+          stopReason = 'aborted';
+          break;
+        }
+      }
+
+      if (Date.now() - startedAt >= POST_SCRAPE_TRANSLATE_MAX_MS) {
+        stopReason = 'timeout';
+        break;
       }
 
       if (emptyScans < 3) {
@@ -1763,7 +1969,11 @@ async function runPostScrapeTranslateLoop() {
       }
     }
 
-    if (rounds >= maxRounds) {
+    if (stopReason === 'aborted') {
+      console.warn('[ShortScraping] 翻译接口连续失败，抓取后翻译线提前结束');
+    } else if (stopReason === 'timeout') {
+      console.warn('[ShortScraping] 抓取后翻译线运行超过墙钟上限，已停止');
+    } else if (rounds >= maxRounds) {
       console.warn('[ShortScraping] 抓取后翻译线达到最大轮数，已停止');
     } else {
       console.log('[ShortScraping] 抓取后翻译线结束');
@@ -1771,6 +1981,19 @@ async function runPostScrapeTranslateLoop() {
   } finally {
     postScrapeTranslateRunning = false;
   }
+}
+
+/**
+ * 抓取收尾钩子：performScrape 的 finally 在 activeScrapeCount-- 之后调用。最后一个抓取
+ * 结束时，若抓取后翻译线已提前退出（maxRounds / 墙钟上限 / 接口熔断），再安排一次，让
+ * 抓取后半程入库的卡不必等整点 translate-task。线还在跑或在等就不动——它看到计数归零后
+ * 自会按空扫描收尾；还有抓取在排队也不动，等最后一个。
+ */
+function resumePostScrapeTranslateLoop() {
+  if (activeScrapeCount > 0) return;
+  if (postScrapeTranslateRunning || postScrapeTranslateTimer) return;
+  console.log('[ShortScraping] 抓取已全部结束而抓取后翻译线已退出，再安排一次收尾扫描');
+  schedulePostScrapeTranslateLoop();
 }
 
 /**
@@ -2017,9 +2240,35 @@ async function enqueueBotRetry(dramaId, attempts) {
   chrome.alarms.create(BOT_RETRY_ALARM_NAME, { delayInMinutes: 1 });   // 入队后队列必非空
 }
 
+/**
+ * 重试队列处理（闹钟 larkBotRetry 触发）。逐条推送要跑好几分钟（每条请求超时 15s，最多 50 条），
+ * 这期间翻译线的 maybeBotPush 照常失败入队、并新建 1 分钟后的闹钟。所以：
+ * - 收尾写回在 updateBotState 内对**当前**队列做合并，不拿开轮快照整体覆盖：只摘掉本轮处理过的条目
+ *   （dramaId + 开轮时的 attempts 认领），处理期间新入队的原样保留；闹钟按合并后的队列建或清。
+ *   此前整体写回 remaining，期间入队的卡连同闹钟一起丢（审查 bot-retry-queue-overwrite）。
+ * - 内存标记 botRetryProcessing 挡住并发的第二轮：期间入队建的闹钟到点时本轮往往还没跑完，
+ *   第二轮读到的仍是未写回的整队，已推成功的卡会被再推一遍。被挡的一轮直接返回即可——
+ *   本轮收尾时队列非空就会重建闹钟。标记只在内存：SW 被回收时处理也随之中断，不会误挡。
+ */
+let botRetryProcessing = false;
+
 async function processBotRetryQueue() {
-  const state = await readBotState();
-  const queue = Array.isArray(state.retryQueue) ? [...state.retryQueue] : [];
+  if (botRetryProcessing) {
+    console.log('[ShortScraping] 群机器人重试队列正在处理，本次触发跳过（收尾时按队列重建闹钟）');
+    return;
+  }
+  botRetryProcessing = true;
+  try {
+    await processBotRetryQueueOnce();
+  } finally {
+    botRetryProcessing = false;
+  }
+}
+
+async function processBotRetryQueueOnce() {
+  // 快照经 updateBotState 链读（mutate 返回同一引用＝不写）：排在它前面、尚未落盘的入队也算进本轮
+  const state = await updateBotState(current => current);
+  const queue = Array.isArray(state.retryQueue) ? state.retryQueue.filter(Boolean) : [];
   if (!queue.length) {
     await chrome.alarms.clear(BOT_RETRY_ALARM_NAME);
     return;
@@ -2052,7 +2301,23 @@ async function processBotRetryQueue() {
     }
   }
 
-  await writeBotRetryQueue(remaining);
+  // 认领键＝dramaId + 开轮时的 attempts。处理期间同一张卡被 enqueueBotRetry 重新入队时
+  // attempts 回到 1，与开轮值不同即算新条目保留，并顶掉本轮给它留的旧重试（与 enqueueBotRetry
+  // 「同 id 只留最新一条」同口径）。已知边界（接受）：开轮值恰好也是 1 时两者无法区分，新条目
+  // 被当作本轮处理过的摘掉——本轮推成功则那张卡已送达，推失败则 remaining 里仍留着它的重试。
+  const claimKey = entry => `${entry.dramaId}\u0000${Number(entry.attempts) || 1}`;
+  const claimed = new Set(queue.map(claimKey));
+  const merged = await updateBotState((current) => {
+    const arrived = (Array.isArray(current.retryQueue) ? current.retryQueue : [])
+      .filter(entry => entry && !claimed.has(claimKey(entry)));
+    const arrivedIds = new Set(arrived.map(entry => entry.dramaId));
+    // 本轮剩下的条目入队更早，排在前面；超限丢最老的（与 enqueueBotRetry 同口径）
+    const retryQueue = remaining.filter(entry => !arrivedIds.has(entry.dramaId)).concat(arrived);
+    while (retryQueue.length > BOT_RETRY_QUEUE_LIMIT) retryQueue.shift();
+    return { ...current, retryQueue };
+  });
+  if (merged.retryQueue.length) chrome.alarms.create(BOT_RETRY_ALARM_NAME, { delayInMinutes: 1 });
+  else await chrome.alarms.clear(BOT_RETRY_ALARM_NAME);
 }
 
 /**
@@ -2224,17 +2489,35 @@ const DETAIL_HTML_PROXY_RULES = [
   }
 ];
 
+// 代理请求期限，与内容脚本 fetchWithTimeout 同为 25 秒、**正文读完才算完**：内容脚本等代理回复
+// 不设期限，这里挂住＝那一页的抓取跟着挂住（审查 no-fetch-timeout-hangs-scrape-queue）。
+// 期限用 Promise.race 兜底，底层 fetch 即使不理会 abort 信号也按时回 success:false
+const DETAIL_HTML_PROXY_TIMEOUT_MS = 25000;
+
 async function fetchDetailHtmlForContent(url) {
   const rule = typeof url === 'string' ? DETAIL_HTML_PROXY_RULES.find(r => r.pattern.test(url)) : null;
   if (!rule) {
     return { success: false, error: 'URL 不在代理白名单内' };
   }
-  try {
-    const response = await fetch(url, { headers: rule.headers });
+  const controller = new AbortController();
+  let timer = null;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`请求超时（${DETAIL_HTML_PROXY_TIMEOUT_MS / 1000} 秒内未读完响应）`));
+    }, DETAIL_HTML_PROXY_TIMEOUT_MS);
+  });
+  const request = (async () => {
+    const response = await fetch(url, { headers: rule.headers, signal: controller.signal });
     if (!response.ok) return { success: false, error: `HTTP ${response.status}` };
     return { success: true, html: await response.text() };
+  })();
+  try {
+    return await Promise.race([request, expired]);
   } catch (e) {
     return { success: false, error: e.message };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

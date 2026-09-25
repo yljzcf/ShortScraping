@@ -81,6 +81,27 @@ reset();
 r = run(['--since=2026-02-30'], { env: { TZ: 'Asia/Shanghai' } });
 check('C6 日历上不存在的日期直接拒绝（不顺延到 3/2）', r.code === 1 && r.out.includes('不是有效日期'), r.out.trim().slice(0, 60));
 
+// B6（2026-09-25 审计 lark-export-watermark-gap）：--since 与设置页增量同一口径，比较入库时间
+// savedAt，旧条目（无 savedAt）退回 scrapedAt——提取早于起点、入库晚于起点的卡不能漏
+const SAVED_INPUT = path.join(workDir, 'saved.json');
+fs.writeFileSync(SAVED_INPUT, JSON.stringify({ version: 1, dramas: [
+  { id: 's1', itemId: 'st0201', title: 'LateSaved', source: 'steam', status: 'new',
+    scrapedAt: '2026-09-04T23:59:59.000Z', savedAt: '2026-09-05T00:00:05.000Z' },
+  { id: 's2', itemId: 'tt0202', title: 'Legacy', source: 'imdb', status: 'trans', scrapedAt: '2026-09-05T08:00:00.000Z' },
+  { id: 's3', itemId: 'tt0203', title: 'Before', source: 'imdb', status: 'trans',
+    scrapedAt: '2026-09-04T08:00:00.000Z', savedAt: '2026-09-04T08:00:03.000Z' }
+] }));
+reset();
+r = run(['--since=2026-09-05T00:00:00Z'], { io: [`--input=${SAVED_INPUT}`, `--outDir=${OUT}`] });
+{
+  const savedFiles = outFiles();
+  const savedText = savedFiles.length ? fs.readFileSync(path.join(OUT, savedFiles[0]), 'utf8') : '';
+  check('C7 --since 比较 savedAt||scrapedAt（提取早于起点、入库晚于起点的卡照样导出）',
+    r.code === 0 && r.out.includes('导出 2 条') && savedText.includes('"LateSaved"') && savedText.includes('"Legacy"')
+    && !savedText.includes('"Before"'), r.out.trim().split('\n')[0]);
+}
+check('C8 输出点名尚未翻译完的条数', r.out.includes('其中 1 条尚未翻译完'), r.out.trim());
+
 // ---------- F 组：过滤与产物 ----------
 reset();
 r = run(['--since=2026-09-01']);

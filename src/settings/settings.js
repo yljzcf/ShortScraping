@@ -1483,14 +1483,22 @@
   // 每月约 1400 条的增量远超免费额度。
   //
   // 水位线存的是「上次复制的精确时刻」而不是日期：按日期取整会让当天 0 点到
-  // 复制时刻之间抓到的条目下次被重复导出（Base 侧不去重，重复即多出行）。
+  // 复制时刻之间入库的条目下次被重复导出（Base 侧不去重，重复即多出行）。
+  // 比较的是入库时刻 savedAt（旧条目退回 scrapedAt），只勾部分站点复制时各站分记水位线，
+  // 状态形态与推进规则见 lark.js 的 nextExportState。
   // 日期框留空＝用水位线，填了＝显式覆盖（也是重导历史区间的入口）。
   const LARK_EXPORT_STATE_KEY = 'larkExportState';
+  // 水位线取在读库之前再退这么多：后台先给新卡打 savedAt、再整表写 storage，读快照恰好
+  // 夹在两步之间的卡不在这次快照里，savedAt 却略早于读库时刻。余量窗口里已导出的条目
+  // 记进 overlapKeys，下次不重导
+  const LARK_EXPORT_SAFETY_MARGIN_MS = 2 * 60 * 1000;
 
   /**
    * 与 popup.js 的 copyTextToClipboard 同款（见 src/popup/popup.js）：无用户激活时
    * navigator.clipboard.writeText 会无声挂起而不是拒绝，必须靠超时竞速兜到
    * execCommand 分支。两页不共享模块，此处照搬而非新起一个共享模块。
+   * 两条路都失败时抛错：execCommand 失败不抛、只回 false，吞掉它调用方就以为已复制，
+   * 照样推进水位线，这批条目下次不再导出。
    */
   async function copyTextToClipboard(text) {
     try {
@@ -1502,9 +1510,14 @@
       const input = document.createElement('textarea');
       input.value = text;
       document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      input.remove();
+      let copied = false;
+      try {
+        input.select();
+        copied = document.execCommand('copy');
+      } finally {
+        input.remove();
+      }
+      if (!copied) throw new Error(`浏览器拒绝写入剪贴板（${e.message}）`);
     }
   }
 
@@ -1528,12 +1541,20 @@
 
   async function readLarkExportState() {
     const stored = await chrome.storage.local.get(LARK_EXPORT_STATE_KEY);
-    const state = stored?.[LARK_EXPORT_STATE_KEY];
-    return {
-      lastCopiedAt: typeof state?.lastCopiedAt === 'string' ? state.lastCopiedAt : '',
-      previousCopiedAt: typeof state?.previousCopiedAt === 'string' ? state.previousCopiedAt : ''
-    };
+    return Lark.normalizeExportState(stored?.[LARK_EXPORT_STATE_KEY]);
   }
+
+  /** 水位线的人话：「全部站点 …；单独复制过 Steam …」，从未复制过返回空串。 */
+  function describeLarkExportMark(mark) {
+    const parts = [];
+    if (mark.lastCopiedAt) parts.push(`全部站点 ${formatLocalStamp(mark.lastCopiedAt)}`);
+    const siteParts = Object.entries(mark.sites)
+      .map(([site, at]) => `${SiteRegistry.SOURCE_NAMES[site] || site} ${formatLocalStamp(at)}`);
+    if (siteParts.length) parts.push(`单独复制过 ${siteParts.join('、')}`);
+    return parts.join('；');
+  }
+
+  const isLarkExportMarkEmpty = (mark) => !mark.lastCopiedAt && Object.keys(mark.sites).length === 0;
 
   function formatLocalStamp(iso) {
     if (!iso) return '';
@@ -1546,31 +1567,40 @@
   async function refreshLarkExportHint() {
     const hint = elements.archive.larkExportHint;
     if (!hint) return;
-    const { lastCopiedAt, previousCopiedAt } = await readLarkExportState();
-    hint.textContent = lastCopiedAt
-      ? `上次复制：${formatLocalStamp(lastCopiedAt)}——留空日期即只导这之后新抓到的条目。`
+    const exportState = await readLarkExportState();
+    const described = describeLarkExportMark(exportState);
+    hint.textContent = described
+      ? `上次复制：${described}——留空日期即各站只导各自上次复制之后入库的条目${exportState.lastCopiedAt ? '' : '（没复制过的站点导出全部）'}。`
       : '还没复制过：留空日期＝导出全部条目（首次建表建议走 npm run export-lark 出文件）。';
     if (elements.archive.larkExportUndo) {
-      elements.archive.larkExportUndo.disabled = !previousCopiedAt && !lastCopiedAt;
+      elements.archive.larkExportUndo.disabled = isLarkExportMarkEmpty(exportState) && isLarkExportMarkEmpty(exportState.previous);
     }
   }
 
   async function handleLarkExportCopy() {
+    // 新水位线取在读 storage 之前（再退安全余量）：复制期间才入库的卡不在这次快照里，
+    // 取在读库之后会把它们永久挡在水位线外
+    const copiedAt = new Date(Date.now() - LARK_EXPORT_SAFETY_MARGIN_MS).toISOString();
     const sites = Array.from(elements.archive.larkExportSiteList.querySelectorAll('input:checked'))
       .map(input => input.value);
     const dateValue = elements.archive.larkExportSinceDate.value; // yyyy-mm-dd
-    const { lastCopiedAt } = await readLarkExportState();
-    // 日期框语义＝该日本地 0 点起（与「按条件清理」同口径）；留空退回水位线
-    const since = dateValue ? new Date(`${dateValue}T00:00:00`).toISOString() : lastCopiedAt;
+    const exportState = await readLarkExportState();
+    // 日期框语义＝该日本地 0 点起（与「按条件清理」同口径），对所选站点一律生效、不排除重叠；
+    // 留空退回各站水位线
+    const since = dateValue ? new Date(`${dateValue}T00:00:00`).toISOString() : '';
 
     const { dramas = [] } = await chrome.storage.local.get('dramas');
-    const rows = Lark.buildTableRows(dramas, { since, sources: sites });
+    const rows = Lark.buildTableRows(dramas, since
+      ? { since, sources: sites }
+      : { since: exportState.lastCopiedAt, sinceBySource: exportState.sites, excludeKeys: exportState.overlapKeys, sources: sites });
     if (rows.length === 0) {
-      showStatus(since ? `${formatLocalStamp(since)} 之后没有新条目` : '时间线为空，没有可导出的条目', false);
+      const scope = sites.length ? '所选站点' : '';
+      if (since) showStatus(`${formatLocalStamp(since)} 之后${scope}没有条目`, false);
+      else if (!isLarkExportMarkEmpty(exportState)) showStatus(`上次复制之后${scope}没有新入库的条目`, false);
+      else showStatus(`${scope || '时间线为空，'}没有可导出的条目`, false);
       return;
     }
 
-    const copiedAt = new Date().toISOString();
     try {
       await copyTextToClipboard(Lark.toTsv(rows));
     } catch (e) {
@@ -1580,24 +1610,30 @@
 
     // 水位线只在复制确实成功后推进：失败时推进会让这批条目永远漏出去
     await chrome.storage.local.set({
-      [LARK_EXPORT_STATE_KEY]: { lastCopiedAt: copiedAt, previousCopiedAt: since }
+      [LARK_EXPORT_STATE_KEY]: Lark.nextExportState(exportState, { dramas, rows, sites, copiedAt, since })
     });
     await refreshLarkExportHint();
 
+    const notes = [];
+    // 译文晚到不补发：翻译完成不改入库时刻，这批行下次不会再被复制出来
+    const untranslated = rows.filter(row => row.status !== 'trans').length;
+    if (untranslated) notes.push(`其中 ${untranslated} 条尚未翻译完，中文列为空或不全，译文完成后不会自动补发`);
     const stuck = rows.filter(row => row.poster && /[,%]/.test(row.poster)).length;
-    showStatus(`已复制 ${rows.length} 条到剪贴板，切到多维表格选中表末空行首格粘贴${stuck ? `（其中 ${stuck} 条封面链接含逗号或百分号编码，转不了附件）` : ''}`, true);
+    if (stuck) notes.push(`其中 ${stuck} 条封面链接含逗号或百分号编码，转不了附件`);
+    showStatus(`已复制 ${rows.length} 条到剪贴板，切到多维表格选中表末空行首格粘贴${notes.length ? `（${notes.join('；')}）` : ''}`, true);
   }
 
   async function handleLarkExportUndo() {
-    const { lastCopiedAt, previousCopiedAt } = await readLarkExportState();
-    if (!lastCopiedAt && !previousCopiedAt) return;
+    const exportState = await readLarkExportState();
+    if (isLarkExportMarkEmpty(exportState) && isLarkExportMarkEmpty(exportState.previous)) return;
+    const { previous } = exportState;
     await chrome.storage.local.set({
-      [LARK_EXPORT_STATE_KEY]: { lastCopiedAt: previousCopiedAt, previousCopiedAt: '' }
+      [LARK_EXPORT_STATE_KEY]: { ...previous, previous: { lastCopiedAt: '', sites: {}, overlapKeys: [] } }
     });
     await refreshLarkExportHint();
-    showStatus(previousCopiedAt
-      ? `已退回到 ${formatLocalStamp(previousCopiedAt)}，再点「复制」会重来上一批`
-      : '已清空上次复制时间，再点「复制」会导出全部条目', true);
+    showStatus(isLarkExportMarkEmpty(previous)
+      ? '已清空上次复制时间，再点「复制」会导出全部条目'
+      : `已退回到 ${describeLarkExportMark(previous)}，再点「复制」会重来上一批`, true);
   }
 
   async function checkSyncServiceStatus() {

@@ -73,6 +73,9 @@ async function runScenario({ location, subscription, document, fetch, domParser,
     }
   };
   globalThis.window = { location };
+  // Node 没有 CSS.escape（浏览器内容脚本里恒有；My Drama 板块锚点选择器要用）：规范的最小子集
+  globalThis.CSS = { escape: value => String(value).replace(/[^A-Za-z0-9_\u0080-\uFFFF-]/g, ch => `\\${ch}`)
+    .replace(/^(-?)(\d)/, (_, dash, digit) => `${dash}\\3${digit} `) };
   globalThis.document = document;
   globalThis.fetch = fetch || (async () => ({ ok: false }));
   globalThis.DOMParser = domParser || class { parseFromString() { return baseDocument(); } };

@@ -215,6 +215,44 @@ const ATV_MOVIE = 'https://tv.apple.com/us/movie/the-gorge/umc.cmc.26o403koqo2kl
   check('P11b Apple 拒绝路径零网络请求', fetchCalls.length === 0, `fetchCalls=${fetchCalls.length}`);
 }
 
+// P12 代理请求期限（审查 no-fetch-timeout-hangs-scrape-queue）：内容脚本等代理回复不设期限，
+//     这里挂住＝那一页的抓取跟着挂住。期限 25 秒、正文读完才算完；超时 abort 底层请求并回
+//     success:false。测试里只把这一个延时缩成 30ms 真定时器
+{
+  // 间接 eval 的顶层 const 不外泄到全局，期限值从源码读
+  const proxyTimeoutMs = Number(bgSrc.match(/const DETAIL_HTML_PROXY_TIMEOUT_MS = (\d+);/)?.[1]);
+  check('P12a 代理期限为 25 秒（与内容脚本 fetchWithTimeout 同口径）', proxyTimeoutMs === 25000, String(proxyTimeoutMs));
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms === 25000 ? 30 : ms, ...args);
+  const within = (promise, ms = 1500) => Promise.race([promise, sleep(ms).then(() => 'hung')]);
+  try {
+    // 响应头回了、正文永远不发完
+    let signal = null;
+    fetchBehavior = async (_url, options) => {
+      signal = options?.signal || null;
+      return { ok: true, status: 200, text: () => new Promise(() => {}) };
+    };
+    const bodyHang = await within(ask(GOOD));
+    check('P12b 正文迟迟不发完 → 按时回 success:false（带超时原因）',
+      bodyHang?.success === false && /超时/.test(bodyHang?.error || ''), JSON.stringify(bodyHang));
+    check('P12c 请求带 abort 信号，超时即中止底层请求', Boolean(signal) && signal.aborted === true,
+      `signal=${Boolean(signal)} aborted=${signal?.aborted}`);
+
+    // 连接挂住、fetch 本身不理会 abort 信号也不 resolve
+    fetchBehavior = () => new Promise(() => {});
+    const connectHang = await within(ask(GOOD));
+    check('P12d fetch 本身挂住且不理会 abort → 仍按时回 success:false',
+      connectHang?.success === false && /超时/.test(connectHang?.error || ''), JSON.stringify(connectHang));
+
+    // 期限内正常返回不受影响
+    fetchBehavior = async () => ({ ok: true, status: 200, text: async () => '<html>IN-TIME</html>' });
+    const inTime = await within(ask(GOOD));
+    check('P12e 期限内读完的响应照常透传', inTime?.success === true && inTime?.html === '<html>IN-TIME</html>', JSON.stringify(inTime));
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+}
+
 console.log = origLog; console.warn = origWarn;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

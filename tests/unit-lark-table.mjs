@@ -284,6 +284,125 @@ check('S13 空输入：CSV 只剩表头、TSV 为空串', Lark.toTsv([]) === ''
 check('S14 CSV 数据行列数与表头一致', csv.trimEnd().split('\r\n').slice(1)
   .every(line => (line.match(/","/g) || []).length + 1 === 15), '');
 
+// ---------- W 组：增量导出的比较口径与水位线（2026-09-25 审计 B6 lark-export-watermark-gap） ----------
+// 三条漏导路径各守一处：
+//   ① 只勾部分站点复制却推进全局水位线 → 其余站点这段区间的新条目永远导不出去（W6）；
+//   ② 按 scrapedAt 比较 → 提取后、入库前的秒级窗口里发生复制的卡被永久漏掉（W2/W10）；
+//   ③ 水位线取在读库之后 → 快照之后才落库、savedAt 却略早的卡被挡在外面（W10，设置页侧
+//      unit-lark-export-copy 另有端到端用例）。余量窗口的重叠靠 overlapKeys 去重（W8）。
+{
+  const T = (hhmm) => `2026-09-2${hhmm}:00.000Z`; // T('3T10:00') → 2026-09-23T10:00:00.000Z
+  const row = (itemId, source, extra = {}) => ({ id: `id-${itemId}`, itemId, title: itemId, source,
+    status: 'trans', sourceListUrl: SUB, ...extra });
+  const keysOf = (list) => list.map(r => r.itemId).sort().join(',');
+  const hasApi = ['exportStamp', 'normalizeExportState', 'exportSinceFor', 'nextExportState']
+    .every(name => typeof Lark[name] === 'function');
+  check('W0 水位线 API 已导出', hasApi, ['exportStamp', 'normalizeExportState', 'exportSinceFor', 'nextExportState']
+    .filter(name => typeof Lark[name] !== 'function').join(','));
+
+  if (typeof Lark.exportStamp === 'function') {
+    check('W1 exportStamp：savedAt 优先、旧条目退回 scrapedAt、都没有为空',
+      Lark.exportStamp({ scrapedAt: T('3T10:00'), savedAt: T('3T10:01') }) === T('3T10:01')
+      && Lark.exportStamp({ scrapedAt: T('3T10:00') }) === T('3T10:00')
+      && Lark.exportStamp({ savedAt: '', scrapedAt: T('3T10:00') }) === T('3T10:00')
+      && Lark.exportStamp({}) === '' && Lark.exportStamp(null) === '', '');
+  }
+
+  // ② 提取于水位线之前、入库于之后：按 scrapedAt 会被永久漏掉
+  const lateSaved = row('st-late', 'steam', { scrapedAt: T('3T09:59'), savedAt: T('3T10:00') });
+  const legacy = row('tt-old', 'imdb', { scrapedAt: T('3T10:30') });
+  const savedEarly = row('md-x', 'mydrama', { scrapedAt: T('3T10:30'), savedAt: T('3T09:00') });
+  const w2 = Lark.buildTableRows([lateSaved, legacy, savedEarly], { since: T('3T10:00') });
+  check('W2 since 比较 savedAt||scrapedAt：提取早于水位线、入库晚于的卡照样导出',
+    keysOf(w2) === 'st-late,tt-old', keysOf(w2));
+
+  // 分站水位线：命中的站点以它代替 since；原型链上的键不算水位线
+  const w3rows = [
+    row('st-1', 'steam', { savedAt: T('3T11:00') }), row('st-2', 'steam', { savedAt: T('3T13:00') }),
+    row('tt-1', 'imdb', { savedAt: T('3T11:00') }), row('cx-1', 'constructor', { savedAt: T('3T11:00') })
+  ];
+  const w3 = Lark.buildTableRows(w3rows, { since: T('3T10:00'), sinceBySource: { steam: T('3T12:00') } });
+  check('W3 sinceBySource 覆盖所属站点、其余站点仍用全局 since', keysOf(w3) === 'cx-1,st-2,tt-1', keysOf(w3));
+  const w4 = Lark.buildTableRows(w3rows, { since: T('3T10:00'), excludeKeys: ['st-1', 'tt-1'] });
+  check('W4 excludeKeys 排除已导出的重叠条目', keysOf(w4) === 'cx-1,st-2', keysOf(w4));
+
+  if (hasApi) {
+    const legacyState = Lark.normalizeExportState({ lastCopiedAt: T('3T10:00'), previousCopiedAt: T('2T10:00') });
+    check('W5 旧版 { lastCopiedAt, previousCopiedAt } 原样读入（无分站水位线、无重叠）',
+      deepEq(legacyState, { lastCopiedAt: T('3T10:00'), sites: {}, overlapKeys: [],
+        previous: { lastCopiedAt: T('2T10:00'), sites: {}, overlapKeys: [] } }), JSON.stringify(legacyState));
+    const junk = Lark.normalizeExportState({ lastCopiedAt: 5, sites: ['x'], overlapKeys: 'k', previous: 'y' });
+    check('W5b 坏形态归一为空状态、不抛错',
+      deepEq(junk, { lastCopiedAt: '', sites: {}, overlapKeys: [], previous: { lastCopiedAt: '', sites: {}, overlapKeys: [] } }),
+      JSON.stringify(junk));
+
+    // ① 周一全站复制 → 周三只勾 Steam 复制 → 周四不勾站点复制：Imdb 周一到周三的条目必须还在
+    const mon = T('1T10:00');
+    const lib1 = [row('st-a', 'steam', { savedAt: T('2T10:00') }), row('tt-a', 'imdb', { savedAt: T('2T10:00') })];
+    const steamRows = Lark.buildTableRows(lib1, { since: mon, sources: ['steam'] });
+    const afterSteam = Lark.nextExportState({ lastCopiedAt: mon },
+      { dramas: lib1, rows: steamRows, sites: ['steam'], copiedAt: T('3T10:00') });
+    check('W6a 只勾部分站点：全局水位线不推进、只记所选站点',
+      afterSteam.lastCopiedAt === mon && deepEq(afterSteam.sites, { steam: T('3T10:00') }), JSON.stringify(afterSteam));
+    const lib2 = [row('st-b', 'steam', { savedAt: T('4T09:00') }), ...lib1];
+    const fullRows = Lark.buildTableRows(lib2, { since: afterSteam.lastCopiedAt, sinceBySource: afterSteam.sites,
+      excludeKeys: afterSteam.overlapKeys });
+    check('W6b 随后全站复制：其余站点的区间条目仍导出，Steam 已复制的不重导',
+      keysOf(fullRows) === 'st-b,tt-a', keysOf(fullRows));
+    const afterFull = Lark.nextExportState(afterSteam, { dramas: lib2, rows: fullRows, sites: [], copiedAt: T('4T10:00') });
+    check('W7 全站复制推进全局水位线并清空分站水位线',
+      afterFull.lastCopiedAt === T('4T10:00') && deepEq(afterFull.sites, {}), JSON.stringify(afterFull));
+    check('W7b exportSinceFor：分站优先、退回全局',
+      Lark.exportSinceFor(afterSteam, 'steam') === T('3T10:00') && Lark.exportSinceFor(afterSteam, 'imdb') === mon
+      && Lark.exportSinceFor(afterSteam, 'constructor') === mon, '');
+
+    // 重叠窗口：水位线（已退安全余量）之后入库、本批已导出的条目记进 overlapKeys；
+    // 没进快照的同窗口条目不记，下次照常导出
+    const wm = T('5T09:58');
+    const inWindow = row('st-w', 'steam', { savedAt: T('5T09:59') });
+    const beforeWindow = row('tt-w', 'imdb', { savedAt: T('5T09:00') });
+    const lib3 = [inWindow, beforeWindow];
+    const batch3 = Lark.buildTableRows(lib3, {});
+    const after3 = Lark.nextExportState({}, { dramas: lib3, rows: batch3, sites: [], copiedAt: wm });
+    check('W8a 余量窗口里已导出的条目记进 overlapKeys，窗口外的不记', deepEq(after3.overlapKeys, ['st-w']),
+      JSON.stringify(after3.overlapKeys));
+    const lateArrival = row('st-late2', 'steam', { savedAt: T('5T09:59') }); // 快照之后才落库
+    const next3 = Lark.buildTableRows([lateArrival, ...lib3], { since: after3.lastCopiedAt,
+      sinceBySource: after3.sites, excludeKeys: after3.overlapKeys });
+    check('W8b 下一次增量：重叠条目不重导、快照之后才落库的照常导出', keysOf(next3) === 'st-late2', keysOf(next3));
+
+    // 部分复制不许冲掉其它站点留下的重叠记录
+    const after3b = Lark.nextExportState(after3, { dramas: [...lib3, row('tt-n', 'imdb', { savedAt: T('5T10:30') })],
+      rows: [row('tt-n', 'imdb', { savedAt: T('5T10:30') })], sites: ['imdb'], copiedAt: T('5T10:28') });
+    check('W8c 只复制 Imdb 时，Steam 的重叠记录保留', deepEq([...after3b.overlapKeys].sort(), ['st-w', 'tt-n']),
+      JSON.stringify(after3b.overlapKeys));
+
+    // 撤销：previous 恰好能让下一次留空日期的复制重来上一批
+    const replay = (state, dramas, sites) => Lark.buildTableRows(dramas, { since: state.lastCopiedAt,
+      sinceBySource: state.sites, excludeKeys: state.overlapKeys, sources: sites });
+    const lib4 = [row('st-u', 'steam', { savedAt: T('6T09:00') }), row('tt-u', 'imdb', { savedAt: T('6T09:00') }),
+      row('st-v', 'steam', { savedAt: T('6T11:00') })];
+    const base4 = { lastCopiedAt: T('6T08:00'), sites: { steam: T('6T10:00') }, overlapKeys: [] };
+    for (const [label, sites, since] of [['全站留空日期', [], ''], ['部分站点留空日期', ['steam'], ''],
+      ['全站显式日期', [], T('6T00:00')], ['部分站点显式日期', ['steam'], T('6T00:00')]]) {
+      const batch = since ? Lark.buildTableRows(lib4, { since, sources: sites }) : replay(base4, lib4, sites);
+      const after = Lark.nextExportState(base4, { dramas: lib4, rows: batch, sites, copiedAt: T('6T12:00'), since });
+      const again = replay(after.previous, lib4, sites);
+      check(`W9 撤销后重来＝上一批（${label}）`, batch.length > 0 && keysOf(again) === keysOf(batch),
+        `batch=${keysOf(batch)} again=${keysOf(again)}`);
+    }
+
+    // ③ 设置页口径端到端：水位线取在读库之前再退余量，读库那一刻正在落库的卡不会被挡在外面
+    const clickAt = Date.parse(T('7T10:00'));
+    const copiedAt = new Date(clickAt - 2 * 60 * 1000).toISOString();
+    const racing = row('st-race', 'steam', { scrapedAt: T('7T09:59'), savedAt: new Date(clickAt + 200).toISOString() });
+    const snapshot = [row('tt-s', 'imdb', { savedAt: T('7T09:00') })]; // racing 不在快照里
+    const after7 = Lark.nextExportState({}, { dramas: snapshot, rows: Lark.buildTableRows(snapshot, {}), sites: [], copiedAt });
+    check('W10 读库时正在落库的卡下次照常导出（比较 savedAt、水位线早于读库）',
+      keysOf(replay(after7, [racing, ...snapshot], [])) === 'st-race', JSON.stringify(after7));
+  }
+}
+
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

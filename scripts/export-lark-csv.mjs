@@ -9,13 +9,16 @@
 //
 // 用法：
 //   npm run export-lark                          全量
-//   npm run export-lark -- --since=2026-09-01    只导该日本地 0 点起抓到的（同设置页日期框）
+//   npm run export-lark -- --since=2026-09-01    只导该日本地 0 点起入库的（同设置页日期框）
 //   npm run export-lark -- --source=imdb --source=steam
 //   npm run export-lark -- --chunk=1000          每 1000 条切一个文件
 //   npm run export-lark -- --format=tsv          产 TSV（粘贴用；日常增量建议走设置页按钮）
 //   npm run export-lark -- --input=<path> --outDir=<dir>
 //
 // 表头固定中文（2026-09-12 用户定），不提供切换；TSV 按粘贴追加语义不带表头。
+// --since 与设置页增量复制同一比较口径：入库时间 savedAt 优先、旧条目退回 scrapedAt
+// （Lark.exportStamp，由 buildTableRows 统一套用）。scrapedAt 是提取列表时写的，早于入库，
+// 按它切会漏掉窗口边上的卡；「导入恢复」补回的条目不写 savedAt，仍按原抓取时间落窗口。
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -130,6 +133,9 @@ function main() {
   }
   console.log(`封面：${rows.length - stuck.length - noPoster.length} 条可转附件、${noPoster.length} 条无封面、${stuck.length} 条链接含逗号或百分号编码转不了（站点数据本身的形态）`);
   if (stuck.length) stuck.slice(0, 5).forEach(row => console.log(`    [${row.source}] ${row.title}`));
+  // 与设置页复制后的提示同口径：导出后译文才到的行不会自动补进 Base
+  const untranslated = rows.filter(row => row.status !== 'trans').length;
+  if (untranslated) console.log(`翻译：其中 ${untranslated} 条尚未翻译完（中文列为空或不全），译文完成后不会自动补发`);
 }
 
 try {

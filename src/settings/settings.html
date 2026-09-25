@@ -842,12 +842,12 @@
           <div class="section-header">
             <div>
               <div class="section-title"><span>📤</span> 导出到多维表格</div>
-              <p class="help-text">把增量复制成表格格式，切到多维表格里选中表末第一个空行的首个单元格，按 <code>Ctrl+V</code> 直接追加。复制的是<strong>纯数据行、不含表头</strong>，列序与 <code>npm run export-lark</code> 导入建表时完全一致，封面链接已改写成官方「链接转附件」捷径能解析的形态。<br>存量首次灌表走 <code>npm run export-lark</code> 导出文件再导入——条数太多不适合走剪贴板。</p>
+              <p class="help-text">把增量复制成表格格式，切到多维表格里选中表末第一个空行的首个单元格，按 <code>Ctrl+V</code> 直接追加。复制的是<strong>纯数据行、不含表头</strong>，列序与 <code>npm run export-lark</code> 导入建表时完全一致，封面链接已改写成官方「链接转附件」捷径能解析的形态。<br>增量按<strong>入库时间</strong>计（「导入恢复」补回的条目按原抓取时间，不当新条目重导）：只勾部分站点复制时，各站分别记住自己的上次复制时间，没勾的站点不受影响；复制时还没翻译完的条目照常导出（中文列为空或不全），译文完成后<strong>不会</strong>自动补发。<br>存量首次灌表走 <code>npm run export-lark</code> 导出文件再导入——条数太多不适合走剪贴板。</p>
             </div>
           </div>
           <div id="larkExportSiteList" class="grid" style="margin-top: 12px;"></div>
           <div class="form-field" style="margin-top: 12px; max-width: 320px;">
-            <label for="larkExportSinceDate">只导出晚于此日期的条目（留空＝自上次复制以来）</label>
+            <label for="larkExportSinceDate">只导出此日期起入库的条目（留空＝各站自上次复制以来）</label>
             <input type="date" id="larkExportSinceDate">
           </div>
           <div class="actions">

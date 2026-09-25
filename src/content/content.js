@@ -95,11 +95,51 @@
   }
 
   /**
+   * 内容脚本里所有直连 fetch 的唯一入口：默认 25 秒期限，**正文也算在期限内**。
+   * 抓取走后台串行队列，后台等 'scrape' 回复又不设期限：一个响应回了头、正文却迟迟
+   * 不发完，response.text() 永不 resolve，整条抓取队列就跟着堵死、后台标签页也关不掉
+   * （审查 no-fetch-timeout-hangs-scrape-queue）。所以只给 fetch() 本身计时不够——
+   * 这里在期限内把正文读成文本，再让返回的 response 的 text()/json() 直接交出这份缓存，
+   * 调用方原有写法（ok/status/url + text()/json()）一行不用改。
+   * 超时即 abort 底层请求并抛出带地址的中文错误，由各调用方的 catch 按「本轮取不到」收口。
+   * 期限用 Promise.race 兜底：底层即使不理会 abort 信号，也保证按时返回。
+   */
+  const FETCH_TIMEOUT_MS = 25000;
+
+  async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+    const controller = new AbortController();
+    let timer = null;
+    const expired = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error(`请求超时（${timeoutMs / 1000} 秒内未读完响应）: ${url}`);
+        error.name = 'TimeoutError';
+        controller.abort(error);
+        reject(error);
+      }, timeoutMs);
+    });
+    const request = (async () => {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      // 标准 Response 都有 text()；没有的（非标准对象）原样交回
+      if (response && typeof response.text === 'function') {
+        const body = await response.text();
+        response.text = async () => body;
+        response.json = async () => JSON.parse(body);
+      }
+      return response;
+    })();
+    try {
+      return await Promise.race([request, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * 取单个 appId 的 appdetails 数据（指定语言）。失败/无数据返回 null。
    */
   async function fetchSteamAppDetails(appId, lang) {
     const api = `https://store.steampowered.com/api/appdetails?appids=${appId}&l=${lang}&cc=us`;
-    const response = await fetch(api, { headers: { 'Accept': 'application/json' } });
+    const response = await fetchWithTimeout(api, { headers: { 'Accept': 'application/json' } });
     if (!response.ok) return null;
     const json = await response.json();
     const entry = json && json[appId];
@@ -184,7 +224,7 @@
         return [];
       }
       try {
-        const resp = await fetch(queryUrl, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
+        const resp = await fetchWithTimeout(queryUrl, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
         if (!resp.ok) return [];
         const json = await resp.json();
         const appids = Array.isArray(json.appids) ? json.appids : [];
@@ -254,7 +294,8 @@
       if (window.location.hostname === 'fandom.my-drama.com') {
         return getFandomListItems();
       }
-      return await waitForMyDramaItems(getMyDramaSectionId());
+      const sectionId = getMyDramaSectionId();
+      return sectionId ? await waitForMyDramaItems(sectionId) : [];
     },
     extractId(item) {
       const link = item.matches('a[href]') ? item : item.querySelector('.wp-block-post-title a, a[href]');
@@ -1178,7 +1219,7 @@
     if (!drama.url) return drama;
 
     try {
-      const response = await fetch(drama.url, {
+      const response = await fetchWithTimeout(drama.url, {
         headers: { 'Accept': 'text/html' }
       });
 
@@ -1208,7 +1249,9 @@
    */
   async function waitForMyDramaItems(sectionId) {
     const query = () => Array.from(
-      document.querySelectorAll(`#${sectionId} [data-testid="series-section-item"]`)
+      // 锚点 id 来自订阅 URL：数字开头的（如 ?list=7days）直拼成 #7days 是非法选择器，
+      // querySelectorAll 会抛 SyntaxError 让整页抓取失败，须转义
+      document.querySelectorAll(`#${CSS.escape(sectionId)} [data-testid="series-section-item"]`)
     );
     let last = -1;
     for (let i = 0; i < 16; i++) {
@@ -1222,12 +1265,12 @@
 
   /**
    * 主站订阅 URL 用约定参数 ?list=<板块锚点id> 选板块（同 fandom ?list=trending
-   * 范式）；无参数或非法值默认「最流行」。锚点 id 语言无关，新板块无需改代码，
-   * 订阅 URL 带上对应锚点即可（如 ?list=best_choices）。
+   * 范式）；无参数默认「最流行」，参数值归一后为空返回 null（调用方跳过本页，见
+   * readListParam）。锚点 id 语言无关，新板块无需改代码，订阅 URL 带上对应锚点即可
+   * （如 ?list=best_choices）。
    */
   function getMyDramaSectionId() {
-    const list = new URLSearchParams(window.location.search).get('list') || '';
-    return /^[a-z0-9_-]+$/.test(list) ? list : 'most_trending';
+    return readListParam('most_trending');
   }
 
   /**
@@ -1339,7 +1382,7 @@
       // 页面 CORS 拦，跨源改经后台代理取 HTML；同源保持直连（v1.5.5）
       let html;
       if (new URL(drama.url, window.location.href).origin === window.location.origin) {
-        const response = await fetch(drama.url, {
+        const response = await fetchWithTimeout(drama.url, {
           headers: { 'Accept': 'text/html' }
         });
 
@@ -1400,10 +1443,17 @@
   /**
    * fandom 子域（WordPress SSR，无需等待渲染）按订阅 URL 分流两个数据源：
    * ?list=trending → 全站导航菜单 Most Trending 子菜单（约束参数，WP 忽略它照常渲染）；
-   * 无参数 → 首页文章流。
+   * 无参数 → 首页文章流；其它 ?list= 值 → 空数组。按参数值精确比对：以前的正则
+   * /[?&]list=trending/ 连 ?list=trending_now 也会命中，别的值又悄悄退回文章流。
    */
   function getFandomListItems() {
-    if (/[?&]list=trending/.test(window.location.search)) {
+    const list = readListParam('');
+    if (list === null) return [];
+    if (list && list !== 'trending') {
+      console.warn(`[ShortScraping] My Drama fandom 不认识的 ?list= 板块: ${list}，本页跳过`);
+      return [];
+    }
+    if (list === 'trending') {
       // 导航有多个下拉（Most Trending / Reviews …），按菜单名定位、第一个下拉兜底
       const submenus = Array.from(document.querySelectorAll('#modal-2-content .wp-block-navigation-submenu'));
       const trendingMenu = submenus.find(li => {
@@ -1461,7 +1511,7 @@
     if (!drama.url) return drama;
 
     try {
-      const response = await fetch(drama.url, {
+      const response = await fetchWithTimeout(drama.url, {
         headers: { 'Accept': 'text/html' }
       });
 
@@ -1620,7 +1670,7 @@
 
     try {
       const detailUrl = drama.url.replace('/full-episodes/', '/movie/');
-      const response = await fetch(detailUrl, {
+      const response = await fetchWithTimeout(detailUrl, {
         headers: { 'Accept': 'text/html' }
       });
 
@@ -1717,7 +1767,7 @@
     if (!drama.url) return drama;
 
     try {
-      const response = await fetch(drama.url, {
+      const response = await fetchWithTimeout(drama.url, {
         headers: { 'Accept': 'text/html' }
       });
 
@@ -1738,7 +1788,7 @@
         const movieUrl = u.toString();
         drama.url = movieUrl.replace('/movie/', '/full-episodes/');
         try {
-          const movieResp = await fetch(movieUrl, { headers: { 'Accept': 'text/html' } });
+          const movieResp = await fetchWithTimeout(movieUrl, { headers: { 'Accept': 'text/html' } });
           if (movieResp.ok) {
             const movieDoc = parser.parseFromString(await movieResp.text(), 'text/html');
             const movieDetail = readNextData(movieDoc)?.props?.pageProps?.data;
@@ -1788,7 +1838,8 @@
   /**
    * DramaShorts 列表数据：/top-movies 直取 pageProps.movies；首页按 ?list=<板块id>
    * 从 pageProps.discover 选板块（板块项形如 {id, type, data: {title, movies}}），
-   * 无参数或非法值默认 top_trending。定位失败返回空数组（scrapePage 安全跳过）。
+   * 无参数默认 top_trending，参数值归一后为空或对不上板块 id 都返回空数组
+   * （readListParam，不退回默认板块）。定位失败返回空数组（scrapePage 安全跳过）。
    */
   function getDramashortsMovies() {
     const pageProps = readNextData()?.props?.pageProps;
@@ -1799,10 +1850,11 @@
     if (window.location.pathname.replace(/\/+$/, '') === '/top-movies') {
       return Array.isArray(pageProps.movies) ? pageProps.movies : [];
     }
-    const list = new URLSearchParams(window.location.search).get('list') || '';
-    const sectionId = /^[a-z0-9_-]+$/.test(list) ? list : 'top_trending';
+    const sectionId = readListParam('top_trending');
+    if (!sectionId) return [];
     const sections = Array.isArray(pageProps.discover) ? pageProps.discover : [];
-    const section = sections.find(s => s && s.id === sectionId);
+    // 板块 id 同样归一后再比，与参数一侧对称（id 里若有连字符也不会失配）
+    const section = sections.find(s => s && normalizeSectionName(s.id) === sectionId);
     const movies = section && section.data ? section.data.movies : null;
     if (!Array.isArray(movies)) {
       console.log(`[ShortScraping] DramaShorts 首页板块未找到: ${sectionId}`);
@@ -1903,8 +1955,8 @@
 
   /**
    * NetShort 列表数据：flight 里的 videoListGroup 板块按名字归一化后与 ?list=
-   * 参数比对（板块无 id 可用），无参数或非法值默认 trending_now。
-   * 定位失败返回空数组（scrapePage 安全跳过）。
+   * 参数比对（板块无 id 可用），无参数默认 trending_now；参数值非法不退回默认
+   * （readListParam）。定位失败返回空数组（scrapePage 安全跳过）。
    */
   function getNetshortItems() {
     const flight = readNextFlight();
@@ -1913,8 +1965,8 @@
       console.log('[ShortScraping] NetShort flight 板块数据未找到');
       return [];
     }
-    const list = new URLSearchParams(window.location.search).get('list') || '';
-    const wanted = /^[a-z0-9_-]+$/.test(list) ? list : 'trending_now';
+    const wanted = readListParam('trending_now');
+    if (!wanted) return [];
     const group = groups.find(g => g && normalizeSectionName(g.groupName) === wanted);
     if (!group || !Array.isArray(group.data)) {
       console.log(`[ShortScraping] NetShort 首页板块未找到: ${wanted}`);
@@ -1959,6 +2011,27 @@
    */
   function normalizeSectionName(name) {
     return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  }
+
+  /**
+   * 订阅 URL 的 ?list= 板块参数（各首页板块类适配器共用，PinesDramas 原有写法的推广）：
+   * 没有参数 → defaultName；有参数 → normalizeSectionName 归一后返回，归一后为空 → null，
+   * 调用方见 null 直接返回空数组。归一后的名字与站点板块对不上，由各适配器自己的板块
+   * 查找返回空数组（「板块未找到」），同样不退回默认板块。
+   * 以前是 `/^[a-z0-9_-]+$/.test(list) ? list : 默认板块`：订阅值写错一个大写字母或空格，
+   * 就悄悄抓默认板块，却按这条订阅的标签与 sourceListUrl 入库、推送
+   * （审查 list-param-silent-default-fallback）。
+   */
+  function readListParam(defaultName) {
+    const params = new URLSearchParams(window.location.search || '');
+    if (!params.has('list')) return defaultName;
+    const raw = params.get('list');
+    const wanted = normalizeSectionName(raw);
+    if (!wanted) {
+      console.warn(`[ShortScraping] ?list= 参数值无法识别: ${JSON.stringify(raw)}，不退回默认板块，本页跳过`);
+      return null;
+    }
+    return wanted;
   }
 
   /**
@@ -2064,7 +2137,7 @@
   /**
    * FlickReels 首页板块数据。板块数组按**形状**定位——元素带 column_config + playlet_list——
    * 而不写死 useAsyncData 的键名 'home-playletList'（键名是站点代码里的变量名，改版首当其冲）。
-   * 板块按标题归一化后与 ?list= 比对，无参数或非法值默认 hot_picks。
+   * 板块按标题归一化后与 ?list= 比对，无参数默认 hot_picks；参数值非法不退回默认（readListParam）。
    * is_playlet_trailer 的条目是「未上线预告」（站内点击只弹 "Not released yet"、没有播放页），
    * 这里直接滤掉（2026-09-16 用户定）——上线后该位翻成 false，下轮抓取自然入库，不留残卡。
    * 定位失败返回空数组（scrapePage 安全跳过）。
@@ -2082,8 +2155,8 @@
       console.log('[ShortScraping] FlickReels 首页板块数据未找到');
       return [];
     }
-    const list = new URLSearchParams(window.location.search).get('list') || '';
-    const wanted = /^[a-z0-9_-]+$/.test(list) ? list : 'hot_picks';
+    const wanted = readListParam('hot_picks');
+    if (!wanted) return [];
     const section = sections.find(s => isSection(s) && normalizeSectionName(s.column_config.title) === wanted);
     if (!section) {
       console.log(`[ShortScraping] FlickReels 首页板块未找到: ${wanted}`);
@@ -2165,7 +2238,7 @@
    */
   async function fetchServerHtml(url = window.location.href) {
     try {
-      const response = await fetch(url, { headers: { 'Accept': 'text/html' } });
+      const response = await fetchWithTimeout(url, { headers: { 'Accept': 'text/html' } });
       if (!response.ok) {
         console.warn(`[ShortScraping] 取服务端 HTML 失败 HTTP ${response.status}: ${url}`);
         return null;
@@ -2300,7 +2373,7 @@
    */
   async function readShorticalCanonicalSlugs() {
     try {
-      const response = await fetch('/sitemaps/series.xml', { headers: { 'Accept': 'application/xml' } });
+      const response = await fetchWithTimeout('/sitemaps/series.xml', { headers: { 'Accept': 'application/xml' } });
       if (!response.ok) {
         console.log(`[ShortScraping] Shortical sitemap HTTP ${response.status}`);
         return null;
@@ -2338,8 +2411,8 @@
    * 规范 slug 查不到的卡跳过、下轮重试（同 FlickReels「造不出 slug 就跳过该条」）。
    */
   async function getShorticalItems() {
-    const list = new URLSearchParams(window.location.search).get('list') || '';
-    const wanted = /^[a-z0-9_-]+$/.test(list) ? list : 'top_recommended';
+    const wanted = readListParam('top_recommended');
+    if (!wanted) return [];
 
     const section = await waitForShorticalSection(wanted);
     if (!section) {
@@ -2435,7 +2508,7 @@
         console.log('[ShortScraping] Shortical 未取到接口凭据，genres 用卡片上的单个分类');
         return;
       }
-      const response = await fetch('https://prod.shortical.com/api/v1/series/top-recommendations', {
+      const response = await fetchWithTimeout('https://prod.shortical.com/api/v1/series/top-recommendations', {
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
       });
       if (!response.ok) {
@@ -2554,15 +2627,18 @@
 
   /**
    * ShortMax 首页板块条目：重取服务端 HTML 解析（实时 DOM 的轮播按视口裁剪）。
-   * 板块按 ?list=<板块名归一化> 选（'Most Popular 🔥' → most_popular，缺省即它）。
+   * 板块按 ?list=<板块名归一化> 选（'Most Popular 🔥' → most_popular，缺省即它；
+   * 参数值非法不退回默认，见 readListParam）。
    */
   async function getShortmaxHomeItems() {
+    // 先判参数再重取：参数非法时连请求都不发
+    const wanted = readListParam('most_popular');
+    if (!wanted) return [];
+
     const html = await fetchServerHtml();
     const doc = html ? parseHtmlDocument(html) : null;
     if (!doc) return [];
 
-    const list = new URLSearchParams(window.location.search).get('list') || '';
-    const wanted = /^[a-z0-9_-]+$/.test(list) ? list : 'most_popular';
     const section = Array.from(doc.querySelectorAll('section.section'))
       .find(s => normalizeSectionName((s.querySelector('.section-title') || {}).textContent) === wanted);
     if (!section) {
@@ -2882,14 +2958,14 @@
     return '';
   }
 
-  /** 订阅 URL 的 ?list= 选板块；无参数时按页面给缺省值（/novels → 推荐，首页 → 热门小说）。 */
+  /**
+   * 订阅 URL 的 ?list= 选板块；无参数时按页面给缺省值（/novels → 推荐，首页 → 热门小说）。
+   * 参数值归一后为空返回 null（readListParam），调用方跳过本页。
+   */
   function pinedramaWantedSection() {
-    const params = new URLSearchParams(window.location.search || '');
-    const wanted = normalizeSectionName(params.get('list') || '');
-    if (wanted) return wanted;
-    return /^\/novels\/?$/.test(window.location.pathname)
+    return readListParam(/^\/novels\/?$/.test(window.location.pathname)
       ? 'recommended_webnovels_for_you'
-      : 'popular_novels';
+      : 'popular_novels');
   }
 
   /**
@@ -2900,6 +2976,7 @@
    */
   function getPinedramaItems() {
     const wanted = pinedramaWantedSection();
+    if (!wanted) return [];
     const section = pinedramaSectionElement(document, wanted);
     if (!section) return [];
 
@@ -3338,7 +3415,7 @@
     if (!drama.url) return drama;
 
     try {
-      const response = await fetch(drama.url, {
+      const response = await fetchWithTimeout(drama.url, {
         headers: { 'Accept': 'text/html' }
       });
 

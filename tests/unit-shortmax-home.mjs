@@ -272,6 +272,25 @@ const homeDocs = (overrides = {}) => ({
   const { saved, response } = await runScenario({ docs: { [HOME]: homeDoc([homeSection('Dragon Clan', CARDS.map(dramaCard))]) } });
   check('L3 板块找不到 → 零入库且不报错', response?.success === true && saved.length === 0, show(saved.length));
 }
+{
+  // 审查 list-param-silent-default-fallback：大小写/空格写法以前正则不过、悄悄抓 most_popular
+  const href = `${ORIGIN}/?list=War%20God`;
+  const { saved } = await runScenario({
+    href,
+    subscriptions: [{ urlPattern: href, tags: ['ShortMax', 'WarGod'] }],
+    docs: { [href]: defaultHome(), [`${ORIGIN}/drama/other-section-31462`]: detailDoc({ description: 'war' }) }
+  });
+  check('L4 ?list=War%20God 归一后命中 War God 板块，不退回 most_popular',
+    eq(saved.map(d => d.itemId), ['sm31462']), show(saved.map(d => d.itemId)));
+}
+{
+  const href = `${ORIGIN}/?list=%F0%9F%94%A5`;
+  const { saved, response, fetchCalls } = await runScenario({
+    href, subscriptions: [{ urlPattern: href, tags: ['ShortMax', 'Pop'] }], docs: homeDocs({ [href]: defaultHome() })
+  });
+  check('L5 ?list= 归一后为空（纯 emoji）→ 零入库、连首页都不重取，不退回 most_popular',
+    response?.success === true && saved.length === 0 && fetchCalls.length === 0, show([saved.map(d => d.itemId), fetchCalls]));
+}
 
 // ---------- K /fandom：映射回主站去重 ----------
 const FANDOM_SLUG = 'sss-rank-full-guide-628';
