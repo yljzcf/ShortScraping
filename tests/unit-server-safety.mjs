@@ -102,6 +102,13 @@ try {
   fs.writeFileSync(tagFile, JSON.stringify([{ url: 'bad', tags: ['x'] }, ...tags]));
   assert.equal((await post('/sync', { dramas: [card('tt1')] })).body.count, 1);
   assert.equal(fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8'), snapshot);
+  // A hand-edited tag.json saved as "UTF-8 with BOM" (PowerShell 5.1, Notepad) reads fine in the
+  // extension (fetch().json() strips the BOM), so the server must accept it too instead of 500 forever.
+  fs.writeFileSync(tagFile, '\uFEFF' + JSON.stringify(tags, null, 2));
+  const bomSync = await post('/sync', { dramas: [card('tt1'), card('tt2')] });
+  assert.equal(bomSync.status, 200, JSON.stringify(bomSync.body));
+  assert.equal(bomSync.body.count, 2);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8')).dramas.length, 2);
   // A missing file means "no subscriptions saved yet", not an error that blocks every push.
   fs.unlinkSync(tagFile);
   const missing = await post('/sync', { dramas: [card('tt1')] });

@@ -90,7 +90,7 @@ const resetDramasCache = async () => {
   failNextSet = false;
 };
 // 种入条数（条数断言一律由它推导，加夹具时不必再逐处改数字）
-const SEEDED = 11;
+const SEEDED = 12;
 const seedLegacy = async () => {
   await resetDramasCache();
   rawStore.dramas = [
@@ -120,7 +120,11 @@ const seedLegacy = async () => {
       tags: ['T'], source: 'royalroad', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB },
     { id: 'id-11', itemId: 'ns2092788755268141057', title: 'Top Chef', description: 'en desc',
       titleZh: '顶级\uFFFD\uFFFD\uFFFD会主厨', descriptionZh: '中文简介',
-      tags: ['T'], source: 'netshort', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB }
+      tags: ['T'], source: 'netshort', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB },
+    // 同一缺陷写坏的是原文（英文简介的 ’、中文标签）：原文无从重建，迁移不得清空，译文完好也不退回
+    { id: 'id-12', itemId: 'ns2092788755268141058', title: 'Caf\uFFFD Love', description: 'She didn\uFFFD\uFFFDt know',
+      titleZh: '咖啡之恋', descriptionZh: '她并不知道', tags: ['T', '视觉\uFFFD\uFFFD'],
+      source: 'netshort', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB }
   ];
   delete rawStore.legacyDramaMigrated;
   delete rawStore.rsEpisodeUrlMigrated;
@@ -183,6 +187,11 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
     JSON.stringify(byId['id-11']));
   check('T1r garbledTranslationReset 已置位', rawStore.garbledTranslationReset === true,
     String(rawStore.garbledTranslationReset));
+  check('T1s 原文/标签含乱码而译文完好 → 原样保留（不清空原文、不退回 new）',
+    byId['id-12']?.status === 'trans' && byId['id-12']?.title === 'Caf\uFFFD Love'
+    && byId['id-12']?.description === 'She didn\uFFFD\uFFFDt know' && byId['id-12']?.titleZh === '咖啡之恋'
+    && JSON.stringify(byId['id-12']?.tags) === JSON.stringify(['T', '视觉\uFFFD\uFFFD']),
+    JSON.stringify(byId['id-12']));
 }
 
 // ---------- T2 二次唤醒：dramas 全表读恰 1 次（仅 prune，不可标记项） ----------

@@ -9,7 +9,7 @@
 //
 // 用法：
 //   npm run export-lark                          全量
-//   npm run export-lark -- --since=2026-09-01    只导该日之后抓到的
+//   npm run export-lark -- --since=2026-09-01    只导该日本地 0 点起抓到的（同设置页日期框）
 //   npm run export-lark -- --source=imdb --source=steam
 //   npm run export-lark -- --chunk=1000          每 1000 条切一个文件
 //   npm run export-lark -- --format=tsv          产 TSV（粘贴用；日常增量建议走设置页按钮）
@@ -19,12 +19,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const Lark = require('../src/shared/lark.js');
 const SiteRegistry = require('../src/shared/site-registry.js');
 
-const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+// 不用 URL.pathname：它保留百分号编码，项目路径含空格或中文时默认输入/输出全指错
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function parseArgs(argv) {
   const options = { sources: [], format: 'csv', chunk: 0, since: '', input: '', outDir: '' };
@@ -52,12 +54,21 @@ function parseArgs(argv) {
     throw new Error(`未知站点：${unknown.join(', ')}（可选：${SiteRegistry.CATEGORY_SOURCES.join(', ')}）`);
   }
 
-  // 日期只认 YYYY-MM-DD（按 UTC 零点）或带时区的完整 ISO-8601。刻意不退回裸
-  // Date.parse：它认 `2026/09/05` 与无偏移的 `2026-09-05T01:00:00`，却按宿主时区
-  // 解释再固化，同一条命令在不同机器上切出不同的窗口（与 TimelineCsv 导入校验同款戒律）
+  // 日期只认 YYYY-MM-DD 或带时区的完整 ISO-8601。纯日期按本地 0 点展开，与设置页
+  // 「导出到多维表格」的日期框同一表达式（settings.js handleLarkExportCopy），同一个日期
+  // 两条导出路径切出同一窗口；要跨机器固定窗口就写带偏移的 ISO。刻意不退回裸
+  // Date.parse：它认 `2026/09/05` 与无偏移的 `2026-09-05T01:00:00`，形态含糊还静默放行
+  // （与 TimelineCsv 导入校验同款戒律）
   if (options.since) {
     if (/^\d{4}-\d{2}-\d{2}$/.test(options.since)) {
-      options.since = `${options.since}T00:00:00.000Z`;
+      const [year, month, day] = options.since.split('-').map(Number);
+      const local = new Date(`${options.since}T00:00:00`);
+      // V8 会把 2026-02-30 顺延成 3/2，日期框产不出这种值，这里按拼错拒绝而不是悄悄挪窗口
+      if (Number.isNaN(local.getTime()) || local.getFullYear() !== year
+        || local.getMonth() !== month - 1 || local.getDate() !== day) {
+        throw new Error(`--since 不是有效日期：${options.since}`);
+      }
+      options.since = local.toISOString();
     } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})$/.test(options.since)
       && !Number.isNaN(Date.parse(options.since))) {
       options.since = new Date(options.since).toISOString();

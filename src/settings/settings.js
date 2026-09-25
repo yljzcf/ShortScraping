@@ -1200,7 +1200,11 @@
       showStatus(`导入失败：${resp?.error || '后台无响应'}`, false);
       return;
     }
-    showStatus(`导入完成：新增 ${resp.added} 条；跳过重复 ${resp.duplicates} 条、订阅范围外 ${resp.outOfScope} 条、无效 ${resp.invalid} 条`, true);
+    // 原文乱码无法自动修复，再抓取命中去重也不会覆盖已有条目，如实告知而不是许诺自愈
+    const garbledNote = resp.garbledSourceCount > 0
+      ? `；其中 ${resp.garbledSourceCount} 条原文含乱码字符（旧版同步服务导致），已原样导入，重新抓取不会覆盖`
+      : '';
+    showStatus(`导入完成：新增 ${resp.added} 条；跳过重复 ${resp.duplicates} 条、订阅范围外 ${resp.outOfScope} 条、无效 ${resp.invalid} 条${garbledNote}`, true);
   }
 
   function renderPruneSites() {

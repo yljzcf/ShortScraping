@@ -1,10 +1,12 @@
 import './bootstrap.cjs';
 // 回归测试：scripts/export-lark-csv.mjs 的参数解析与产物形态。
-// 全程在隔离 tmpdir 里跑（--input/--outDir 显式指向夹具），不读写用户的 db/。
+// 全程在隔离 tmpdir 里跑（--input/--outDir 显式指向夹具，P 组用复制出的隔离树），不读写用户的 db/。
 //
 // C1/C2 是本套件的存在理由：--since 曾退回裸 Date.parse，`2026/09/05` 与无偏移的
 // `2026-09-05T01:00:00` 都被静默接受、按宿主时区平移后固化，同一条命令在不同
 // 机器上切出不同的导出窗口（与 TimelineCsv 导入校验同款戒律）。
+// C3/C5 守的是另一头：纯日期曾按 UTC 零点切，设置页同一日期框按本地 0 点切，UTC+8 下
+// 两条导出路径差出 8 小时。涉及本地时区的用例一律经 env 固定 TZ，不依赖跑测试的机器。
 // 用法：node tests/unit-lark-export-cli.mjs
 import fs from 'node:fs';
 import os from 'node:os';
@@ -41,9 +43,9 @@ fs.writeFileSync(INPUT, JSON.stringify(FIXTURE));
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
 
-function run(args) {
-  const proc = spawnSync(process.execPath, [CLI, `--input=${INPUT}`, `--outDir=${OUT}`, ...args],
-    { encoding: 'utf8', windowsHide: true });
+function run(args, { env, cli = CLI, io = [`--input=${INPUT}`, `--outDir=${OUT}`], cwd } = {}) {
+  const proc = spawnSync(process.execPath, [cli, ...io, ...args],
+    { encoding: 'utf8', windowsHide: true, cwd, env: { ...process.env, ...env } });
   return { code: proc.status, out: `${proc.stdout}${proc.stderr}` };
 }
 const outFiles = () => (fs.existsSync(OUT) ? fs.readdirSync(OUT).sort() : []);
@@ -55,12 +57,29 @@ for (const [label, value] of [['C1 拒绝斜杠日期', '2026/09/05'], ['C2 拒�
   const r = run([`--since=${value}`]);
   check(label, r.code === 1 && r.out.includes('--since 只接受'), `code=${r.code} ${r.out.trim().slice(0, 90)}`);
 }
+// 与设置页 `new Date(`${d}T00:00:00`)` 同口径：本地 0 点，东西两侧时区各验一次
+for (const [tz, expected] of [['Asia/Shanghai', '2026-08-31T16:00:00.000Z'], ['UTC', '2026-09-01T00:00:00.000Z'],
+  ['America/Los_Angeles', '2026-09-01T07:00:00.000Z']]) {
+  reset();
+  const r = run(['--since=2026-09-01'], { env: { TZ: tz } });
+  check(`C3 YYYY-MM-DD 按本地零点展开（TZ=${tz}）`, r.code === 0 && r.out.includes(`晚于 ${expected}`), r.out.trim());
+}
 reset();
-let r = run(['--since=2026-09-01']);
-check('C3 YYYY-MM-DD 按 UTC 零点展开', r.code === 0 && r.out.includes('晚于 2026-09-01T00:00:00.000Z'), r.out.trim());
+let r = run(['--since=2026-09-11T00:00:00+08:00'], { env: { TZ: 'America/Los_Angeles' } });
+check('C4 带偏移的 ISO 折算为 UTC（不受宿主时区影响）', r.code === 0 && r.out.includes('晚于 2026-09-10T16:00:00.000Z'), r.out.trim());
+
+// 北京时间 9/1 04:00 抓到的条目：按本地 0 点切应算进 9/1，按 UTC 零点切会被漏掉
+const EDGE_INPUT = path.join(workDir, 'edge.json');
+fs.writeFileSync(EDGE_INPUT, JSON.stringify({ version: 1, dramas: [
+  { id: 'e1', itemId: 'tt0101', title: 'Dawn', source: 'imdb', status: 'trans', scrapedAt: '2026-08-31T20:00:00.000Z' },
+  { id: 'e2', itemId: 'tt0102', title: 'Dusk', source: 'imdb', status: 'trans', scrapedAt: '2026-08-31T12:00:00.000Z' }
+] }));
 reset();
-r = run(['--since=2026-09-11T00:00:00+08:00']);
-check('C4 带偏移的 ISO 折算为 UTC', r.code === 0 && r.out.includes('晚于 2026-09-10T16:00:00.000Z'), r.out.trim());
+r = run(['--since=2026-09-01'], { env: { TZ: 'Asia/Shanghai' }, io: [`--input=${EDGE_INPUT}`, `--outDir=${OUT}`] });
+check('C5 北京时间当日 0–8 点抓到的条目不再被漏掉', r.code === 0 && r.out.includes('导出 1 条'), r.out.trim().split('\n')[0]);
+reset();
+r = run(['--since=2026-02-30'], { env: { TZ: 'Asia/Shanghai' } });
+check('C6 日历上不存在的日期直接拒绝（不顺延到 3/2）', r.code === 1 && r.out.includes('不是有效日期'), r.out.trim().slice(0, 60));
 
 // ---------- F 组：过滤与产物 ----------
 reset();
@@ -126,6 +145,24 @@ check('O8 tsv 每行 15 格且行数＝记录数', text.split('\n').every(line =
 reset();
 r = run(['--input=' + path.join(workDir, 'nope.json')]);
 check('O10 输入缺失给出可操作提示', r.code === 1 && r.out.includes('npm run sync'), r.out.trim().slice(0, 80));
+
+// ---------- P 组：项目根按脚本位置推导 ----------
+// 曾用 URL.pathname 推项目根：路径里的空格/中文保留百分号编码，默认的 db/timeline.json 与
+// tmp/lark-export 全指到不存在的目录。这里复制出带空格和中文的隔离树，不传 --input/--outDir，
+// 并从别的目录启动，证明默认路径只跟脚本位置走
+const copyRoot = path.join(workDir, '短剧 工具', 'ShortScraping');
+for (const rel of ['scripts', 'src/shared', 'db']) fs.mkdirSync(path.join(copyRoot, rel), { recursive: true });
+fs.copyFileSync(CLI, path.join(copyRoot, 'scripts/export-lark-csv.mjs'));
+for (const file of fs.readdirSync(path.join(worktreeRoot, 'src/shared'))) {
+  fs.copyFileSync(path.join(worktreeRoot, 'src/shared', file), path.join(copyRoot, 'src/shared', file));
+}
+fs.writeFileSync(path.join(copyRoot, 'db/timeline.json'), JSON.stringify(FIXTURE));
+r = run([], { cli: path.join(copyRoot, 'scripts/export-lark-csv.mjs'), io: [], cwd: workDir });
+const copyOut = path.join(copyRoot, 'tmp/lark-export');
+files = fs.existsSync(copyOut) ? fs.readdirSync(copyOut) : [];
+check('P1 路径含空格与中文时默认输入/输出落在项目树内', r.code === 0 && r.out.includes('导出 4 条')
+  && files.length === 1 && /^lark-import-\d{8}\.csv$/.test(files[0])
+  && r.out.includes(path.join('tmp', 'lark-export', files[0])), `code=${r.code} files=${files.join(',')} ${r.out.trim().slice(0, 120)}`);
 
 fs.rmSync(workDir, { recursive: true, force: true });
 

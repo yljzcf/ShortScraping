@@ -7,6 +7,10 @@ import { freePort } from './free-port.mjs';
 // 同时消失。现在覆盖前留痕：当天第一次改写留一份「改写前」的每日档；条数骤降时
 // 额外留一份 drop 档并把既有的空推送警告升级为指明备份路径。
 //
+// 之后补充：落盘失败时内存签名不先行（否则重推同内容被跳过、磁盘停在旧版本）、
+// 先写 json 快照再写 CSV（CSV 被锁不冻结共享页）、同一源状态的 drop 档不重复留、
+// CSV 落后于快照时重启后首次推送照样补写。
+//
 // 隔离方式沿用 unit-c6-sync：sync-server.js + src/shared 复制到 os.tmpdir() 隔离树，
 // 随机端口子进程——全程不触碰真实 31919 与真实 db/（2026-07-15 事故预防纪律）。
 // 用法：node tests/unit-sync-backup.mjs
@@ -35,14 +39,27 @@ const jsonPath = path.join(tmpRoot, 'db/timeline.json');
 const historyDir = path.join(tmpRoot, 'db/history');
 
 let serverOut = '';
-const child = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
-  cwd: tmpRoot,
-  env: { ...process.env, PORT: String(PORT) },
-  windowsHide: true,
-  stdio: ['ignore', 'pipe', 'pipe']
-});
-child.stdout.on('data', (d) => { serverOut += d.toString(); });
-child.stderr.on('data', (d) => { serverOut += d.toString(); });
+function startServer() {
+  const proc = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
+    cwd: tmpRoot,
+    env: { ...process.env, PORT: String(PORT) },
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  proc.stdout.on('data', (d) => { serverOut += d.toString(); });
+  proc.stderr.on('data', (d) => { serverOut += d.toString(); });
+  return proc;
+}
+let child = startServer();
+// B10 要验证「重启后」的行为：停掉旧进程、清空输出（waitHealthy 认的是启动行）再起一个
+async function restartServer() {
+  const exited = new Promise((r) => child.once('exit', r));
+  child.kill();
+  await exited;
+  serverOut = '';
+  child = startServer();
+  await waitHealthy();
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitHealthy() {
@@ -155,6 +172,55 @@ try {
   // ---------- B7 备份目录不干扰共享页/CSV 正常行为 ----------
   check('B7 当前 CSV 仍是最后一次推送的 1 条', dataRows(fs.readFileSync(csvPath, 'utf8')) === 1, '');
   check('B7b 快照 json 仍可读', JSON.parse(fs.readFileSync(jsonPath, 'utf8')).dramas.length === 1, '');
+
+  // ---------- B8 快照落盘失败：内存签名不前进，重推同内容必须真正写入；drop 档不重复 ----------
+  // 用同名 .tmp 目录让原子写的第一步失败（源文件本身完好，备份照常能拷）
+  const jsonRows = () => JSON.parse(fs.readFileSync(jsonPath, 'utf8')).dramas.length;
+  const getTimeline = async () => (await fetch(`${BASE}/api/timeline`)).json();
+  for (const name of ls().filter(n => /-drop\.(csv|json)$/.test(n))) fs.rmSync(path.join(historyDir, name));
+  await postSync(many(10));
+  fs.mkdirSync(`${jsonPath}.tmp`);
+  const b8a = await postSync(many(2));                          // 10 → 2 骤降：先留 drop 档，再写快照失败
+  const b8b = await postSync(many(2));                          // 扩展失败后重推同一份
+  check('B8a 快照写失败返回错误', b8a.ok === false && b8b.ok === false, JSON.stringify([b8a, b8b]));
+  check('B8b 先写快照：快照失败时 CSV 与 json 都保持旧的 10 条', dataRows(fs.readFileSync(csvPath, 'utf8')) === 10 && jsonRows() === 10, '');
+  check('B8c 同一源状态的重试不重复留 drop 档', dropCsvs().length === 1, ls().join(','));
+  fs.rmdirSync(`${jsonPath}.tmp`);
+  const b8d = await postSync(many(2));                          // 恢复后同内容再推：不能被当成「未变化」跳过
+  check('B8d 恢复后同内容重推真正落盘', b8d.ok === true && b8d.count === 2 && jsonRows() === 2
+    && dataRows(fs.readFileSync(csvPath, 'utf8')) === 2, JSON.stringify(b8d));
+  check('B8e 共享页随之更新', (await getTimeline()).dramas.length === 2, '');
+  check('B8f 恢复后的写入也不重复留 drop 档', dropCsvs().length === 1, ls().join(','));
+
+  // ---------- B9 CSV 写失败（Windows 上 Excel 锁住）：共享页照常前进，下次同内容推送补写 CSV ----------
+  fs.mkdirSync(`${csvPath}.tmp`);
+  const b9a = await postSync(many(3));
+  const lockedView = await getTimeline();
+  check('B9a CSV 写失败返回错误', b9a.ok === false, JSON.stringify(b9a));
+  check('B9b 快照先落盘：共享页与 json 已是新的 3 条', lockedView.dramas.length === 3 && jsonRows() === 3, '');
+  check('B9c CSV 仍是旧的 2 条', dataRows(fs.readFileSync(csvPath, 'utf8')) === 2, '');
+  fs.rmdirSync(`${csvPath}.tmp`);
+  const b9d = await postSync(many(3));
+  check('B9d 恢复后同内容重推补写 CSV', b9d.ok === true && b9d.count === 3
+    && dataRows(fs.readFileSync(csvPath, 'utf8')) === 3, JSON.stringify(b9d));
+  check('B9e 快照内容未变：版本号不再 bump', (await getTimeline()).version === lockedView.version, '');
+
+  // ---------- B10 CSV 写失败后没等到补写就重启：CSV 比快照旧，重启后首次同内容推送仍要补写 ----------
+  fs.mkdirSync(`${csvPath}.tmp`);
+  const b10a = await postSync(many(4));
+  check('B10a 前提：快照已是 4 条、CSV 仍是 3 条', b10a.ok === false && jsonRows() === 4
+    && dataRows(fs.readFileSync(csvPath, 'utf8')) === 3, JSON.stringify(b10a));
+  fs.rmdirSync(`${csvPath}.tmp`);
+  await restartServer();
+  const b10b = await postSync(many(4));
+  check('B10b 重启后同内容推送补写 CSV', b10b.ok === true && b10b.count === 4
+    && dataRows(fs.readFileSync(csvPath, 'utf8')) === 4, JSON.stringify(b10b));
+  // 两份已一致时重启：同内容推送照旧不重写 CSV（预热推送不刷盘的老约定）
+  await restartServer();
+  const csvMtime = fs.statSync(csvPath).mtimeMs;
+  const b10c = await postSync(many(4));
+  check('B10c 两份一致时重启，同内容推送不重写 CSV', b10c.ok === true && b10c.count === 4
+    && fs.statSync(csvPath).mtimeMs === csvMtime, `${JSON.stringify(b10c)} ${csvMtime} -> ${fs.statSync(csvPath).mtimeMs}`);
 } finally {
   child.kill();
   await sleep(200);

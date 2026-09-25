@@ -133,10 +133,13 @@
   /**
    * div[role="button"] 的键盘可达绑定：click + Enter/Space 键激活
    * （Space 需 preventDefault 防页面滚动）。原生 button 不需要此包装。
+   * 只认焦点在容器本身：内嵌的 📁/▶/🔄/⏹/▦ 是原生按钮，它们的 keydown 冒泡上来时
+   * 若在这里 preventDefault，按钮自己的键盘激活就被取消，执行成了容器的动作。
    */
   function bindActivatable(el, handler) {
     el.addEventListener('click', handler);
     el.addEventListener('keydown', (e) => {
+      if (e.target !== el) return;
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         handler(e);
@@ -356,12 +359,28 @@
   async function onSyncRestartClick() {
     await runSyncControl(async () => {
       const before = await fetchSyncHealth();
-      await postSyncControl('/restart');
+      const result = await postSyncControl('/restart');
       showToast('正在重启同步服务…', { duration: 13000 });
       const ok = await waitForSyncService(10, 1000, health => health?.ok && health.pid !== before?.pid);
-      showToast(ok ? '同步服务已重启 ✓' : '重启后未检测到服务：请点状态刷新，或手动启动',
-        { type: ok ? 'success' : 'error', duration: ok ? 3000 : 5000 });
+      const logPath = typeof result.logPath === 'string' && result.logPath ? abbreviateHomePath(result.logPath) : '';
+      if (ok) {
+        // 前台窗口派生出的新实例转入后台，终端里不再有输出、关窗口也停不掉它，告诉用户日志去哪看；
+        // launchd 托管时本就写这份日志，不必多说
+        const viaRespawn = result.mode === 'respawn' && logPath;
+        showToast(viaRespawn ? `同步服务已重启 ✓，已转入后台运行（日志：${logPath}）` : '同步服务已重启 ✓',
+          { type: 'success', duration: viaRespawn ? 5000 : 3000 });
+        return;
+      }
+      // 新实例没起来时状态栏还停在「已开启」+ 局域网链接，按实测刷新
+      await checkSyncServiceStatus();
+      showToast(logPath ? `重启后未检测到服务，请查看日志：${logPath}` : '重启后未检测到服务：请点状态刷新，或手动启动',
+        { type: 'error', duration: logPath ? 6000 : 5000 });
     }, '重启');
+  }
+
+  /** macOS / Linux 的家目录缩成 ~，路径短一截，访达 ⌘⇧G 与终端都认。 */
+  function abbreviateHomePath(p) {
+    return p.replace(/^\/(?:Users|home)\/[^/]+(?=\/)/, '~');
   }
 
   /** 停止/重启期间两个按钮一起禁用，防连点；请求失败统一给出原因。 */
@@ -373,6 +392,8 @@
       await action();
     } catch (e) {
       showToast(`${label}失败：${e.message}`, { type: 'error', duration: 5000 });
+      // 请求没发成（Failed to fetch）往往是服务早已不在，别让状态栏停在「已开启」
+      await checkSyncServiceStatus();
     } finally {
       stopBtn.disabled = restartBtn.disabled = false;
     }

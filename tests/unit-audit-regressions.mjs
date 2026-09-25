@@ -62,6 +62,49 @@ const Config = require('../src/shared/translate-config.js');
   assert.deepEqual([byItem.tt3.status, byItem.tt3.descriptionZh], ['trans', '完好简介']);
 }
 
+// 同一 readBody 缺陷写坏的原文（title/description/tags/genres）无法重建：不清空、只计数告警。
+{
+  const bg = await background();
+  const warnings = [];
+  bg.context.console.warn = (...args) => warnings.push(args.join(' '));
+  const done = { status: 'trans', titleZh: '完好标题', descriptionZh: '完好简介' };
+  bg.context.fixture = [
+    card('tt1', { ...done, description: 'She didn\uFFFD\uFFFDt know' }),
+    card('tt2', { ...done, title: 'Caf\uFFFD Love' }),
+    card('tt3', { ...done, tags: ['IMDB', '视觉\uFFFD\uFFFD'] }),
+    card('tt4', { ...done, genres: ['Rom\uFFFDnce'] }),
+    card('tt5', { status: 'trans', title: 'Twice\uFFFD', titleZh: '坏\uFFFD译名', descriptionZh: '完好简介' }),
+    card('tt6', done),
+    card('tt1', { title: 'dup\uFFFD' }),                                             // 文件内自重：跳过，不计
+    card('tt7', { title: 'out\uFFFD', sourceListUrl: 'https://unsubscribed.test/' }) // 订阅范围外：不计
+  ];
+  const imported = await bg.run('importDramaRecords(fixture)');
+  assert.equal(imported.added, 6);
+  assert.equal(imported.garbledSourceCount, 5);
+  const byItem = Object.fromEntries(bg.data.dramas.map(d => [d.itemId, d]));
+  // 原文原样保留；译文完好的条目不因原文乱码被退回重译
+  assert.equal(byItem.tt1.description, 'She didn\uFFFD\uFFFDt know');
+  assert.equal(byItem.tt2.title, 'Caf\uFFFD Love');
+  assert.deepEqual([...byItem.tt3.tags], ['IMDB', '视觉\uFFFD\uFFFD']);
+  assert.deepEqual([...byItem.tt4.genres], ['Rom\uFFFDnce']);
+  assert.deepEqual([byItem.tt1.status, byItem.tt1.titleZh, byItem.tt1.descriptionZh], ['trans', '完好标题', '完好简介']);
+  // 原文与译文都坏：译文照旧退回重译，原文照旧保留，只计一次
+  assert.deepEqual([byItem.tt5.status, byItem.tt5.titleZh, byItem.tt5.title], ['new', '', 'Twice\uFFFD']);
+  const warning = warnings.find(w => w.includes('原文含乱码'));
+  assert.ok(warning && warning.includes('5 条') && warning.includes('tt3') && !warning.includes('tt6'), String(warnings));
+
+  // 设置页据此如实告知「重新抓取不会覆盖」：去重命中的再抓取不改已有条目的原文
+  bg.context.next = card('tt2', { id: 'fresh_tt2', title: 'Café Love', genres: ['Romance'] });
+  assert.equal(await bg.run('saveDramaRecord(next)'), false);
+  assert.equal(bg.data.dramas.find(d => d.itemId === 'tt2').title, 'Caf\uFFFD Love');
+
+  // 干净的导入不报数也不告警
+  warnings.length = 0;
+  bg.context.clean = [card('tt8')];
+  assert.equal((await bg.run('importDramaRecords(clean)')).garbledSourceCount, 0);
+  assert.equal(warnings.some(w => w.includes('原文含乱码')), false);
+}
+
 // Preview tokens bind both criteria and membership, including same-count replacements.
 {
   const bg = await background();
@@ -226,6 +269,38 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
     // vm realm 的数组原型不同，用结构断言而非 deepEqual
     assert.equal(writes.length, 1);
     assert.equal(writes[0].urlTags.length, 0);
+  }
+}
+
+// 导入结果提示：原文乱码条数单独点出，且不许诺「重新抓取即可修复」（去重命中不覆盖，见上）。
+{
+  const importNotice = async (resp) => {
+    const status = [];
+    const context = vm.createContext({
+      SiteRegistry: Registry, TranslateConfig: Config, ScheduleConfig: { DEFAULT_CONFIG: {} }, Lark: { DEFAULT_CONFIG: {} },
+      SubscriptionConfig: require('../src/shared/subscription-config.js'),
+      document: { addEventListener() {} },
+      chrome: { runtime: { sendMessage: async () => resp } }
+    });
+    let script = fs.readFileSync(new URL('../src/settings/settings.js', import.meta.url), 'utf8');
+    script = script.replace('document.addEventListener(\'DOMContentLoaded\', init);',
+      "globalThis.fixture = { handleImportFile, setStatus: fn => { showStatus = fn; } };");
+    vm.runInContext(script, context);
+    context.fixture.setStatus((message, ok) => status.push({ message, ok }));
+    const file = { size: 10, text: async () => JSON.stringify({ dramas: [] }) };
+    await context.fixture.handleImportFile({ target: { files: [file], value: 'backup.json' } });
+    return status.at(-1);
+  };
+  const base = { success: true, added: 3, duplicates: 1, outOfScope: 0, invalid: 0, total: 4 };
+  const garbled = await importNotice({ ...base, garbledSourceCount: 2 });
+  assert.equal(garbled.ok, true);
+  assert.match(garbled.message, /^导入完成：新增 3 条/);
+  assert.match(garbled.message, /其中 2 条原文含乱码字符/);
+  assert.match(garbled.message, /重新抓取不会覆盖/);
+  for (const resp of [{ ...base, garbledSourceCount: 0 }, base]) { // 旧版后台不带该字段
+    const clean = await importNotice(resp);
+    assert.equal(clean.ok, true);
+    assert.doesNotMatch(clean.message, /乱码/);
   }
 }
 

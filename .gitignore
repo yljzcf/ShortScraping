@@ -18,6 +18,8 @@ Thumbs.db
 
 # Logs
 *.log
+# Sync service log after a popup restart (non-macOS; macOS uses ~/Library/Logs/ShortScraping)
+logs/
 
 # Temporary
 tmp/

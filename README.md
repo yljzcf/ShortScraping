@@ -153,10 +153,10 @@ Chrome 扩展无法直接写项目文件，本地 Node 服务负责三件事：�
 跨平台命令（Windows / macOS / Linux，需 Node.js）：
 
 ```bash
-npm run sync          # 启动（等价 node server/sync-server.js，前台常驻，Ctrl+C 停止）
-npm run start         # 同上
+npm run sync          # 启动（等价 node server/sync-server.js，前台常驻，Ctrl+C 停止；已设 macOS 开机自启时提示改用 npm run restart 后退出）
+npm run start         # 同上（sync 的别名，-- 之后的参数照转，如 npm start -- --local-only）
 npm run stop          # 优雅停止（经本机 POST /shutdown，只停本服务自身）
-npm run restart       # 重启（升级后用）
+npm run restart       # 重启（升级后用）：已设 macOS 开机自启时重启后台服务，否则停掉旧实例后在本终端前台启动
 npm run fix-encoding  # 修复 CSV 编码
 ```
 
@@ -172,7 +172,7 @@ server\tools\restart-sync.bat  # 重启
 macOS 双击对应 `.command` 脚本（首次先 `chmod +x server/*.command server/tools/*.command`）：
 
 ```bash
-server/start-sync.command              # 启动
+server/start-sync.command              # 启动（已运行则提示后退出）
 server/setup-autostart.command         # 一次性设置开机自启（见下）
 server/tools/stop-sync.command         # 停止
 server/tools/restart-sync.command      # 重启
@@ -180,17 +180,19 @@ server/tools/remove-autostart.command  # 撤销开机自启
 server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 ```
 
-**macOS 开机自启**：运行一次 `server/setup-autostart.command`，注册当前用户的 launchd 后台服务（`~/Library/LaunchAgents/com.shortscraping.sync.plist`）：登录即启动、崩溃自动拉起，日志在 `~/Library/Logs/ShortScraping/sync.log`。`npm run stop` 或弹窗 `⏹` 停下后不会被自动拉回；设置后 `start-sync.command` / `restart-sync.command` 改为操作这个后台服务（等价 `launchctl kickstart [-k] gui/$(id -u)/com.shortscraping.sync`）。同一脚本还会生成 `~/Applications/ShortScraping Launcher.app` 接住 `shortscraping://` 协议，弹窗 `▶ 启动` 与 `📁` 在 macOS 上随即可用（双击这个应用也能启动服务）。plist 与小应用记的都是绝对路径，移动项目文件夹后重新运行一次设置脚本。
+**macOS 开机自启**：运行一次 `server/setup-autostart.command`，注册当前用户的 launchd 后台服务（`~/Library/LaunchAgents/com.shortscraping.sync.plist`）：登录即启动、崩溃自动拉起，日志在 `~/Library/Logs/ShortScraping/sync.log`。`npm run stop` 或弹窗 `⏹` 停下后不会被自动拉回；设置后 `start-sync.command` / `restart-sync.command` / `npm run restart` 改为操作这个后台服务（等价 `launchctl kickstart [-k] gui/$(id -u)/com.shortscraping.sync`；重启会先停掉端口上残留的前台实例，10 秒内未检测到服务则提示去看日志）。设置后 `npm run sync` / `npm start` 不再另起前台实例，而是提示改用 `npm run restart` 后退出（确需前台调试：先 `npm run stop`，再 `SHORTSCRAPING_NO_LAUNCHD=1 npm run sync`）。后台服务拉起时若端口已被前台实例（如旧版 `npm run restart` 或前台调试留下的）占着，它会打印提示后正常退出、不再每 10 秒反复重试；想交回后台托管，运行一次 `npm run restart` 即可。同一脚本还会生成 `~/Applications/ShortScraping Launcher.app` 接住 `shortscraping://` 协议，弹窗 `▶ 启动` 与 `📁` 在 macOS 上随即可用（双击这个应用也能启动服务）。plist 与小应用记的都是绝对路径，移动项目文件夹后重新运行一次设置脚本。
+
+**弹窗 `🔄` 重启**：开机自启下交给 launchd 拉起，服务仍在后台、日志照旧；其余场景（终端/双击脚本前台启动、Windows）由服务派生一个新实例接管端口，新实例**转入后台**运行，原窗口里的旧进程随即结束、不再有输出，日志改写到 `~/Library/Logs/ShortScraping/sync.log`（macOS）或项目下的 `logs/sync.log`（Windows / Linux）。此后关窗口不会停止服务，请用弹窗 `⏹`、stop 脚本或 `npm run stop`。弹窗提示里附日志路径；新实例派生失败时旧实例保持运行，弹窗提示失败原因。
 
 服务地址：`http://127.0.0.1:31919`；端口被占用时会打印友好提示（先 `npm run stop`）而非报错堆栈。未启动同步服务时扩展一切照常，只是 CSV/配置写回不可用。
 
 ### CSV 输出
 
-时间线数据变化时自动同步到 `db/timeline.csv`，带 BOM 的 UTF-8 + Windows 换行，Excel/WPS 直接识别中文。若历史文件乱码：关闭 Excel/WPS 后运行 `npm run fix-encoding`（或双击对应脚本）重新编码；也可以启动服务后打开一次扩展弹窗，弹窗会自动补推当前时间线重写 CSV。
+时间线数据变化时自动同步到 `db/timeline.csv`，带 BOM 的 UTF-8 + Windows 换行，Excel/WPS 直接识别中文。若历史文件乱码：关闭 Excel/WPS 后运行 `npm run fix-encoding`（或双击对应脚本）重新编码；也可以启动服务后打开一次扩展弹窗，弹窗会自动补推当前时间线重写 CSV。Windows 上 Excel/WPS 正打开着 `timeline.csv` 时 CSV 暂时写不进（同步报「被其他程序占用」，共享页照常更新），关闭文件后下一次同步自动补写。
 
 ### 一键启动集成（Windows 可选）
 
-> macOS 由 `server/setup-autostart.command` 一并注册（见上文「macOS 开机自启」），行为与下述一致。弹窗 `🔄` / `⏹` 直接调服务接口，两个平台都无需注册；`🔄` 在 macOS 开机自启下交由 launchd 拉起，其余场景由服务自行派生新实例接管端口。
+> macOS 由 `server/setup-autostart.command` 一并注册（见上文「macOS 开机自启」），行为与下述一致。弹窗 `🔄` / `⏹` 直接调服务接口，两个平台都无需注册；`🔄` 在 macOS 开机自启下交由 launchd 拉起，其余场景由服务自行派生新实例接管端口（新实例转入后台，见上文「弹窗 `🔄` 重启」）。
 
 运行一次 `server/setup-launcher.bat`（只写当前用户注册表 `HKCU\Software\Classes\shortscraping`，无需管理员）注册 `shortscraping://` 协议后，弹窗获得两个能力：
 
@@ -230,7 +232,7 @@ server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 - 四个本地配置（含翻译密钥和 webhook）均被 `.gitignore` 排除，不会随仓库分发。
 - 同步服务写接口仅接受回环连接，并且只认首次写入时固定下来的那个扩展（记录在 `config/sync-origin.json`，换目录重载扩展后删除该文件即可重新固定）；所有写请求都要求 `application/json`，本机管理脚本仍可调用。内容脚本仅注入支持的平台域名。
 - 共享页按主机地址类型放行：IP 地址与 `localhost` 直接可用，用自定义域名访问需启动时加 `--allow-host=<域名>`。
-- CSV 对 `= + - @` 开头的文本添加文本前缀；原始 JSON 备份保持原文。导入跳过字段类型、时间戳、链接或 ID 无效的记录（封面链接无效只清空封面，不丢整条记录）；条件清理会验证预览范围，范围变化时需重新预览。
+- CSV 对 `= + - @` 开头的文本添加文本前缀；原始 JSON 备份保持原文。导入跳过字段类型、时间戳、链接或 ID 无效的记录（封面链接无效只清空封面，不丢整条记录）；原文（标题/简介/标签）含乱码字符 `�` 的记录照常导入，结果里单独报条数——多为旧版同步服务写坏的备份，原文无法还原，重新抓取也不会覆盖；条件清理会验证预览范围，范围变化时需重新预览。
 
 ## 📁 项目结构
 
@@ -251,11 +253,12 @@ ShortScraping/
 │   ├── sync-server.js            # CSV 写入 + 配置写回 + 局域网只读共享（SSE）
 │   ├── public/                   # 局域网共享页（share.html/css/js）
 │   └── tools/                    # 管理脚本：stop-sync/restart-sync/fix-csv-encoding（.bat + .command）、Node 助手 stop.js/fix-csv-encoding.js、remove-launcher.bat、launcher.vbs
-├── scripts/                      # update-site-matches.mjs（由 site-registry 生成 manifest 域名清单）、export-lark-csv.mjs（多维表格导入文件）
+├── scripts/                      # update-site-matches.mjs（由 site-registry 生成 manifest 域名清单）、export-lark-csv.mjs（多维表格导入文件，`npm run export-lark`；`--since=YYYY-MM-DD` 按本地 0 点切，与设置页日期框一致）
 ├── tests/                       # 隔离回归测试与夹具（npm test）
 ├── db/timeline.csv               # CSV 输出（运行时生成）
 ├── db/timeline.json              # 时间线快照（共享页数据源，服务重启后回读）
-└── db/history/                   # 覆盖前的留痕备份（v1.6.7，运行时生成）：每日档保留 14 天、条数骤降的 drop 档保留 10 份
+├── db/history/                   # 覆盖前的留痕备份（v1.6.7，运行时生成）：每日档保留 14 天、条数骤降的 drop 档保留 10 份
+└── logs/sync.log                 # 弹窗 🔄 转入后台后的服务日志（Windows / Linux，运行时生成；macOS 在 ~/Library/Logs/ShortScraping/）
 ```
 
 ## 🔧 技术栈
@@ -266,7 +269,7 @@ ShortScraping/
 
 ## 验证与升级
 
-使用 Node.js 22 或更新版本运行 `npm test`（当前 44 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+使用 Node.js 22 或更新版本运行 `npm test`（当前 46 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
 
 更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本域名清单，测试会检查两者一致。
 

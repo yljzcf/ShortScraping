@@ -738,6 +738,17 @@ function clearGarbledTranslations(drama) {
   return { ...rest, status: 'new' };
 }
 
+/**
+ * 原文字段（title / description / tags / genres）是否含 U+FFFD。同一个 readBody 缺陷
+ * 也会写坏这几处的多字节字符（’ — é、中文标签），但原文无从重建：清空只会连剩下的完好
+ * 部分一起丢掉，再抓到同一 itemId 也只回填缺失的 genres（saveDramaRecord 去重分支），
+ * 不会覆盖。所以只在导入时计数告警，原样保留。
+ */
+function hasGarbledSourceFields(drama) {
+  return [drama.title, drama.description, ...(drama.tags || []), ...(drama.genres || [])]
+    .some(value => String(value || '').includes('\uFFFD'));
+}
+
 async function resetGarbledTranslations() {
   const { garbledTranslationReset } = await chrome.storage.local.get('garbledTranslationReset');
   if (garbledTranslationReset) return;
@@ -1451,6 +1462,7 @@ function importDramaRecords(rawDramas) {
     const seenItemIds = new Set(existing.map(d => d.itemId));
     const seenIds = new Set(existing.map(d => d.id));
     const added = [];
+    const garbledSourceIds = [];
     let outOfScope = 0;
     let duplicates = 0;
 
@@ -1470,7 +1482,13 @@ function importDramaRecords(rawDramas) {
       }
       seenItemIds.add(normalized.itemId);
       seenIds.add(normalized.id);
+      if (hasGarbledSourceFields(normalized)) garbledSourceIds.push(normalized.itemId);
       added.push(clearGarbledTranslations(normalized)); // 旧备份里的乱码译文退回重译
+    }
+
+    if (garbledSourceIds.length > 0) {
+      console.warn(`[ShortScraping] 导入的 ${garbledSourceIds.length} 条原文含乱码字符（U+FFFD），已原样保留:`,
+        garbledSourceIds.slice(0, 20).join(', ') + (garbledSourceIds.length > 20 ? ' …' : ''));
     }
 
     if (added.length > 0) {
@@ -1483,7 +1501,10 @@ function importDramaRecords(rawDramas) {
       await writeDramasInQueue(merged);
     }
 
-    return { added: added.length, duplicates, outOfScope, invalid, total: rawDramas.length };
+    return {
+      added: added.length, duplicates, outOfScope, invalid, total: rawDramas.length,
+      garbledSourceCount: garbledSourceIds.length
+    };
   });
 }
 
