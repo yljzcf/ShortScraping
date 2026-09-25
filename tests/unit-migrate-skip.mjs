@@ -204,6 +204,11 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   const rsGets = getLog.filter(keys => keys.includes('rsEpisodeUrlMigrated'));
   check('T2b rs 标记读取不连带 dramas', rsGets.length === 1 && rsGets[0].length === 1, JSON.stringify(rsGets));
   check('T2c 数据未被误动', (rawStore.dramas || []).length === SEEDED - 1, `len=${rawStore.dramas?.length}`);
+  // 四个逐条复位迁移共用 runOnceDramaMigration：标记各读一次、只读标记本身，置位后零写入
+  const ONCE_FLAGS = ['companyFieldDropped', 'partialTranslationReset', 'nonChineseTitleZhReset', 'garbledTranslationReset'];
+  const flagGets = ONCE_FLAGS.map(flag => getLog.filter(keys => keys.includes(flag)));
+  check('T2d 逐条复位迁移的标记各单独读一次、不连带 dramas',
+    flagGets.every(gets => gets.length === 1 && gets[0].length === 1), JSON.stringify(flagGets));
 }
 
 // ---------- T3 set 失败：标记不置位，下轮重试成功 ----------
@@ -219,8 +224,8 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
 }
 
 // ---------- T4 迁移/清理抛错不得阻断配置恢复（v1.6.7，2026-09-17 审计 H1） ----------
-// loadConfigFromJsonFiles 是 SW 每次唤醒的入口，setupAlarms 挂在它后面（顶层 .then 与
-// onInstalled/onStartup 两条路都是先 load 再 setup）。此前水位线同步与五个迁移全是裸 await：
+// loadConfigFromJsonFiles 是 SW 每次唤醒的入口，setupAlarms 挂在它后面（顶层 initPromise 先 load
+// 再 setup，onInstalled/onStartup 只等它落定）。此前水位线同步与五个迁移全是裸 await：
 // 某迁移确定性抛错＝看门狗与定时任务永远装不上，用户以为在跑、其实全停。
 // 注意 T3 的语义不变：config 种子 set 失败仍向上传播（那是「配置没恢复成」，不是迁移问题）。
 {

@@ -84,7 +84,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 
 ## ⚙️ 配置文件
 
-四个本地配置文件均已加入 `.gitignore`，共享模板为对应的 `config/*.example.json`。修改后在设置页点「重新读取配置」（或重载扩展）生效。
+四个本地配置文件（`tag` / `cron` / `trans` / `lark`）均已加入 `.gitignore`，共享模板为对应的 `config/*.example.json`；另有同步服务运行时自动生成的 `config/sync-origin.json`（固定写入来源，见「数据与隐私」），同样被排除、不需要手改。修改后在设置页点「重新读取配置」（或重载扩展）生效。
 
 可以取消全部订阅；在设置页取消订阅时，保存前会确认对应历史数据的清理，并且必须先写回 `config/tag.json` 成功才会清理（同步服务未启动时拒绝取消，不动扩展里的历史数据）。但扩展每次唤醒都会回读 `config/tag.json`：直接在文件里删掉的订阅（包括手改笔误），其下历史会在下次唤醒时被清理、不弹确认；被删条目会先存进「自动清理回收站」（最近 3 批），可在「数据存档」导出后导入恢复。
 
@@ -154,14 +154,13 @@ Chrome 扩展无法直接写项目文件，本地 Node 服务负责三件事：�
 
 ### 启动与管理
 
-跨平台命令（Windows / macOS / Linux，需 Node.js）：
+跨平台命令（Windows / macOS / Linux，需 Node.js 22 或更新版本，见 `package.json` 的 `engines`）：
 
 ```bash
-npm run sync          # 启动（等价 node server/sync-server.js，前台常驻，Ctrl+C 停止；已设 macOS 开机自启时提示改用 npm run restart 后退出）
+npm run sync          # 启动（等价 node server/sync-server.js，前台常驻，Ctrl+C 停止；弹窗 🔄 之后转入后台，见下文；已设 macOS 开机自启时提示改用 npm run restart 后退出）
 npm run start         # 同上（sync 的别名，-- 之后的参数照转，如 npm start -- --local-only）
 npm run stop          # 优雅停止（经本机 POST /shutdown，只停本服务自身）
-npm run restart       # 重启（升级后用）：已设 macOS 开机自启时重启后台服务，否则停掉旧实例后在本终端前台启动
-npm run fix-encoding  # 修复 CSV 编码
+npm run restart       # 重启（升级后用）：已设 macOS 开机自启时重启后台服务（launchctl kickstart -k，仍归 launchd 托管），否则停掉旧实例后在本终端前台启动
 ```
 
 Windows 双击脚本（`server/` 根目录只放日常入口，管理脚本在 `server/tools/`）：
@@ -169,8 +168,8 @@ Windows 双击脚本（`server/` 根目录只放日常入口，管理脚本在 `
 ```bat
 server\start-sync.bat          # 启动（已运行则提示后退出，防重复启动）
 server\setup-launcher.bat      # 一次性注册一键启动集成（见下节）
-server\tools\stop-sync.bat     # 停止
-server\tools\restart-sync.bat  # 重启
+server\tools\stop-sync.bat     # 停止（调 stop.js，同 npm run stop：经 POST /shutdown 优雅停止，不按端口杀进程）
+server\tools\restart-sync.bat  # 重启（调 stop.js --restart，同 npm run restart：停掉旧实例后在本窗口前台启动）
 ```
 
 macOS 双击对应 `.command` 脚本（首次先 `chmod +x server/*.command server/tools/*.command`）：
@@ -178,10 +177,9 @@ macOS 双击对应 `.command` 脚本（首次先 `chmod +x server/*.command serv
 ```bash
 server/start-sync.command              # 启动（已运行则提示后退出）
 server/setup-autostart.command         # 一次性设置开机自启（见下）
-server/tools/stop-sync.command         # 停止
-server/tools/restart-sync.command      # 重启
+server/tools/stop-sync.command         # 停止（同 npm run stop）
+server/tools/restart-sync.command      # 重启（同 npm run restart）
 server/tools/remove-autostart.command  # 撤销开机自启
-server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 ```
 
 **macOS 开机自启**：运行一次 `server/setup-autostart.command`，注册当前用户的 launchd 后台服务（`~/Library/LaunchAgents/com.shortscraping.sync.plist`）：登录即启动、崩溃自动拉起，日志在 `~/Library/Logs/ShortScraping/sync.log`。后台服务按默认方式启动、不带 `--local-only`，所以**每次登录都会向当前所连网络开放只读共享页**，连着公共 Wi-Fi（咖啡馆、机场、酒店）时也一样（见「局域网共享」）。`npm run stop` 或弹窗 `⏹` 停下后不会被自动拉回；设置后 `start-sync.command` / `restart-sync.command` / `npm run restart` 改为操作这个后台服务（等价 `launchctl kickstart [-k] gui/$(id -u)/com.shortscraping.sync`；重启会先停掉端口上残留的前台实例，10 秒内未检测到服务则提示去看日志）。设置后 `npm run sync` / `npm start` 不再另起前台实例，而是提示改用 `npm run restart` 后退出（确需前台调试：先 `npm run stop`，再 `SHORTSCRAPING_NO_LAUNCHD=1 npm run sync`）。后台服务拉起时若端口已被前台实例（如旧版 `npm run restart` 或前台调试留下的）占着，它会打印提示后正常退出、不再每 10 秒反复重试；想交回后台托管，运行一次 `npm run restart` 即可。同一脚本还会生成 `~/Applications/ShortScraping Launcher.app` 接住 `shortscraping://` 协议，弹窗 `▶ 启动` 与 `📁` 在 macOS 上随即可用（双击这个应用也能启动服务）。plist 与小应用记的都是绝对路径，移动项目文件夹后重新运行一次设置脚本。
@@ -192,11 +190,11 @@ server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 
 ### CSV 输出
 
-时间线数据变化时自动同步到 `db/timeline.csv`，带 BOM 的 UTF-8 + Windows 换行，Excel/WPS 直接识别中文。若历史文件乱码：关闭 Excel/WPS 后运行 `npm run fix-encoding`（或双击对应脚本）重新编码；也可以启动服务后打开一次扩展弹窗，弹窗会自动补推当前时间线重写 CSV。Windows 上 Excel/WPS 正打开着 `timeline.csv` 时 CSV 暂时写不进（同步报「被其他程序占用」，共享页照常更新），关闭文件后下一次同步自动补写。
+时间线数据变化时自动同步到 `db/timeline.csv`，带 BOM 的 UTF-8 + Windows 换行，Excel/WPS 直接识别中文。CSV 只是导出物，数据源在扩展存储和 `db/timeline.json` 里，文件坏了（旧版服务写出的乱码、被 Excel 另存成 ANSI/GBK 等）删掉重建即可：关闭 Excel/WPS，删除 `db/timeline.csv`（服务运行或停止时都可以），确保同步服务在运行，再打开一次扩展弹窗——弹窗检测到服务后会强制补推当前时间线，服务发现 CSV 缺失（或启动时刚补建的空表）就按当前数据重新写出。只「再抓一轮」不可靠：时间线内容没变化时扩展不会重推。Windows 上 Excel/WPS 正打开着 `timeline.csv` 时 CSV 暂时写不进（同步报「被其他程序占用」，共享页照常更新），关闭文件后下一次同步自动补写。
 
 **空时间线保护**（v1.6.15）：扩展本地时间线为空（新 profile、重装扩展）时不推送，避免把 `db/timeline.*` 与共享页一起清空——重装后请在下一次抓取前用设置页「导入恢复」选 `db/timeline.json` 把历史导回（抓到新条目后推上去的时间线会覆盖它，届时只能从 `db/history/` 的 drop 档找回）。同步服务也会把关：服务端已有数据时，空时间线推送必须带 `allowEmpty: true`，否则返回 409（`EMPTY_REJECTED`）、不写任何文件。只有在设置页确认过的取消订阅或按条件清理把时间线清空时，扩展才会带这个标记推送。
 
-### 一键启动集成（Windows 可选）
+### 一键启动集成（Windows / macOS，可选）
 
 > macOS 由 `server/setup-autostart.command` 一并注册（见上文「macOS 开机自启」），行为与下述一致。弹窗 `🔄` / `⏹` 直接调服务接口，两个平台都无需注册；`🔄` 在 macOS 开机自启下交由 launchd 拉起，其余场景由服务自行派生新实例接管端口（新实例转入后台，见上文「弹窗 `🔄` 重启」）。
 
@@ -205,7 +203,7 @@ server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 - `📁`：在资源管理器中直接打开 `server/` 文件夹（同时复制路径作兜底）
 - `▶ 启动`：服务关闭时一键拉起 `start-sync.bat`，弹窗自动轮询刷新状态
 
-边界说明：Chrome 首次触发协议会弹「打开外部应用」确认框；未注册时点击这两个按钮无副作用（`📁` 退化为复制路径，`▶` 超时后给手动指引）；协议分发器 `server/tools/launcher.vbs` 只做固定动作匹配、从不拼接 URL 参数。撤销注册：`server/tools/remove-launcher.bat`。
+边界说明：Chrome 首次触发协议会弹「打开外部应用」确认框；未注册时点击这两个按钮无副作用（`📁` 退化为复制路径，`▶` 超时后给手动指引）；协议分发器 `server/tools/launcher.vbs` 只认 `shortscraping://open-folder` 与 `shortscraping://start-sync` 两个固定地址（整串比较，不分大小写、允许末尾斜杠，与 macOS 小应用一致），其余一律忽略，从不拼接 URL 参数。撤销注册：`server/tools/remove-launcher.bat`。
 
 ### Windows 登录自启动
 
@@ -251,18 +249,18 @@ ShortScraping/
 ├── README.md / LICENSE / .gitignore / .gitattributes
 ├── src/
 │   ├── background/background.js  # 后台 service worker：调度、抓取/翻译编排、CSV 推送
-│   ├── content/                  # 内容脚本：十三站点抓取适配器（content.js + content.css）
+│   ├── content/                  # 内容脚本：十五个站点适配器（16 个域名；content.js + content.css）
 │   ├── popup/                    # 扩展弹窗（popup.html/css/js）
 │   ├── settings/                 # 设置中心：配置文件/网页订阅/定时任务/翻译接口/Lark 推送/数据存档
-│   └── shared/                   # 共享模块（UMD 多端共用）：site-registry（站点元数据单一真源）、site-tabs（分组折叠标签条）、timeline-render（时间线渲染）、timeline-csv（CSV 序列化/导入校验）、schedule-config（cron 解析）、translate-config（翻译配置与文本判据）、subscription-config（订阅规范化）、url-match（订阅 URL 归属）、translator（翻译）、lark（Lark 推送/多维表格导出/群机器人卡片）、qrcode（二维码）
+│   └── shared/                   # 共享模块（UMD 多端共用）：site-registry（站点元数据单一真源）、scrape-rules（内容脚本与后台共用的采集口径：fandom 临时键前缀、类型标签清洗、Shortical sitemap 解析）、site-tabs（分组折叠标签条）、timeline-render（时间线渲染）、timeline-cards.css（弹窗与共享页共用的时间线/卡片样式）、timeline-csv（CSV 序列化/导入校验）、schedule-config（cron 解析）、translate-config（翻译配置与文本判据）、subscription-config（订阅规范化）、url-match（订阅 URL 归属）、translator（翻译）、lark（Lark 推送/多维表格导出/群机器人卡片）、qrcode（二维码）
 ├── assets/icons/                 # 扩展图标、站点图标与默认海报
 ├── config/                       # 本地配置（gitignore）与 example 模板
-├── server/                       # 本地同步服务；根目录仅日常入口 start-sync.bat/.command、setup-launcher.bat
+├── server/                       # 本地同步服务；根目录仅日常入口 start-sync.bat/.command、setup-launcher.bat、setup-autostart.command
 │   ├── sync-server.js            # CSV 写入 + 配置写回 + 局域网只读共享（SSE）
-│   ├── public/                   # 局域网共享页（share.html/css/js）
-│   └── tools/                    # 管理脚本：stop-sync/restart-sync/fix-csv-encoding（.bat + .command）、Node 助手 stop.js/fix-csv-encoding.js、remove-launcher.bat、launcher.vbs
+│   ├── public/                   # 局域网共享页（share.html/css/js；共用的 src/shared 渲染脚本与 timeline-cards.css 由服务经 /shared/ 白名单伺服）
+│   └── tools/                    # 管理脚本：stop-sync/restart-sync（.bat + .command，都调用 stop.js）、Node 助手 stop.js（停止/重启单一实现）、remove-launcher.bat、remove-autostart.command、launcher.vbs
 ├── scripts/                      # update-site-matches.mjs（由 site-registry 生成 manifest 内容脚本匹配清单）、export-lark-csv.mjs（多维表格导入文件，`npm run export-lark`；`--since=YYYY-MM-DD` 按本地 0 点切、比的是入库时间 `savedAt`（旧条目退回 `scrapedAt`），与设置页日期框一致；`.csv` 默认加公式撇号，`--raw` 关掉）
-├── tests/                       # 隔离回归测试与夹具（npm test）
+├── tests/                       # 隔离回归测试 unit-*.mjs 与夹具；run.mjs 逐套串行跑（npm test），单套超过 60 秒连同它派生的进程一起结束
 ├── db/timeline.csv               # CSV 输出（运行时生成）
 ├── db/timeline.json              # 时间线快照（共享页数据源，服务重启后回读）
 ├── db/history/                   # 覆盖前的留痕备份（v1.6.7，运行时生成）：每日档保留 14 天、条数骤降的 drop 档保留 10 份
@@ -279,7 +277,7 @@ ShortScraping/
 
 使用 Node.js 22 或更新版本运行 `npm test`（当前 54 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
 
-更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本匹配清单（域名，及个别站点的订阅页路径），测试会检查两者一致。
+更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务（`npm run restart` 或弹窗 `🔄`）以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本匹配清单（域名，及个别站点的订阅页路径），测试会检查两者一致。
 
 ## 📄 License
 

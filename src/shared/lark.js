@@ -38,7 +38,9 @@
   const FEISHU_TOKEN_API = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
   const FEISHU_IMAGE_API = 'https://open.feishu.cn/open-apis/im/v1/images';
 
-  // 站点显示名单一真源在 site-registry.js；导出契约 Lark.SOURCE_NAMES 保留（sync-server 消费）
+  // 站点显示名单一真源在 site-registry.js（本模块 buildPayload 的 source_name 取自它）。导出的
+  // Lark.SOURCE_NAMES 已无生产消费方（sync-server 从不读它，页面与后台都直接用 SiteRegistry），
+  // 只剩 unit-site-registry T5 守着「与注册表同源」；删导出须连 T5 一起删
   const SOURCE_NAMES = (typeof module !== 'undefined' && module.exports)
     ? require('./site-registry.js').SOURCE_NAMES
     : global.SiteRegistry.SOURCE_NAMES;
@@ -246,7 +248,8 @@
     return {
       // 全站点统一条目 ID（值＝内部去重字段 itemId，与 CSV 的 itemId 列一致）：IMDB=tt…、
       // Steam=appId、RoyalRoad=rr…、MyDrama=md…、ReelShort=rs…、DramaShorts=ds…、NetShort=ns…、
-      // Netflix=nf…、AppleTV=at…、FlickReels=fr…
+      // Netflix=nf…、AppleTV=at…、FlickReels=fr…、GoodShort=gs…、Shortical=sc…、ShortMax=sm…、
+      // DramaBox=db…、PinesDramas=pdd…（短剧）/ pdn…（小说）；前缀由 content.js 各适配器生成
       item_id: asText(d.itemId),
       title,
       title_zh: titleZh,
@@ -285,7 +288,7 @@
    * - TSV 给剪贴板粘贴追加——**不带表头、不加公式前缀**。Base 文本字段不执行公式，撇号会
    *   原样显示；Base 粘贴也不会把首行认成字段名，带上表头只会在表末平白多出一行垃圾记录。
    */
-  const CSV_BOM = '﻿';
+  const CSV_BOM = TimelineCsv.CSV_BOM;
   const TABLE_COLUMNS = TimelineCsv.CSV_COLUMNS;
   // 与 TABLE_COLUMNS 同序一一对应；改列必须同步改这里（unit-lark-table T1b 守着）
   const TABLE_HEADERS = [
@@ -305,11 +308,8 @@
   const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const strictText = (value) => (typeof value === 'string' ? value.trim() : '');
 
-  /** 行/条目的去重键（与 buildTimelineCsv 同语义：itemId||id，旧字段名 imdbId 兼容）。 */
-  function tableRowKey(drama) {
-    const normalized = TimelineCsv.normalizeDrama(drama || {});
-    return normalized.itemId || normalized.id;
-  }
+  /** 行/条目的去重键：直接用 TimelineCsv.rowKey（itemId||id，旧字段名 imdbId 兼容），与 CSV 同一真源。 */
+  const tableRowKey = TimelineCsv.rowKey;
 
   /**
    * 增量导出拿来与水位线比较的时刻：入库时间 savedAt 优先，旧条目（无 savedAt）退回 scrapedAt。
@@ -796,7 +796,6 @@
     nextExportState,
     toTsv,
     toCsv,
-    fetchWithTimeout,
     pushDrama
   };
 

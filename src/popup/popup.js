@@ -15,7 +15,6 @@
     dramas: [],
     urlTags: [],
     lastScrape: null,
-    isLoading: false,
     activeSource: null,
     // 分组代表 logo 的固定项（设置页写入）：{ [group]: site|null }
     groupPins: {},
@@ -207,37 +206,40 @@
   }
 
   /**
-   * 检查本地 CSV 同步服务状态。
+   * 带超时的 fetch + 读 JSON：期限连正文一起算，超时即 abort。正文不是 JSON 时 body 为 null。
+   * 弹窗里所有对外请求（同步服务 /health 与控制接口、GitHub 远端版本）都走这一份。
+   */
+  async function fetchJsonWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      const body = await response.json().catch(() => null);
+      return { response, body };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 检查本地 CSV 同步服务状态（状态栏与局域网区块一起刷新）。
    */
   async function checkSyncServiceStatus() {
     updateSyncServiceStatus('checking');
 
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 1500);
-
-      const response = await fetch(SYNC_HEALTH_URL, {
-        cache: 'no-store',
-        signal: controller.signal
-      });
-      clearTimeout(timer);
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const result = await response.json();
-      updateSyncServiceStatus(result?.ok ? 'on' : 'off');
-      updateLanShare(result?.ok ? (Array.isArray(result.lanUrls) ? result.lanUrls : []) : null);
-      if (result?.ok) {
+    const result = await fetchSyncHealth(1500);
+    const ok = Boolean(result?.ok);
+    updateSyncServiceStatus(ok ? 'on' : 'off');
+    updateLanShare(ok ? (Array.isArray(result.lanUrls) ? result.lanUrls : []) : null);
+    if (ok) {
+      try {
         cacheSyncServerDir(result);
         // 服务健康即让后台预热一次共享快照：服务比扩展后启动时，
         // SW 启动时的预热推送已丢失，靠弹窗打开补喂（服务端同内容不广播）
         chrome.runtime.sendMessage({ action: 'warmupCsvSync' }).catch(() => {});
+      } catch (e) {
+        // 弹窗开着时扩展被重载：chrome.* 同步抛「Extension context invalidated」，状态栏已按健康检查显示，忽略
       }
-    } catch (e) {
-      updateSyncServiceStatus('off');
-      updateLanShare(null);
     }
   }
 
@@ -275,9 +277,10 @@
   }
 
   /**
-   * 触发 shortscraping:// 自定义协议（需用户运行过 server/setup-launcher.bat
-   * 注册）。外部协议导航不会真正离开页面：已注册时 Chrome 弹确认框（可勾选
-   * 一律允许），未注册时静默无反应——因此配套提示条给出降级指引。
+   * 触发 shortscraping:// 自定义协议（需用户注册过：Windows 运行 server/setup-launcher.bat，
+   * 由 launcher.vbs 接住；macOS 运行 server/setup-autostart.command，由它生成的
+   * ~/Applications/ShortScraping Launcher.app 接住）。外部协议导航不会真正离开页面：已注册时
+   * Chrome 弹确认框（可勾选一律允许），未注册时静默无反应——因此配套提示条给出降级指引。
    */
   function triggerLauncherProtocol(action) {
     try {
@@ -310,7 +313,8 @@
   }
 
   /**
-   * ▶ 一键启动：经协议拉起 start-sync.bat，随后轮询 /health 等服务上线。
+   * ▶ 一键启动：经协议拉起同步服务（Windows 由 launcher.vbs 运行 start-sync.bat；macOS 由
+   * Launcher.app 执行 launchctl kickstart，拉起开机自启注册的后台服务），随后轮询 /health 等服务上线。
    * 未注册协议时协议触发静默无反应，轮询超时后给出降级指引。
    */
   async function onSyncStartClick() {
@@ -346,7 +350,8 @@
     await runSyncControl(async () => {
       await postSyncControl('/shutdown');
       const stopped = await waitForSyncService(6, 500, health => !health);
-      await checkSyncServiceStatus();
+      // 判定停止时 waitForSyncService 已刷新过状态栏；没停下来才需要按实测再刷一次
+      if (!stopped) await checkSyncServiceStatus();
       showToast(stopped ? '同步服务已停止' : '已发送停止请求，服务仍在响应，请稍后点状态刷新',
         { type: stopped ? 'success' : 'error' });
     }, '停止');
@@ -400,31 +405,21 @@
   }
 
   async function postSyncControl(route) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2000);
-    try {
-      const response = await fetch(SYNC_BASE_URL + route, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-        signal: controller.signal
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
-      return result;
-    } finally {
-      clearTimeout(timer);
-    }
+    const { response, body } = await fetchJsonWithTimeout(SYNC_BASE_URL + route, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}'
+    }, 2000);
+    const result = body || {};
+    if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    return result;
   }
 
-  /** 读一次 /health，服务不在或返回异常时为 null。 */
-  async function fetchSyncHealth() {
+  /** 读一次 /health，服务不在或返回异常时为 null。状态栏检测与 🔄/⏹/▶ 的轮询共用。 */
+  async function fetchSyncHealth(timeoutMs = 1200) {
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 1200);
-      const response = await fetch(SYNC_HEALTH_URL, { cache: 'no-store', signal: controller.signal });
-      clearTimeout(timer);
-      return response.ok ? await response.json() : null;
+      const { response, body } = await fetchJsonWithTimeout(SYNC_HEALTH_URL, { cache: 'no-store' }, timeoutMs);
+      return response.ok ? body : null;
     } catch (e) {
       return null;
     }
@@ -458,7 +453,7 @@
 
     if (lanUrls === null) {
       container.classList.add('is-off');
-      container.title = '同步服务未启动：运行 npm run sync（Windows 可双击 start-sync.bat）后点击重新检测';
+      container.title = '同步服务未启动：运行 npm run sync（Windows 可双击 start-sync.bat，macOS 可双击 start-sync.command）后点击重新检测';
       text.textContent = '未启动';
       qrBtn.classList.add('hidden');
       popover.classList.add('hidden');
@@ -601,20 +596,13 @@
     updateVersionStatus('checking');
 
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 4000);
-
-      const response = await fetch(REMOTE_MANIFEST_URL, {
-        cache: 'no-store',
-        signal: controller.signal
-      });
-      clearTimeout(timer);
+      const { response, body } = await fetchJsonWithTimeout(REMOTE_MANIFEST_URL, { cache: 'no-store' }, 4000);
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
 
-      const remoteVersion = String((await response.json())?.version || '').trim();
+      const remoteVersion = String(body?.version || '').trim();
       if (!remoteVersion) {
         throw new Error('远端 manifest 缺少 version');
       }
@@ -1266,7 +1254,6 @@
    * 显示/隐藏加载状态
    */
   function showLoading(show) {
-    state.isLoading = show;
     elements.states.loading.classList.toggle('hidden', !show);
   }
 

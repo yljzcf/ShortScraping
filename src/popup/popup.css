@@ -1,26 +1,6 @@
-/* 基础变量 */
-:root {
-  --primary: #6366f1;
-  --primary-hover: #4f46e5;
-  --bg: #0f172a;
-  --bg-secondary: #1e293b;
-  --bg-card: #1e293b;
-  --text: #f8fafc;
-  --text-secondary: #94a3b8;
-  --border: #334155;
-  --success: #10b981;
-  --warning: #f59e0b;
-  --danger: #ef4444;
-  --radius: 12px;
-  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
-}
-
-/* 重置 */
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/* 弹窗专有样式。设计变量、站点标签条、时间线与卡片等与局域网共享页共用的规则在
+   src/shared/timeline-cards.css（popup.html 先引入它再引入本文件）；这里只留弹窗自己的
+   布局、状态栏、卡片右上角按钮、Steam 双列网格与底栏局域网区块。 */
 
 body {
   width: 520px;
@@ -51,138 +31,6 @@ body {
 .header-actions {
   display: flex;
   gap: 8px;
-}
-
-/* 分类标签（取代原标题，按站点筛选；纯图标，title 提示站名）
-   v1.5.11 起按 site-registry.js 的 SITE_GROUPS 折叠：同一时间只展开一组，
-   收起组压成「‹ 代表 logo ›」胶囊，整条由 shared/site-tabs.js 渲染 */
-.category-tabs {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  /* flex 子项 min-width 默认 auto，不清零则展开组只会撑破容器而不进入滚动 */
-  min-width: 0;
-}
-
-/* 展开组：图标外套浅色衬底，视觉上圈出「这几个是一组」
-   （单站点组不加 is-open，只是个普通图标） */
-.tab-group {
-  display: flex;
-  gap: 6px;
-}
-
-/* v1.6.9：短剧组增至 8 个站点后，光展开组就要 402px，而标签条可用宽度只有 416px
-   （520 − 32 头部内边距 − 72 头部按钮区，实测），再加两枚收起胶囊共需 504px。
-   改为横向可滚，操作是「按住即拖」（逻辑在 shared/site-tabs.js）。刻意不显滚动条、
-   不加左右箭头——箭头会再吃掉约 40px，而横向宽度正是这里最稀缺的资源。
-   grab 手型即拖动的可发现性提示。本段与 share.css 逐字同步（unit-card-layout 守着）。 */
-.tab-group.is-open {
-  background: var(--bg);
-  border-radius: 10px;
-  padding: 2px 4px;
-  overflow-x: auto;
-  min-width: 0;
-  cursor: grab;
-  scrollbar-width: none;
-}
-
-.tab-group.is-open::-webkit-scrollbar {
-  display: none;
-}
-
-/* 不写死则图标会被挤扁而不是溢出滚动 */
-.tab-group.is-open .category-tab {
-  flex-shrink: 0;
-}
-
-.tab-group.is-open.is-dragging {
-  cursor: grabbing;
-}
-
-/* 收起胶囊：箭头纯装饰，整枚是一个按钮 */
-.tab-group-chip {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  padding: 6px 4px;
-  border: none;
-  background: var(--bg);
-  border-radius: 10px;
-  cursor: pointer;
-  transition: all 0.2s;
-  /* 展开组会抢光剩余宽度，胶囊不锁死就会被挤扁 */
-  flex-shrink: 0;
-}
-
-.tab-group-chip img {
-  display: block;
-  width: 24px;
-  height: 24px;
-  padding: 2px;
-  border-radius: 5px;
-  filter: grayscale(1);
-  opacity: 0.55;
-  transition: all 0.2s;
-}
-
-.tab-group-chevron {
-  color: var(--text-secondary);
-  font-size: 14px;
-  line-height: 1;
-  opacity: 0.7;
-}
-
-.tab-group-chip:hover {
-  background: var(--bg-card);
-}
-
-.tab-group-chip:hover img {
-  opacity: 0.85;
-}
-
-.tab-group-chip:hover .tab-group-chevron {
-  color: var(--text);
-  opacity: 1;
-}
-
-.category-tab {
-  padding: 6px 10px;
-  border: none;
-  background: transparent;
-  display: flex;
-  align-items: center;
-  cursor: pointer;
-  border-radius: 8px;
-  transition: all 0.2s;
-}
-
-/* 24px 盒 + 2px 内边距 = 20px 图标；激活时只变衬底色，几何不跳动 */
-.category-tab img {
-  display: block;
-  width: 24px;
-  height: 24px;
-  padding: 2px;
-  border-radius: 5px;
-  filter: grayscale(1);
-  opacity: 0.55;
-  transition: all 0.2s;
-}
-
-.category-tab:hover {
-  background: var(--bg);
-}
-
-.category-tab:hover img {
-  opacity: 0.85;
-}
-
-.category-tab.active {
-  background: linear-gradient(135deg, var(--primary), #8b5cf6);
-}
-
-.category-tab.active img {
-  filter: none;
-  opacity: 1;
 }
 
 /* 再次点击已激活标签触发站点刷新：图标转圈作为进行中反馈 */
@@ -275,7 +123,7 @@ body {
   cursor: pointer;
 }
 
-/* 状态栏内联小按钮：📁 打开脚本文件夹、▶ 一键启动 */
+/* 状态栏内联小按钮：📁 打开脚本文件夹、🔄 重启、⏹ 停止、▶ 一键启动 */
 .sync-inline-btn {
   border: none;
   background: transparent;
@@ -307,8 +155,7 @@ body {
   color: var(--success);
 }
 
-.sync-inline-btn:disabled,
-.sync-start-btn:disabled {
+.sync-inline-btn:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -399,63 +246,6 @@ body {
   padding: 16px;
 }
 
-.view {
-  display: none;
-}
-
-.view.active {
-  display: block;
-}
-
-/* 时间线视图 */
-.timeline-container {
-  position: relative;
-  padding-left: 20px;
-}
-
-.timeline-container::before {
-  content: '';
-  position: absolute;
-  left: 6px;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--border);
-}
-
-/* 日期分组 */
-.timeline-date-group {
-  margin-bottom: 24px;
-}
-
-.timeline-date-header {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-bottom: 12px;
-  margin-left: -20px;
-  padding-left: 28px;
-}
-
-/* 卡片外的时间标签 */
-.timeline-time {
-  font-size: 11px;
-  color: var(--text-secondary);
-  margin-bottom: 6px;
-  margin-left: 4px;
-}
-
-/* 卡片 */
-.drama-card {
-  position: relative;
-  margin-bottom: 16px;
-  background: var(--bg-card);
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  overflow: hidden;
-  transition: all 0.2s;
-}
-
 /* 状态标签 - 固定右上角（三槽位：翻译按钮@8px、Lark 按钮@40px、badge@72px） */
 .status-badge {
   position: absolute;
@@ -513,82 +303,6 @@ body {
   display: block;
   border-radius: 3px;
   pointer-events: none;
-}
-
-.drama-card:hover {
-  border-color: var(--primary);
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2);
-}
-
-.drama-card::before {
-  content: '';
-  position: absolute;
-  left: -17px;
-  top: 24px;
-  width: 8px;
-  height: 8px;
-  background: var(--primary);
-  border-radius: 50%;
-  border: 2px solid var(--bg);
-}
-
-/* 卡片内部布局：纵向堆叠（上半部分 + 贯穿整宽的标签区） */
-.card-content {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 14px;
-}
-
-/* 封面：固定宽度、高度按图片原始比例自适应，不裁切（兼容 IMDB 竖版海报与 Steam 横版封面）
-   IMDB 竖版取原图原生尺寸 90×133（宽 90px，高按 2:3 比例自适应） */
-.card-poster {
-  flex-shrink: 0;
-  width: 90px;
-  height: auto;
-  align-self: flex-start;
-  border-radius: 6px;
-  background: var(--bg);
-}
-
-/* 可点封面（绑定了原站链接时由 JS 加 poster-link 类）：悬停提示可跳原站 */
-.card-poster.poster-link {
-  cursor: pointer;
-  transition: filter 0.15s, box-shadow 0.15s;
-}
-
-.card-poster.poster-link:hover {
-  filter: brightness(1.08);
-  box-shadow: 0 0 0 2px var(--primary);
-}
-
-/* 横版封面：置于文字上方、整行铺开（上半部分改纵向堆叠；标签区本就整行） */
-.drama-card.card-landscape .card-top {
-  flex-direction: column;
-}
-
-.drama-card.card-landscape .card-poster {
-  width: 100%;
-  height: auto;
-}
-
-/* 占位图（封面加载失败时由 JS 加 poster-fallback）：本身不带任何信息，而横版
-   布局是「封面在上、文字在下」，留着它就白占一整行——铺满整行是一大块灰底，
-   保持 90px 又在右侧留一大片空白，两种都只是把卡片撑高。直接不显示，整宽留给文字。
-   竖版卡（非 Steam）不受影响：那里占位图在左侧，本来就不挤标题。 */
-.drama-card.poster-fallback.card-landscape .card-poster {
-  display: none;
-}
-
-/* 占位图一藏，标题就成了卡片最上面的元素，会被右上按钮带压住——横版的
-   padding-right:0 本来是靠「按钮压在封面上」成立的。让标题整行显示在按钮
-   下方，比重新缩窄标题多留一倍的字。 */
-.drama-card.poster-fallback.card-landscape .card-title {
-  margin-top: 24px; /* 按钮 top:8 + 高 28 = 36px，减去 card-content 的 14px 内边距 */
-}
-
-.drama-card.card-landscape .card-title {
-  padding-right: 0;
 }
 
 /* Steam 分类：日期组内双列网格，日期/时间标签横跨两列 */
@@ -669,162 +383,10 @@ body {
   white-space: nowrap;
 }
 
-/* 双列下卡片圆点无法对齐左侧竖线，隐藏；竖线与日期/时间标签保留 */
-.timeline-container[data-source="steam"] .drama-card::before {
-  display: none;
-}
-
-/* RoyalRoad 分类：简介存全文，卡片内截断显示；单语（未翻译）卡放宽行数 */
-.timeline-container[data-source="royalroad"] .card-desc-en.desc-en-only {
-  -webkit-line-clamp: 6;
-}
-
-.timeline-container[data-source="royalroad"] .card-desc-zh.desc-zh-only {
-  -webkit-line-clamp: 5;
-}
-
-/* 上半部分：竖版海报在左、文字在右；横版封面在上、文字在下 */
-.card-top {
-  display: flex;
-  gap: 14px;
-}
-
-/* 主体部分（标题+简介） */
-.card-main {
-  flex: 1;
-  min-width: 0;
-}
-
-/* 简介 */
-.card-description {
-  margin-bottom: 10px;
-}
-
-.card-desc-zh {
-  font-size: 12px;
-  color: var(--text);
-  line-height: 1.5;
-  margin-bottom: 4px;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.card-desc-en {
-  font-size: 12px;
-  color: var(--text-secondary);
-  line-height: 1.4;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* 简介动态排版由 popup.js 按实际渲染行数测量后设置（行数走内联 line-clamp）。
-   中英文全文放完仍有大段空白的稀疏卡片：整体放大字号填充，行数回到 3中+2英 */
-.card-description.desc-large .card-desc-zh {
-  font-size: 14px;
-  -webkit-line-clamp: 3;
-}
-
-.card-description.desc-large .card-desc-en {
-  font-size: 14px;
-  -webkit-line-clamp: 2;
-}
-
-/* 底部标签区域 */
-.card-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-end;
-  gap: 8px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-
-/* 左侧标签（来源/订阅标签：优先占位，不因右侧类型标签收缩） */
-.card-tags-left {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  flex-shrink: 0;
-}
-
-/* 右侧标签（内容类型 chips 全量渲染，按剩余宽度尽量多显示：容器可收缩，
-   放不下的 chips 折行后被单行 max-height 裁掉，全量经容器 title 悬停可见） */
-.card-tags-right {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  min-width: 0;
-  max-height: 20px;
-  overflow: hidden;
-}
-
-/* 标签样式 */
-.tag {
-  display: inline-block;
-  padding: 3px 8px;
-  background: var(--bg);
-  border-radius: 4px;
-  font-size: 10px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-
-.tag-source {
-  color: var(--primary);
-}
-
-/* 内容类型标签（footer 右槽，v1.5.3 替换原公司/作者标签） */
-.tag-genre {
-  color: var(--warning);
-  background: rgba(245, 158, 11, 0.1);
-}
-
-/* 卡片状态 */
-.drama-card.status-new {
-  border-left: 3px solid var(--success);
-}
-
 /* 标题区域 */
 .card-title {
   margin-bottom: 8px;
   padding-right: 80px; /* 为状态标签留空间 */
-}
-
-.card-title-text {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.card-desc-empty {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-style: italic;
-}
-
-/* 空状态 */
-.empty-state {
-  text-align: center;
-  padding: 40px 20px;
-}
-
-.empty-icon {
-  font-size: 48px;
-  margin-bottom: 16px;
-}
-
-.empty-state h3 {
-  margin-bottom: 8px;
-  color: var(--text);
 }
 
 .empty-state p {
@@ -878,28 +440,6 @@ body {
   border-top: 1px solid var(--border);
   font-size: 11px;
   flex-shrink: 0;
-}
-
-.status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.status-dot {
-  width: 6px;
-  height: 6px;
-  background: var(--success);
-  border-radius: 50%;
-}
-
-.stats {
-  color: var(--text-secondary);
-}
-
-.divider {
-  margin: 0 6px;
-  color: var(--border);
 }
 
 /* 底栏局域网共享区块（与翻译状态、抓取时间同一行） */
@@ -964,29 +504,6 @@ body {
   font-size: 11px;
   color: var(--text-secondary);
   user-select: text;
-}
-
-/* 隐藏 */
-.hidden {
-  display: none !important;
-}
-
-/* 滚动条 */
-::-webkit-scrollbar {
-  width: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: var(--bg);
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text-secondary);
 }
 
 /* —— 可访问性（v1.5.1）：键盘焦点环。只在 :focus-visible（键盘导航）出现，

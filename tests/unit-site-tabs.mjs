@@ -211,14 +211,15 @@ check('E2 在视区左侧则左对齐到它', visible(10, 44, 40, 200) === 10, S
 check('E3 在视区右侧则右对齐到它', visible(300, 44, 40, 200) === 144, String(visible(300, 44, 40, 200)));
 check('E4 首个元素（offsetLeft 0）能回到最左', visible(0, 44, 60, 200) === 0, String(visible(0, 44, 60, 200)));
 
-// ---------- F 两份 CSS 同步：标签条滚动规则 ----------
-// 只在 popup.css 改会让共享页的 8 个图标继续撑破容器（先例：unit-card-layout C 组）
+// ---------- F 标签条滚动规则 ----------
+// 两页共用 src/shared/timeline-cards.css 里的这一份（2026-09-25 审计 E 前是 popup.css / share.css
+// 各一份，只改一边会让共享页的图标继续撑破容器）；两页都引入它由 unit-card-layout D2 守着
 const squash = s => s.replace(/\s+/g, ' ');
 const ruleBody = (src, selector) => {
   const m = squash(src).match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`));
   return m ? m[1].trim() : null;
 };
-for (const rel of ['src/popup/popup.css', 'server/public/share.css']) {
+for (const rel of ['src/shared/timeline-cards.css']) {
   const src = fs.readFileSync(path.join(worktreeRoot, rel), 'utf8');
   const open = ruleBody(src, '.tab-group.is-open');
   check(`F1 ${rel} 展开组横向可滚且不显滚动条`,

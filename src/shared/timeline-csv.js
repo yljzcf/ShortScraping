@@ -153,10 +153,30 @@
     }
     if (result.poster && !isHttpUrl(result.poster)) result.poster = '';
     // 与采集侧 cleanGenres 同语义（trim/去空/去重）：导入曾是唯一未清洗的写入口，
-    // 空串元素会在卡片 footer 渲染出空标签、在 CSV 里留下空的竖线分段
+    // 空串元素会在卡片 footer 渲染出空标签、在 CSV 单元格里留下空的逗号分段
     result.tags = cleanTextList(result.tags);
     result.genres = cleanTextList(result.genres);
     return result;
+  }
+
+  const keyOfNormalized = normalized => normalized.itemId || normalized.id;
+
+  /**
+   * 去重键（单一真源）：normalizeDrama 之后的 itemId || id（itemId 兼容旧字段名 imdbId）；
+   * 空串＝该条目不产出行。CSV、Lark 表格导出与 /sync 的条数统计都认这一个口径。
+   */
+  function rowKey(drama) {
+    return keyOfNormalized(normalizeDrama(drama || {}));
+  }
+
+  /** buildTimelineCsv 会产出的数据行数（同一去重口径），供不重写 CSV 时回报条数，不必真序列化一遍。 */
+  function countTimelineRows(dramas) {
+    const keys = new Set();
+    for (const drama of dramas || []) {
+      const key = rowKey(drama);
+      if (key) keys.add(key);
+    }
+    return keys.size;
   }
 
   function serializeTimelineCsv(rows) {
@@ -174,7 +194,7 @@
 
     for (const drama of dramas || []) {
       const normalized = normalizeDrama(drama);
-      const key = normalized.itemId || normalized.id;
+      const key = keyOfNormalized(normalized);
       if (!key || seen.has(key)) continue;
       seen.add(key);
 
@@ -184,7 +204,10 @@
     return { content: serializeTimelineCsv(rows), count: rows.length };
   }
 
-  const api = { CSV_COLUMNS, csvEscape, neutralizeFormula, normalizeDrama, validateImportDrama, buildTimelineCsv };
+  const api = {
+    CSV_BOM, CSV_COLUMNS, csvEscape, neutralizeFormula, normalizeDrama, validateImportDrama,
+    rowKey, countTimelineRows, buildTimelineCsv
+  };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;

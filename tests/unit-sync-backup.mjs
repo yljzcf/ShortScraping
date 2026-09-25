@@ -52,10 +52,11 @@ function startServer() {
 }
 let child = startServer();
 // B10 要验证「重启后」的行为：停掉旧进程、清空输出（waitHealthy 认的是启动行）再起一个
-async function restartServer() {
+async function restartServer(whileStopped) {
   const exited = new Promise((r) => child.once('exit', r));
   child.kill();
   await exited;
+  if (whileStopped) whileStopped();
   serverOut = '';
   child = startServer();
   await waitHealthy();
@@ -222,6 +223,12 @@ try {
   const b10c = await postSync(many(4));
   check('B10c 两份一致时重启，同内容推送不重写 CSV', b10c.ok === true && b10c.count === 4
     && fs.statSync(csvPath).mtimeMs === csvMtime, `${JSON.stringify(b10c)} ${csvMtime} -> ${fs.statSync(csvPath).mtimeMs}`);
+  // 停机期间 CSV 被手删：启动时 ensureDb 先补建只有表头的空表（比快照新，mtime 认不出落后），
+  // 首次同内容推送仍要按快照补全，不能一直停在空表
+  await restartServer(() => fs.rmSync(csvPath));
+  const b10d = await postSync(many(4));
+  check('B10d 停机期间删掉 CSV，重启后同内容推送补写', b10d.ok === true && b10d.count === 4
+    && dataRows(fs.readFileSync(csvPath, 'utf8')) === 4, JSON.stringify(b10d));
 
   // ---------- B11 空库护栏在重启后同样生效：快照从 timeline.json 恢复，未带 allowEmpty 的空推送 409 ----------
   // 正是事故形态：服务刚被 launchd 拉起，重装后的扩展 SW 启动即推 []。409 分支在备份之前返回，

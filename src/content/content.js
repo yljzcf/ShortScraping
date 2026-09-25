@@ -11,6 +11,10 @@
   if (window.__dramamoContentLoaded) return;
   window.__dramamoContentLoaded = true;
 
+  // 与后台共用的采集口径（src/shared/scrape-rules.js，manifest 与后台强制注入都排在本文件之前）：
+  // fandom 临时键前缀、类型标签清洗、Shortical sitemap 解析，两边不再各写一份
+  const { cleanGenres, isUnmappedFandomKey, parseShorticalSitemap } = ScrapeRules;
+
   // 抓取进行中护栏：后台兜底路径（waitForTabComplete 超时 → 强制注入 →
   // sendScrapeWhenReady 轮询补发）可能让同一标签页先后收到多条 'scrape'。
   // 并行双跑会经保存点去重互相分走对方的新增卡——入库不重复，但每个 response
@@ -75,7 +79,7 @@
     },
     genresFromDetail: true,    // genres 权威源在详情页 JSON-LD（回填路径需请求详情）
     async fetchDetail(drama) {
-      // IMDB 详情失败也返回 drama（保留原行为：简介/公司可为空但仍记录）
+      // IMDB 详情失败也返回 drama（保留原行为：简介可为空但仍记录）
       return await fetchImdbDetail(drama);
     }
   };
@@ -135,6 +139,90 @@
   }
 
   /**
+   * 同源取**服务端原始 HTML 文本**：各站同源详情页与列表页重取共用（v1.6.9 起 GoodShort /
+   * ShortMax 用，之后 IMDB / RoyalRoad / 两个 fandom / MyDrama 同源详情也收拢到这里）。
+   * 缺省取当前页——GoodShort 与 ShortMax 的列表都不能读实时 DOM，理由各不相同、但解法相同：
+   *   · GoodShort 的 __INITIAL_STATE__ 内联脚本执行完就把自己从 DOM 里删掉；
+   *   · ShortMax 的板块 hydrate 后变成按视口裁剪的轮播（8 张卡在 799px 下只剩 5 张）。
+   * 同源请求不需要后台代理；非 2xx / 超时 / 网络异常一律打日志后返回 null，调用方按
+   * 「本轮取不到」处理（下轮重试）。要读 response.url（301 后的规范地址）的 ReelShort
+   * 两处拿不到它，仍直接用 fetchWithTimeout。
+   */
+  async function fetchServerHtml(url = window.location.href) {
+    try {
+      const response = await fetchWithTimeout(url, { headers: { 'Accept': 'text/html' } });
+      if (!response.ok) {
+        console.warn(`[ShortScraping] 取服务端 HTML 失败 HTTP ${response.status}: ${url}`);
+        return null;
+      }
+      return await response.text();
+    } catch (e) {
+      console.warn(`[ShortScraping] 取服务端 HTML 异常: ${url}`, e.message);
+      return null;
+    }
+  }
+
+  function parseHtmlDocument(html) {
+    try {
+      return new DOMParser().parseFromString(html, 'text/html');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * fetchServerHtml + parseHtmlDocument：取不到或解析失败返回 null。200 的空正文照常解析成
+   * 空文档，不当失败（与收拢前各详情路径「!response.ok 才放弃」的口径一致）。
+   */
+  async function fetchServerDocument(url) {
+    const html = await fetchServerHtml(url);
+    return html === null ? null : parseHtmlDocument(html);
+  }
+
+  /**
+   * 从 text[start]（必须是 open）起做**字符串感知**的括号匹配，截出到配对 close 为止的完整
+   * 字面量（NetShort flight 数组与 GoodShort 状态对象共用）。不靠尾部锚点（GoodShort 的收尾是
+   * `;(function(){…}())` 这种自删脚本，站点随时可改），也不靠计数——标题/简介里带括号或
+   * 转义引号时纯计数会截错。只数 open/close 这一对，另一种括号不计。匹配不上返回 null。
+   */
+  function sliceBalanced(text, start, open, close) {
+    if (typeof text !== 'string' || text[start] !== open) return null;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === open) depth++;
+      else if (ch === close && --depth === 0) return text.slice(start, i + 1);
+    }
+    return null;
+  }
+
+  /**
+   * 纯前端渲染区块的等待：每 500ms 取一次，计数非 0 且连续两次不变即认为渲染完成，
+   * 最长约 8 秒（16 次），超时交回最后一次的结果（MyDrama 首页与 Shortical 首页共用）。
+   * query 取结果，countOf 从结果数出条目数。
+   */
+  async function pollUntilStable(query, countOf) {
+    let last = -1;
+    for (let i = 0; i < 16; i++) {
+      const result = query();
+      const count = countOf(result);
+      if (count > 0 && count === last) return result;
+      last = count;
+      await new Promise(r => setTimeout(r, 500));
+    }
+    return query();
+  }
+
+  /**
    * 取单个 appId 的 appdetails 数据（指定语言）。失败/无数据返回 null。
    */
   async function fetchSteamAppDetails(appId, lang) {
@@ -160,11 +248,8 @@
         return null;
       }
 
-      const clean = arr => (Array.isArray(arr) ? arr : []).map(s => String(s).trim()).filter(Boolean);
       const enName = (en.name || '').trim();
       const enDesc = decodeHtmlEntities(en.short_description || '').trim();
-      const developers = clean(en.developers);
-      const publishers = clean(en.publishers);
 
       if (!enName && !enDesc) {
         console.log(`[ShortScraping] Steam 详情无正文，跳过: ${drama.title} (${appId})`);
@@ -829,36 +914,29 @@
   const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, flickreels: flickreelsAdapter, goodshort: goodshortAdapter, shortical: shorticalAdapter, shortmax: shortmaxAdapter, dramabox: dramaboxAdapter, pinedrama: pinedramaAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
 
   /**
-   * 添加抓取按钮
+   * 添加抓取按钮。样式只在 content.css 一处（manifest 随 content.js 一起注入）：
+   * 以前这里的 cssText 把样式表逐项抄了一遍，mouseenter/mouseleave 再用内联 transform
+   * 模拟 :hover——内联优先级高于样式表，:active 的按下缩放、:disabled 的「不缩放 /
+   * not-allowed 光标」、:hover 的加深阴影全被压住（审查 button-style-duplicated-dead-css）。
+   * 后台 executeScript 兜底注入不带 CSS，但那条路径只出现在后台抓取标签页里，没人看按钮。
+   * 文案都是纯文本，用 textContent。
    */
   function addScrapeButton() {
     if (document.getElementById('dramamo-scrape-btn')) return;
 
+    const IDLE_LABEL = '🎬 抓取到 ShortScraping';
     const btn = document.createElement('button');
     btn.id = 'dramamo-scrape-btn';
-    btn.innerHTML = '🎬 抓取到 ShortScraping';
-    btn.style.cssText = `
-      position: fixed;
-      top: 80px;
-      right: 20px;
-      z-index: 9999;
-      padding: 12px 20px;
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
-      color: white;
-      border: none;
-      border-radius: 8px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
-      transition: all 0.2s;
-    `;
+    btn.textContent = IDLE_LABEL;
 
-    btn.addEventListener('mouseenter', () => btn.style.transform = 'scale(1.05)');
-    btn.addEventListener('mouseleave', () => btn.style.transform = 'scale(1)');
+    // 结果文案停 2 秒再复原可点
+    const resetLater = () => setTimeout(() => {
+      btn.textContent = IDLE_LABEL;
+      btn.disabled = false;
+    }, 2000);
 
     btn.addEventListener('click', async () => {
-      btn.innerHTML = '⏳ 抓取中...';
+      btn.textContent = '⏳ 抓取中...';
       btn.disabled = true;
 
       try {
@@ -867,27 +945,22 @@
         // 中文（Steam/MyDrama 直接 trans）的新卡漏计，与后台通知/弹窗 toast 口径不一致
         const newCount = data.length;
 
-        btn.innerHTML = `✅ 新增 ${newCount} 部`;
-        setTimeout(() => {
-          btn.innerHTML = '🎬 抓取到 ShortScraping';
-          btn.disabled = false;
-        }, 2000);
+        btn.textContent = `✅ 新增 ${newCount} 部`;
       } catch (e) {
         console.error('[ShortScraping] 抓取失败:', e);
-        btn.innerHTML = '❌ 抓取失败';
-        setTimeout(() => {
-          btn.innerHTML = '🎬 抓取到 ShortScraping';
-          btn.disabled = false;
-        }, 2000);
+        btn.textContent = '❌ 抓取失败';
       }
+      resetLater();
     });
 
     document.body.appendChild(btn);
   }
 
-  /**
-   * 抓取当前页面 - 站点无关骨架，逐条保存。
-   */
+  // 本轮抓取的存量条目快照（itemId → 记录），scrapePage 开轮时刷新；fandom 详情
+  // 路径用它判断「库中已有 genres」以跳过代理请求（adapter.fetchDetail 签名不带
+  // 上下文，走模块级快照传递）
+  let existingDramaSnapshot = new Map();
+
   /**
    * 存量条目 genres 回填（v1.5.3）：去重命中的在榜条目若库中还没有类型标签，
    * 用与新条目完全相同的提取路径补一份，经 saveDrama 消息在后台队列内只合并
@@ -898,11 +971,6 @@
    * 详情失败时与新条目路径同语义：有列表级兜底值（如 ReelShort theme）就用，
    * 彻底为空则本轮放弃、不落任何标记，下轮抓取自动重试，自愈。
    */
-  // 本轮抓取的存量条目快照（itemId → 记录），scrapePage 开轮时刷新；fandom 详情
-  // 路径用它判断「库中已有 genres」以跳过代理请求（adapter.fetchDetail 签名不带
-  // 上下文，走模块级快照传递）
-  let existingDramaSnapshot = new Map();
-
   async function maybeBackfillGenres(adapter, item, tags, id, index, existingDrama) {
     try {
       if (!existingDrama || (Array.isArray(existingDrama.genres) && existingDrama.genres.length > 0)) return;
@@ -924,6 +992,9 @@
     }
   }
 
+  /**
+   * 抓取当前页面 - 站点无关骨架，逐条保存。
+   */
   async function scrapePage() {
     console.log('[ShortScraping] 开始抓取页面...');
 
@@ -946,7 +1017,7 @@
     }
     console.log(`[ShortScraping] 站点=${site}，标签: ${tags.join(', ')}`);
 
-    // 去重键统一用 itemId 字段（IMDB=ttId，Steam=appId，RoyalRoad=rr+数字）；过滤空值避免塌缩。
+    // 去重键统一用 itemId 字段（各站前缀见对应适配器的 extractId）；过滤空值避免塌缩。
     const existingIds = new Set(existing.map(d => d.itemId).filter(Boolean));
     const existingByItemId = new Map(existing.filter(d => d.itemId).map(d => [d.itemId, d]));
     existingDramaSnapshot = existingByItemId;
@@ -984,9 +1055,9 @@
         // 保证弹窗/后台/CSV 的精确等值过滤对新卡永远成立。
         detailed.sourceListUrl = subscription.urlPattern;
 
-        // fandom 条目映射不到主站（itemId 仍为 mdf-/rsf-/smf- 临时键）＝给不了播放页，
-        // 不入库；未保存条目下轮抓取自动重试，文章补了回链即可正常入库
-        if (/^(mdf|rsf|smf)-/.test(String(detailed.itemId))) {
+        // fandom 条目映射不到主站（itemId 仍为 mdf-/rsf-/smf- 临时键，前缀表见 scrape-rules.js）
+        // ＝给不了播放页，不入库；未保存条目下轮抓取自动重试，文章补了回链即可正常入库
+        if (isUnmappedFandomKey(detailed.itemId)) {
           console.log(`[ShortScraping] fandom 未映射条目跳过入库: ${detailed.title}`);
           continue;
         }
@@ -1056,6 +1127,39 @@
   }
 
   /**
+   * 卡片骨架（各适配器 extractBasic 共用）：统一填 id / 翻译字段 / 状态 / 时间戳这些约定默认值，
+   * 适配器只传本站解析出的字段。以前 18 个 extract* 各手写一份 15 个字段的字面量，改一处约定
+   * （加字段、改 status 初值）要同步改 18 处，漏一处就静默产出形状不同的卡
+   * （审查 skeleton-literal-18x-dead-sourcelisturl）。
+   *
+   * fields 里给了就原样用（含空串 / 空数组），没给（undefined）才落默认值；键序与收拢前逐字一致。
+   * descriptionZh 恒从空串起步（MyDrama 平台中文简介由 applyMyDramaDescription 事后归位）。
+   * sourceListUrl 先填当前页地址：新卡入库前 scrapePage 会改写成命中的订阅 URL；去重命中的
+   * genres 回填提交（maybeBackfillGenres）不改写——后台只合并 genres，但若该卡恰在回填前被删，
+   * 后台会把这次提交当新卡存下，那时用的就是这个值，所以不是死字段，保留。
+   */
+  function createDramaCard(source, itemId, index, tags, fields) {
+    const { title, titleZh = '', poster = '', genres = [], description = '', url } = fields;
+    return {
+      id: `${source}_${itemId}_${index}`,
+      itemId,
+      title,
+      titleZh,
+      poster,
+      tags,
+      genres,
+      description,
+      descriptionZh: '',
+      source,
+      sourceListUrl: window.location.href,
+      status: 'new',
+      url,
+      scrapedAt: new Date().toISOString(),
+      translatedAt: null
+    };
+  }
+
+  /**
    * 从列表项提取
    */
   function extractFromListItem(item, index, tags = ['IMDB'], itemId = '') {
@@ -1118,23 +1222,8 @@
       }
     }
 
-    return {
-      id: `imdb_${resolvedItemId}_${index}`,
-      itemId: resolvedItemId,
-      title,
-      titleZh: '',
-      poster,
-      tags,
-      genres: [],                // 详情页 JSON-LD genre 补充
-      description: '',
-      descriptionZh: '',
-      source: 'imdb',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+    // genres 由详情页 JSON-LD genre 补充
+    return createDramaCard('imdb', resolvedItemId, index, tags, { title, poster, url });
   }
 
   /**
@@ -1142,23 +1231,11 @@
    */
   function buildSteamDramaSkeleton(appId, index, tags) {
     if (!appId) return null;
-    return {
-      id: `steam_${appId}_${index}`,
-      itemId: appId,
-      title: appId,            // 占位，fetchSteamDetail 用英文名覆盖
-      titleZh: '',
-      poster: '',              // 占位，fetchSteamDetail 用 header_image 覆盖
-      tags,
-      genres: [],              // 占位，fetchSteamDetail 用 appdetails genres 覆盖
-      description: '',
-      descriptionZh: '',
-      source: 'steam',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url: `https://store.steampowered.com/app/${appId}/`,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+    // title 先拿 appId 占位；title / poster / genres / 简介都由 fetchSteamDetail 用 appdetails 覆盖
+    return createDramaCard('steam', appId, index, tags, {
+      title: appId,
+      url: `https://store.steampowered.com/app/${appId}/`
+    });
   }
 
   /**
@@ -1193,23 +1270,13 @@
     const descEl = item.querySelector('div[id^="description-"]');
     const description = extractParagraphText(descEl);
 
-    return {
-      id: `royalroad_${rrId}_${index}`,
-      itemId: rrId,
+    return createDramaCard('royalroad', rrId, index, tags, {
       title,
-      titleZh: '',
       poster,
-      tags,
       genres: cleanGenres(Array.from(item.querySelectorAll('a.fiction-tag')).map(a => a.textContent)),
       description,
-      descriptionZh: '',
-      source: 'royalroad',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url
+    });
   }
 
   /**
@@ -1219,15 +1286,8 @@
     if (!drama.url) return drama;
 
     try {
-      const response = await fetchWithTimeout(drama.url, {
-        headers: { 'Accept': 'text/html' }
-      });
-
-      if (!response.ok) return drama;
-
-      const html = await response.text();
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
+      const doc = await fetchServerDocument(drama.url);
+      if (!doc) return drama;
 
       // 完整简介：非空才覆盖列表页版本
       const fullDesc = extractParagraphText(
@@ -1245,7 +1305,7 @@
 
   /**
    * 等 My Drama 首页 hydrate 完成再取「最流行」条目：SSR 只直出首屏几条，
-   * 轮询到条目数非 0 且连续两次不再变化即认为轮播已填满，最长约 8 秒。
+   * 轮询到条目数非 0 且连续两次不再变化即认为轮播已填满，最长约 8 秒（pollUntilStable）。
    */
   async function waitForMyDramaItems(sectionId) {
     const query = () => Array.from(
@@ -1253,14 +1313,7 @@
       // querySelectorAll 会抛 SyntaxError 让整页抓取失败，须转义
       document.querySelectorAll(`#${CSS.escape(sectionId)} [data-testid="series-section-item"]`)
     );
-    let last = -1;
-    for (let i = 0; i < 16; i++) {
-      const items = query();
-      if (items.length > 0 && items.length === last) return items;
-      last = items.length;
-      await new Promise(r => setTimeout(r, 500));
-    }
-    return query();
+    return pollUntilStable(query, items => items.length);
   }
 
   /**
@@ -1279,7 +1332,8 @@
    */
   function applyMyDramaDescription(drama, text) {
     if (!text) return;
-    if (/[一-鿿]/.test(text)) {
+    // 与标题同一个中文判据（含扩展 A 区），同一段文本不会在标题和简介上判成两种语言
+    if (TranslateConfig.hasChineseChars(text)) {
       drama.descriptionZh = text;
     } else {
       drama.description = text;
@@ -1330,35 +1384,12 @@
     const descP = item.querySelector('p');
     const hoverDesc = descP ? descP.textContent.trim() : '';
 
-    const drama = {
-      id: `mydrama_${mdId}_${index}`,
-      itemId: mdId,
-      title: title || mdId,
-      titleZh,
-      poster,
-      tags,
-      genres: [],                // 列表无类型字段，详情页 JSON-LD 补采（fetchMyDramaDetail）
-      description: '',
-      descriptionZh: '',
-      source: 'mydrama',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+    // 列表无类型字段，genres 由详情页 JSON-LD 补采（fetchMyDramaDetail）
+    const drama = createDramaCard('mydrama', mdId, index, tags, { title: title || mdId, titleZh, poster, url });
     applyMyDramaDescription(drama, hoverDesc);
     return drama;
   }
 
-  /**
-   * My Drama 详情页（播放页）补简介＋类型标签：正文由 RSC 客户端渲染、fetch 拿不到，
-   * 但 og:description / meta description 与 SEO 用 JSON-LD 静态直出——简介按
-   * 「{标题} - 集数 N - 在 My Drama 流媒体平台观看. {简介正文}」剥模板前缀取正文；
-   * genres 取 JSON-LD @graph 内 VideoObject.genre（英文原值、与浏览器语言无关，
-   * 页面上渲染的中文标签是前端 i18n 译文）。平台自带中英文齐全时直接标记已翻译
-   * （对齐 Steam 官方中文范式）；任何失败都保留列表页数据。
-   */
   /**
    * 经后台代理取主站播放页 HTML（v1.5.5）：fandom 子域上的 content script 直连
    * my-drama.com 被页面 CORS 拦（/video/ 响应无 ACAO 头，2026-08-09 实测），
@@ -1374,27 +1405,26 @@
     }
   }
 
+  /**
+   * My Drama 详情页（播放页）补简介＋类型标签：正文由 RSC 客户端渲染、fetch 拿不到，
+   * 但 og:description / meta description 与 SEO 用 JSON-LD 静态直出——简介按
+   * 「{标题} - 集数 N - 在 My Drama 流媒体平台观看. {简介正文}」剥模板前缀取正文；
+   * genres 取 JSON-LD @graph 内 VideoObject.genre（英文原值、与浏览器语言无关，
+   * 页面上渲染的中文标签是前端 i18n 译文）。平台自带中英文齐全时直接标记已翻译
+   * （对齐 Steam 官方中文范式）；任何失败都保留列表页数据。
+   */
   async function fetchMyDramaDetail(drama) {
     if (!drama.url) return drama;
 
     try {
       // fandom 子域上处理主站条目（Most Trending 菜单直链、去重回填）时直连被
       // 页面 CORS 拦，跨源改经后台代理取 HTML；同源保持直连（v1.5.5）
-      let html;
-      if (new URL(drama.url, window.location.href).origin === window.location.origin) {
-        const response = await fetchWithTimeout(drama.url, {
-          headers: { 'Accept': 'text/html' }
-        });
-
-        if (!response.ok) return drama;
-
-        html = await response.text();
-      } else {
-        html = await fetchDetailHtmlViaBackground(drama.url);
-        if (html === null) return drama;
-      }
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
+      const html = new URL(drama.url, window.location.href).origin === window.location.origin
+        ? await fetchServerHtml(drama.url)
+        : await fetchDetailHtmlViaBackground(drama.url);
+      if (html === null) return drama;
+      const doc = parseHtmlDocument(html);
+      if (!doc) return drama;
 
       const meta = doc.querySelector('meta[property="og:description"]') ||
                    doc.querySelector('meta[name="description"]');
@@ -1480,23 +1510,20 @@
     const img = item.querySelector('.wp-block-post-featured-image img');
     const poster = img ? (img.currentSrc || img.src || '') : '';
 
-    return {
-      id: `mydrama_${mdfId}_${index}`,
-      itemId: mdfId,
-      title: title || mdfId,
-      titleZh: '',
-      poster,
-      tags,
-      genres: [],                // fandom 文章无类型数据；映射回主站后条目再现于主站榜单时经回填补采
-      description: '',
-      descriptionZh: '',
-      source: 'mydrama',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+    // fandom 文章无类型数据，genres 留空；映射回主站后条目再现于主站榜单时经回填补采
+    return createDramaCard('mydrama', mdfId, index, tags, { title: title || mdfId, poster, url });
+  }
+
+  /**
+   * WordPress 文章页正文容器内的前 3 个长段落（MyDrama 与 ReelShort 两个 fandom 共用）：
+   * 导航菜单等短文本被长度阈值排除。拼成简介前由调用方决定取不到时的兜底。
+   */
+  function articleLeadParagraphs(doc) {
+    const content = doc.querySelector('.entry-content') || doc.querySelector('main') || doc.body;
+    return Array.from(content.querySelectorAll('p'))
+      .map(p => p.textContent.trim())
+      .filter(t => t.length > 80)
+      .slice(0, 3);
   }
 
   /**
@@ -1511,15 +1538,8 @@
     if (!drama.url) return drama;
 
     try {
-      const response = await fetchWithTimeout(drama.url, {
-        headers: { 'Accept': 'text/html' }
-      });
-
-      if (!response.ok) return drama;
-
-      const html = await response.text();
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
+      const doc = await fetchServerDocument(drama.url);
+      if (!doc) return drama;
 
       const mainLink = doc.querySelector('a[href*="my-drama.com/video/"]');
       const vid = mainLink ? (mainLink.getAttribute('href') || '').match(/\/video\/([0-9a-f-]{36})/) : null;
@@ -1532,8 +1552,9 @@
         const known = existingDramaSnapshot.get(drama.itemId);
         if (!(known && Array.isArray(known.genres) && known.genres.length > 0)) {
           const detailHtml = await fetchDetailHtmlViaBackground(drama.url);
-          if (detailHtml) {
-            const genres = extractJsonLdGenres(parser.parseFromString(detailHtml, 'text/html'));
+          const detailDoc = detailHtml ? parseHtmlDocument(detailHtml) : null;
+          if (detailDoc) {
+            const genres = extractJsonLdGenres(detailDoc);
             if (genres.length) drama.genres = genres;
           }
         }
@@ -1548,12 +1569,7 @@
         drama.poster = ogImage ? (ogImage.getAttribute('content') || '').trim() : '';
       }
 
-      // 正文容器内前 3 个长段落当简介；导航菜单等短文本被长度阈值排除
-      const content = doc.querySelector('.entry-content') || doc.querySelector('main') || doc.body;
-      const paras = Array.from(content.querySelectorAll('p'))
-        .map(p => p.textContent.trim())
-        .filter(t => t.length > 80)
-        .slice(0, 3);
+      const paras = articleLeadParagraphs(doc);
       if (paras.length) drama.description = paras.join('\n');
 
       console.log(`[ShortScraping] fandom 详情: ${drama.title} | 主站映射: ${vid ? drama.itemId : '无'} | 简介: ${drama.description ? '有' : '无'}`);
@@ -1566,7 +1582,7 @@
 
   /**
    * 读取 Next.js Pages Router 的 SSR 数据（script#__NEXT_DATA__），列表页与详情页
-   * 共用，ReelShort 与 DramaShorts 两站通用。解析失败返回 null。
+   * 共用，ReelShort / DramaShorts / DramaBox 三站通用。解析失败返回 null。
    */
   function readNextData(doc = document) {
     try {
@@ -1606,14 +1622,6 @@
   }
 
   /**
-   * 类型标签清洗（多适配器共用）：trim、去空、按原值去重。
-   * 存站点原始英文值，不做翻译（2026-08-02 用户定）。
-   */
-  function cleanGenres(list) {
-    return [...new Set((Array.isArray(list) ? list : []).map(v => String(v || '').trim()).filter(Boolean))];
-  }
-
-  /**
    * 从「TOP」板块的 book 对象提取基础信息。
    * special_desc 是截断版简介，先入库兜底，完整版由详情页覆盖。
    * url 先存 /full-episodes/ 全集页形态兜底（与 /movie/ 剧目页共用
@@ -1623,23 +1631,13 @@
   function extractReelshortFromBook(book, index, tags, rsId) {
     const title = (book.book_title || '').trim();
     const slug = slugifyTitle(title) || 'x';
-    return {
-      id: `reelshort_${rsId}_${index}`,
-      itemId: rsId,
+    return createDramaCard('reelshort', rsId, index, tags, {
       title: title || rsId,
-      titleZh: '',
       poster: book.book_pic || book.default_pic || '',
-      tags,
       genres: cleanGenres(book.theme),   // 列表 theme 兜底（通常 1 个），详情页 tag_list 覆盖
       description: (book.special_desc || '').trim(),
-      descriptionZh: '',
-      source: 'reelshort',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url: `https://www.reelshort.com/full-episodes/${slug}-${book.book_id}`,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: `https://www.reelshort.com/full-episodes/${slug}-${book.book_id}`
+    });
   }
 
   /**
@@ -1670,15 +1668,15 @@
 
     try {
       const detailUrl = drama.url.replace('/full-episodes/', '/movie/');
+      // 下面要用 response.url（301 规范化后的地址）拼播放页，fetchServerHtml 只交文本，故直接 fetch
       const response = await fetchWithTimeout(detailUrl, {
         headers: { 'Accept': 'text/html' }
       });
 
       if (!response.ok) return drama;
 
-      const html = await response.text();
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
+      const doc = parseHtmlDocument(await response.text());
+      if (!doc) return drama;
 
       const detail = readNextData(doc)?.props?.pageProps?.data;
       if (detail) {
@@ -1733,23 +1731,8 @@
       ? excerptP.textContent.replace(/\[(…|\.\.\.)\]\s*$/, '').trim()
       : '';
 
-    return {
-      id: `reelshort_${rsfId}_${index}`,
-      itemId: rsfId,
-      title: title || rsfId,
-      titleZh: '',
-      poster,
-      tags,
-      genres: [],                // 映射回主站后由 /movie/ 页 tag_list 补充
-      description: excerpt,
-      descriptionZh: '',
-      source: 'reelshort',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+    // genres 留空，映射回主站后由 /movie/ 页 tag_list 补充
+    return createDramaCard('reelshort', rsfId, index, tags, { title: title || rsfId, poster, description: excerpt, url });
   }
 
   /**
@@ -1767,15 +1750,8 @@
     if (!drama.url) return drama;
 
     try {
-      const response = await fetchWithTimeout(drama.url, {
-        headers: { 'Accept': 'text/html' }
-      });
-
-      if (!response.ok) return drama;
-
-      const html = await response.text();
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
+      const doc = await fetchServerDocument(drama.url);
+      if (!doc) return drama;
 
       const mainLink = doc.querySelector('a[href*="reelshort.com/movie/"], a[href^="/movie/"]');
       const mainHref = mainLink ? (mainLink.getAttribute('href') || '') : '';
@@ -1788,9 +1764,10 @@
         const movieUrl = u.toString();
         drama.url = movieUrl.replace('/movie/', '/full-episodes/');
         try {
+          // 要读 movieResp.url（301 规范化后的地址），同主站详情，直接 fetch
           const movieResp = await fetchWithTimeout(movieUrl, { headers: { 'Accept': 'text/html' } });
           if (movieResp.ok) {
-            const movieDoc = parser.parseFromString(await movieResp.text(), 'text/html');
+            const movieDoc = parseHtmlDocument(await movieResp.text());
             const movieDetail = readNextData(movieDoc)?.props?.pageProps?.data;
             const canonical = (movieResp.url || '').split('?')[0] || movieUrl;
             const episodeUrl = buildReelshortEpisodeUrl(canonical, movieDetail);
@@ -1813,12 +1790,7 @@
         drama.poster = ogImage ? (ogImage.getAttribute('content') || '').trim() : '';
       }
 
-      // 正文容器内前 3 个长段落当简介；导航菜单等短文本被长度阈值排除
-      const content = doc.querySelector('.entry-content') || doc.querySelector('main') || doc.body;
-      const paras = Array.from(content.querySelectorAll('p'))
-        .map(p => p.textContent.trim())
-        .filter(t => t.length > 80)
-        .slice(0, 3);
+      const paras = articleLeadParagraphs(doc);
       if (paras.length) {
         drama.description = paras.join('\n');
       } else {
@@ -1879,23 +1851,13 @@
    */
   function extractDramashortsFromMovie(movie, index, tags, dsId) {
     const images = movie.images || {};
-    return {
-      id: `dramashorts_${dsId}_${index}`,
-      itemId: dsId,
+    return createDramaCard('dramashorts', dsId, index, tags, {
       title: (movie.title || '').trim() || dsId,
-      titleZh: '',
       poster: buildDramashortsPosterUrl(images.coverWithTitle || images.cover),
-      tags,
       genres: movie.genre && movie.genre.title ? [String(movie.genre.title).trim()] : [],
       description: (movie.description || '').trim(),
-      descriptionZh: '',
-      source: 'dramashorts',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url: `https://dramashorts.io/shorts/${dsId.slice(2)}`,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: `https://dramashorts.io/shorts/${dsId.slice(2)}`
+    });
   }
 
   /**
@@ -1924,33 +1886,18 @@
 
   /**
    * 从 flight 文本截取 "<key>": 后的 JSON 数组并解析。数组终点用字符串感知的
-   * 括号匹配定位（标题等字符串值里可能出现 [ ]，纯计数会截错）。失败返回 null。
+   * 括号匹配定位（sliceBalanced；标题等字符串值里可能出现 [ ]，纯计数会截错）。失败返回 null。
    */
   function parseFlightArray(flight, key) {
     const anchor = flight.indexOf(`"${key}":`);
     if (anchor < 0) return null;
-    const start = flight.indexOf('[', anchor);
-    if (start < 0) return null;
-    let depth = 0;
-    let inString = false;
-    for (let i = start; i < flight.length; i++) {
-      const c = flight[i];
-      if (inString) {
-        if (c === '\\') i++;
-        else if (c === '"') inString = false;
-        continue;
-      }
-      if (c === '"') inString = true;
-      else if (c === '[') depth++;
-      else if (c === ']' && --depth === 0) {
-        try {
-          return JSON.parse(flight.slice(start, i + 1));
-        } catch (e) {
-          return null;
-        }
-      }
+    const literal = sliceBalanced(flight, flight.indexOf('[', anchor), '[', ']');
+    if (!literal) return null;
+    try {
+      return JSON.parse(literal);
+    } catch (e) {
+      return null;
     }
-    return null;
   }
 
   /**
@@ -1985,28 +1932,18 @@
     const path = typeof item.shortPlayNameUrl === 'string' && item.shortPlayNameUrl.startsWith('/')
       ? item.shortPlayNameUrl
       : `/episode/${slugifyTitle(item.shortPlayName) || 'x'}-${nsId.slice(2)}`;
-    return {
-      id: `netshort_${nsId}_${index}`,
-      itemId: nsId,
+    return createDramaCard('netshort', nsId, index, tags, {
       title: (item.shortPlayName || '').trim() || nsId,
-      titleZh: '',
       poster: (item.shortPlayCover || '').trim(),
-      tags,
       genres: cleanGenres((item.labelList || []).map(l => l && l.labelName)),
       description: (item.shotIntroduce || '').trim(),
-      descriptionZh: '',
-      source: 'netshort',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url: `https://netshort.com${path}`,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: `https://netshort.com${path}`
+    });
   }
 
   /**
-   * 板块标题归一化（NetShort / FlickReels 共用；抽自 getNetshortItems 的内联 normalize，语义
-   * 不变）：小写、非字母数字连续段折成 '_'、去首尾 '_'。emoji 是多码元也整段折掉：
+   * 板块标题归一化（readListParam 与各板块类适配器的板块查找共用；抽自 getNetshortItems 的
+   * 内联 normalize，语义不变）：小写、非字母数字连续段折成 '_'、去首尾 '_'。emoji 是多码元也整段折掉：
    * '🔥🔥🔥Hot Picks ' → hot_picks、'7-Day Star🥇🥈🥉' → 7_day_star。
    */
   function normalizeSectionName(name) {
@@ -2208,81 +2145,16 @@
     }
     const cover = String(item.cover || '').trim();
     const tail = item.has_collection === true ? 'full-movie' : 'episode-1';
-    return {
-      id: `flickreels_${frId}_${index}`,
-      itemId: frId,
+    return createDramaCard('flickreels', frId, index, tags, {
       title,
-      titleZh: '',
       poster: cover ? cover + (cover.includes('?') ? '' : FLICKREELS_POSTER_SUFFIX) : '',
-      tags,
       genres: cleanGenres((Array.isArray(item.tag_list) ? item.tag_list : []).map(t => t && t.name)),
       description: String(item.introduce || '').trim(),
-      descriptionZh: '',
-      source: 'flickreels',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url: new URL(`/playlist/${slug}/${frId.slice(2)}/${tail}`, 'https://www.flickreels.net').href,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: new URL(`/playlist/${slug}/${frId.slice(2)}/${tail}`, 'https://www.flickreels.net').href
+    });
   }
 
   /* ——— GoodShort / Shortical / ShortMax（v1.6.9）——————————————————————— */
-
-  /**
-   * 同源重取当前页的**服务端原始 HTML 文本**（GoodShort 与 ShortMax 共用）。
-   * 两家都不能读实时 DOM，理由各不相同、但解法相同：
-   *   · GoodShort 的 __INITIAL_STATE__ 内联脚本执行完就把自己从 DOM 里删掉；
-   *   · ShortMax 的板块 hydrate 后变成按视口裁剪的轮播（8 张卡在 799px 下只剩 5 张）。
-   * 同源请求不需要后台代理；失败返回 null，调用方按「本轮取不到」处理（下轮重试）。
-   */
-  async function fetchServerHtml(url = window.location.href) {
-    try {
-      const response = await fetchWithTimeout(url, { headers: { 'Accept': 'text/html' } });
-      if (!response.ok) {
-        console.warn(`[ShortScraping] 取服务端 HTML 失败 HTTP ${response.status}: ${url}`);
-        return null;
-      }
-      return await response.text();
-    } catch (e) {
-      console.warn(`[ShortScraping] 取服务端 HTML 异常: ${url}`, e.message);
-      return null;
-    }
-  }
-
-  function parseHtmlDocument(html) {
-    try {
-      return new DOMParser().parseFromString(html, 'text/html');
-    } catch (e) {
-      return null;
-    }
-  }
-
-  /**
-   * 从 text[start]（必须是 '{'）起做**字符串感知**的花括号匹配，截出完整的对象字面量。
-   * 不靠尾部锚点（GoodShort 的收尾是 `;(function(){…}())` 这种自删脚本，站点随时可改），
-   * 也不靠计数——简介里带 `{`/`}` 或引号时纯计数会截错（同 NetShort parseFlightArray 的理由）。
-   * 匹配不上返回 null。
-   */
-  function sliceBalancedObject(text, start) {
-    if (typeof text !== 'string' || text[start] !== '{') return null;
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    for (let i = start; i < text.length; i++) {
-      const ch = text[i];
-      if (inString) {
-        if (escaped) escaped = false;
-        else if (ch === '\\') escaped = true;
-        else if (ch === '"') inString = false;
-        continue;
-      }
-      if (ch === '"') inString = true;
-      else if (ch === '{') depth++;
-      else if (ch === '}' && --depth === 0) return text.slice(start, i + 1);
-    }
-    return null;
-  }
 
   // 站内卡片同款缩放参数（293×412 ≈28KB；原图 ≈271KB）。无逗号，两种形态 Lark 捷径都能转
   // 附件，但按 v1.6.4 定的「库里存小图、推出去放大」仍由 lark.js posterForPayload 剥掉
@@ -2302,7 +2174,7 @@
       console.log('[ShortScraping] GoodShort __INITIAL_STATE__ 未找到');
       return [];
     }
-    const literal = sliceBalancedObject(html, at + marker.length);
+    const literal = sliceBalanced(html, at + marker.length, '{', '}');
     if (!literal) {
       console.log('[ShortScraping] GoodShort __INITIAL_STATE__ 花括号不配对');
       return [];
@@ -2337,24 +2209,14 @@
     const genreNames = (Array.isArray(item.genreList) ? item.genreList : []).map(g => g && g.name);
     const tagNames = (Array.isArray(item.tagsList) ? item.tagsList : []).map(t => t && t.name);
 
-    return {
-      id: `goodshort_${gsId}_${index}`,
-      itemId: gsId,
+    return createDramaCard('goodshort', gsId, index, tags, {
       title,
-      titleZh: '',
       poster: cover ? cover + (cover.includes('?') ? '' : GOODSHORT_POSTER_SUFFIX) : '',
-      tags,
       genres: cleanGenres([...genreNames, ...tagNames]),
       description: String(item.introduction || '').trim(),
-      descriptionZh: '',
-      source: 'goodshort',
-      sourceListUrl: window.location.href,
-      status: 'new',
       // 订阅 URL 必须带 www（裸域 301 到 www），入库地址同口径
-      url: resource ? `https://www.goodshort.com/drama/${resource}` : '',
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: resource ? `https://www.goodshort.com/drama/${resource}` : ''
+    });
   }
 
   const SHORTICAL_ORIGIN = 'https://shortical.com';
@@ -2378,14 +2240,8 @@
         console.log(`[ShortScraping] Shortical sitemap HTTP ${response.status}`);
         return null;
       }
-      const xml = await response.text();
-      const map = new Map();
-      for (const match of xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)) {
-        const slug = (match[1].match(/\/drama\/([^/?#]+)/) || [])[1] || '';
-        if (!/-\d+$/.test(slug)) continue;
-        const base = slug.replace(/-\d+$/, '');
-        if (!map.has(base)) map.set(base, slug);   // 先到先得（实测零碰撞）
-      }
+      // 解析与后台 migrateShorticalCanonicalIds 共用 ScrapeRules.parseShorticalSitemap
+      const map = parseShorticalSitemap(await response.text());
       // 站点对未命中路径一律回 200＋9KB 空壳，所以「拿到响应」不等于「拿到 sitemap」
       if (!map.size) {
         console.log('[ShortScraping] Shortical sitemap 里没有 /drama/ 条目（疑似空壳响应）');
@@ -2471,7 +2327,7 @@
     return items;
   }
 
-  /** 等区块出现且卡片数连续两次不变（纯前端渲染，同 waitForMyDramaItems 范式，最长约 8 秒）。 */
+  /** 等区块出现且卡片数连续两次不变（纯前端渲染，同 waitForMyDramaItems 共用 pollUntilStable，最长约 8 秒）。 */
   async function waitForShorticalSection(wanted) {
     const query = () => {
       const heading = Array.from(document.querySelectorAll('h1, h2, h3'))
@@ -2483,16 +2339,7 @@
       }
       return node && node !== document.body ? node : null;
     };
-
-    let last = -1;
-    for (let i = 0; i < 16; i++) {
-      const section = query();
-      const count = section ? section.querySelectorAll('a[href*="/drama/"]').length : 0;
-      if (count > 0 && count === last) return section;
-      last = count;
-      await new Promise(r => setTimeout(r, 500));
-    }
-    return query();
+    return pollUntilStable(query, section => (section ? section.querySelectorAll('a[href*="/drama/"]').length : 0));
   }
 
   /**
@@ -2581,25 +2428,15 @@
   }
 
   function extractShorticalFromItem(item, index, tags, scId) {
-    return {
-      id: `shortical_${scId}_${index}`,
-      itemId: scId,
+    return createDramaCard('shortical', scId, index, tags, {
       title: String(item.title || '').trim(),
-      titleZh: '',
       poster: String(item.poster || '').trim(),
-      tags,
       genres: cleanGenres(item.categories),
       description: String(item.description || '').trim(),
-      descriptionZh: '',
-      source: 'shortical',
-      sourceListUrl: window.location.href,
-      status: 'new',
       // 规范 slug 来自 sitemap，不是首页 href（那个号一大半是 404）；裸域形态，
       // 订阅与入库同口径（www.shortical.com 会 301 到裸域）
-      url: item.slug ? `${SHORTICAL_ORIGIN}/drama/${item.slug}` : '',
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: item.slug ? `${SHORTICAL_ORIGIN}/drama/${item.slug}` : ''
+    });
   }
 
   const SHORTMAX_ORIGIN = 'https://www.shorttv.live';
@@ -2635,8 +2472,7 @@
     const wanted = readListParam('most_popular');
     if (!wanted) return [];
 
-    const html = await fetchServerHtml();
-    const doc = html ? parseHtmlDocument(html) : null;
+    const doc = await fetchServerDocument();
     if (!doc) return [];
 
     const section = Array.from(doc.querySelectorAll('section.section'))
@@ -2667,26 +2503,16 @@
   }
 
   function extractShortmaxHomeFromItem(item, index, tags, smId) {
-    // 条目 url 存第一集播放页（同 ReelShort/NetShort 约定）；站点数据没给就按 id 构造不了，
-    // 退回详情页地址——两者都是有效落点，详情补采按 shortmaxDetailUrl 推导
+    // 条目 url 存第一集播放页（同 ReelShort/NetShort 约定），详情补采按 shortmaxDetailUrl 由它推导。
+    // 站点数据没给播放页链接时按 id 构造不了，url 留空——fetchShortmaxDetail 推不出详情页地址，
+    // 该卡本轮跳过、下轮重试（并没有退回详情页地址，见审查 shortmax-no-episode-link-skipped）
     const episode = item.episodeHref ? new URL(item.episodeHref, SHORTMAX_ORIGIN).href : '';
-    return {
-      id: `shortmax_${smId}_${index}`,
-      itemId: smId,
+    // 列表无类型字段、无简介，genres 与简介都留空：详情页 .tags 与 meta[name=description] 才是来源
+    return createDramaCard('shortmax', smId, index, tags, {
       title: String(item.title || '').trim(),
-      titleZh: '',
       poster: shortmaxPoster(item.cover),
-      tags,
-      genres: [],                 // 列表无类型字段，详情页 .tags 是权威源
-      description: '',            // 列表无简介，只有详情页 meta[name=description] 有
-      descriptionZh: '',
-      source: 'shortmax',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url: episode,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: episode
+    });
   }
 
   /**
@@ -2702,8 +2528,7 @@
       return null;
     }
 
-    const html = await fetchServerHtml(detailUrl);
-    const doc = html ? parseHtmlDocument(html) : null;
+    const doc = await fetchServerDocument(detailUrl);
     if (!doc) return null;
 
     const metaDesc = doc.querySelector('meta[name="description"]');
@@ -2733,8 +2558,7 @@
    * 封面刻意不用 fandom 卡自己那张——是 1200×630 横版且带会过期的 auth_key。
    */
   async function getShortmaxFandomItems() {
-    const html = await fetchServerHtml();
-    const doc = html ? parseHtmlDocument(html) : null;
+    const doc = await fetchServerDocument();
     if (!doc) return [];
 
     const items = [];
@@ -2758,23 +2582,13 @@
   }
 
   function extractShortmaxFandomFromItem(item, index, tags, tempId) {
-    return {
-      id: `shortmax_${tempId}_${index}`,
-      itemId: tempId,             // smf-+slug，映射成功后由 fetchShortmaxFandomDetail 改写
+    // itemId 是 smf-+slug 临时键，映射成功后由 fetchShortmaxFandomDetail 改写；
+    // poster 留空，映射到主站后取详情页的竖版封面
+    return createDramaCard('shortmax', tempId, index, tags, {
       title: String(item.title || '').trim(),
-      titleZh: '',
-      poster: '',                 // 映射到主站后取详情页的竖版封面
-      tags,
-      genres: [],
       description: String(item.description || '').trim(),
-      descriptionZh: '',
-      source: 'shortmax',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url: item.href ? new URL(item.href, SHORTMAX_ORIGIN).href : '',
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: item.href ? new URL(item.href, SHORTMAX_ORIGIN).href : ''
+    });
   }
 
   /**
@@ -2785,8 +2599,7 @@
   async function fetchShortmaxFandomDetail(drama) {
     if (!drama.url) return drama;
 
-    const html = await fetchServerHtml(drama.url);
-    const doc = html ? parseHtmlDocument(html) : null;
+    const doc = await fetchServerDocument(drama.url);
     if (!doc) return drama;
 
     const episodeLink = Array.from(doc.querySelectorAll('a[href*="/episode/"]'))
@@ -2848,27 +2661,17 @@
     const typeNames = Array.isArray(item.typeTwoNames) ? item.typeTwoNames : [];
     const tagNames = Array.isArray(item.tags) ? item.tags : [];
 
-    return {
-      id: `dramabox_${dbId}_${index}`,
-      itemId: dbId,
+    return createDramaCard('dramabox', dbId, index, tags, {
       title: String(item.bookName || item.name || '').trim(),
-      titleZh: '',
       // 站点给的就是站内卡片同款缩略图形态（…jpg@w=240&h=400，240×320 ≈24KB），原样存；
       // 推送侧由 lark.js 的 posterForPayload 剥掉 @ 尾段取原图（600×800 ≈99KB）
       poster: String(item.cover || '').trim(),
-      tags,
       genres: cleanGenres([...typeNames, ...tagNames]),
       description: String(item.introduction || '').trim(),
-      descriptionZh: '',
-      source: 'dramabox',
-      sourceListUrl: window.location.href,
-      status: 'new',
       url: bookId
         ? `${DRAMABOX_ORIGIN}/drama/${bookId}${slug ? `/${encodeURIComponent(slug)}` : ''}`
-        : '',
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+        : ''
+    });
   }
 
   /* ——— PinesDramas（pinedrama.com，v1.6.12）———————————————————————————— */
@@ -2995,25 +2798,14 @@
   }
 
   function extractPinedramaFromItem(item, index, tags, pdId) {
-    return {
-      id: `pinedrama_${pdId}_${index}`,
-      itemId: pdId,
+    // genres 与简介都由 fetchPinedramaDetail 从详情页补
+    return createDramaCard('pinedrama', pdId, index, tags, {
       title: String(item.title || '').trim(),
-      titleZh: '',
       // 站点卡片同款缩略图（200×270 ≈7.8KB）原样存；推送侧由 lark.js 的 posterForPayload
       // 剥掉 !<数字>.webp 尾缀取原图（960×1478 ≈213KB），同 DramaBox 范式
       poster: String(item.poster || '').trim(),
-      tags,
-      genres: [],
-      description: '',
-      descriptionZh: '',
-      source: 'pinedrama',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url: `${PINEDRAMA_ORIGIN}/${item.kind === 'drama' ? 'dramas' : 'novels'}/${item.slug}`,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: `${PINEDRAMA_ORIGIN}/${item.kind === 'drama' ? 'dramas' : 'novels'}/${item.slug}`
+    });
   }
 
   /**
@@ -3198,23 +2990,13 @@
       ? (video.number != null ? `${parentTitle}: Season ${video.number}` : parentTitle)
       : nfId;
     const artwork = item.artwork || {};
-    return {
-      id: `netflix_${nfId}_${index}`,
-      itemId: nfId,
+    // 榜单数据无内容类型字段，genres 留空（fetchNetflixDetail 补）
+    return createDramaCard('netflix', nfId, index, tags, {
       title: (typeof video.title === 'string' && video.title.trim()) || fallbackTitle,
-      titleZh: '',
       poster: netflixArtUrl(artwork.storyArt) || netflixArtUrl(artwork.sdpArt),
-      tags,
-      genres: [],                // 榜单数据无内容类型字段
       description: typeof video.shortSynopsis === 'string' ? video.shortSynopsis.trim() : '',
-      descriptionZh: '',
-      source: 'netflix',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url: `https://www.netflix.com/title/${nfId.slice(2)}`,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: `https://www.netflix.com/title/${nfId.slice(2)}`
+    });
   }
 
   /**
@@ -3236,7 +3018,8 @@
       const html = await fetchDetailHtmlViaBackground(drama.url);
       if (html === null) return drama;
 
-      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const doc = parseHtmlDocument(html);
+      if (!doc) return drama;
       const root = readNetflixReactContext(doc);
       const data = root && root.models && root.models.nmTitleGQL ? root.models.nmTitleGQL.data : null;
       const coreGenre = data && data.genreInfo ? data.genreInfo.coreGenre : null;
@@ -3347,23 +3130,13 @@
    */
   function extractAppleFromItem(item, index, tags, atId) {
     const detailUrl = String((item.contextAction && item.contextAction.url) || '').split('?')[0].trim();
-    return {
-      id: `appletv_${atId}_${index}`,
-      itemId: atId,
+    // 榜单数据无简介，留空由详情页补
+    return createDramaCard('appletv', atId, index, tags, {
       title: (typeof item.title === 'string' && item.title.trim()) || atId.slice(2),
-      titleZh: '',
       poster: appleArtUrl(item.artwork && item.artwork.template),
-      tags,
       genres: cleanGenres([item.caption]),
-      description: '',           // 榜单数据无简介，由详情页补
-      descriptionZh: '',
-      source: 'appletv',
-      sourceListUrl: window.location.href,
-      status: 'new',
-      url: detailUrl,
-      scrapedAt: new Date().toISOString(),
-      translatedAt: null
-    };
+      url: detailUrl
+    });
   }
 
   /**
@@ -3415,15 +3188,8 @@
     if (!drama.url) return drama;
 
     try {
-      const response = await fetchWithTimeout(drama.url, {
-        headers: { 'Accept': 'text/html' }
-      });
-
-      if (!response.ok) return drama;
-
-      const html = await response.text();
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
+      const doc = await fetchServerDocument(drama.url);
+      if (!doc) return drama;
 
       // 提取简介
       drama.description = extractDescription(doc);

@@ -132,10 +132,10 @@ for (const rel of filesToScan) {
 // ---------- T4 接线静态断言 ----------
 const manifest = JSON.parse(fs.readFileSync(path.join(worktreeRoot, 'manifest.json'), 'utf8'));
 // content.js 依赖的共享模块清单（v1.6.2 起含 translate-config：Steam 官方中文
-// 采用判据 hasChineseChars 在那里）。manifest 注入与后台强制注入必须逐字一致——
+// 采用判据 hasChineseChars 在那里；v1.6.18 起含 scrape-rules：与后台共用的采集口径）。manifest 注入与后台强制注入必须逐字一致——
 // 兜底注入路径漏一个模块＝content.js 直接 ReferenceError，而那条路径正是后台
 // 节流标签页的常态入口
-const CONTENT_SCRIPT_FILES = ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/content/content.js'];
+const CONTENT_SCRIPT_FILES = ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/shared/scrape-rules.js', 'src/content/content.js'];
 check('T4a manifest content_scripts js 数组前置共享模块',
   deepEq(manifest.content_scripts[0].js, CONTENT_SCRIPT_FILES),
   JSON.stringify(manifest.content_scripts[0].js));

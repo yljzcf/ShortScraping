@@ -54,10 +54,6 @@
     return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null;
   }
 
-  function pickDefaultSource(dramas) {
-    return CATEGORY_SOURCES.find(src => (dramas || []).some(d => dramaSource(d) === src)) || 'imdb';
-  }
-
   /**
    * 按日期和时间分组（±1min 合并）
    */
@@ -136,14 +132,6 @@
     if (minutes < 60) return `${minutes} 分钟前`;
     if (hours < 24) return `${hours} 小时前`;
     return `${days} 天前`;
-  }
-
-  /**
-   * 截断文本
-   */
-  function truncate(text, maxLen) {
-    if (!text) return '';
-    return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
   }
 
   /**
@@ -460,7 +448,6 @@
     dramaSource,
     titleDisplay: titleDisplayOf,
     orientationFromPoster,
-    pickDefaultSource,
     groupByDate,
     renderTimeline,
     createDramaCard,
@@ -469,7 +456,6 @@
     getDisplayGenres,
     formatTime,
     formatRelativeTime,
-    truncate,
     escapeHtml,
     escapeAttribute
   };

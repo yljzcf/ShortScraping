@@ -7,6 +7,10 @@ import './bootstrap.cjs';
 //   L  readListParam：?list= 归一后为空 / 不认识 → 返回空数组，不再悄悄抓默认板块记到这条订阅下
 //      （审查 list-param-silent-default-fallback）。本文件覆盖 My Drama 主站与 fandom、NetShort、
 //      DramaShorts；FlickReels / ShortMax / Shortical / PinesDramas 各在自己的套件里（夹具在那边）。
+//   B  抓取按钮：样式只在 content.css（不写内联样式、不用 JS 模拟 :hover），文案走 textContent
+//      （审查 button-style-duplicated-dead-css）。
+//   S  批次 E 清理的源码守卫：卡片骨架、DOMParser、中文判据、与后台共用的采集口径各只剩一份
+//      （审查 skeleton-literal-18x-dead-sourcelisturl / intra-content-duplicate-helpers / cross-file-sync-constants）。
 // 用法：node tests/unit-content-robustness.mjs
 import fs from 'node:fs';
 
@@ -116,7 +120,9 @@ const codeOnly = contentSrc.split('\n').filter(line => !/^\s*(\*|\/\/)/.test(lin
   // 源码守卫：除 helper 自己那一次，content.js 里不得再有直连 fetch(
   const code = codeOnly;
   const direct = [...code.matchAll(/(?<![\w.])fetch\(/g)].length;
-  const routed = [...code.matchAll(/await fetchWithTimeout\(/g)].length;
+  // 同源取 HTML 收拢到 fetchServerHtml / fetchServerDocument 后（2026-09-25 审查 intra-content-duplicate-helpers），它们内部同样
+  // 只经 fetchWithTimeout 发请求（direct === 1 保证），调用点一并计入
+  const routed = [...code.matchAll(/await (?:fetchWithTimeout|fetchServerHtml|fetchServerDocument)\(/g)].length;
   check('T11 content.js 全部直连 fetch 都经 fetchWithTimeout（只剩 helper 内部一处）', direct === 1 && routed >= 12,
     show({ direct, routed }));
 }
@@ -309,6 +315,83 @@ const dsDocument = baseDocument({
 // ---------- L5：源码守卫——旧的「正则不过就退默认」写法不得回潮 ----------
 check('L5 content.js 不再有 /^[a-z0-9_-]+$/.test(list) ? list : 默认 的静默回退写法，也不再用 /[?&]list=trending/',
   !/\/\^\[a-z0-9_-\]\+\$\/\.test\(list\)/.test(codeOnly) && !/\/\[\?&\]list=trending\//.test(codeOnly), '');
+
+// ---------- B：抓取按钮只建节点、改文案，样式全交给 content.css ----------
+{
+  const STEAM_URL = 'https://store.steampowered.com/category/visual_novel?flavor=contenthub_newandtrending';
+  const json = obj => new Response(JSON.stringify(obj), { status: 200 });
+  const appended = [];
+  // 记录式按钮：内联样式的任何写入（含 cssText）、innerHTML 写入、注册的事件都留痕
+  const recordingButton = () => {
+    const styleWrites = [];
+    const innerHtmlWrites = [];
+    const handlers = {};
+    return {
+      style: new Proxy({}, { set(target, key, value) { styleWrites.push(String(key)); target[key] = value; return true; } }),
+      set innerHTML(value) { innerHtmlWrites.push(value); },
+      get innerHTML() { return ''; },
+      textContent: '',
+      disabled: false,
+      id: '',
+      addEventListener(type, fn) { (handlers[type] ||= []).push(fn); },
+      querySelector() { return null; },
+      styleWrites, innerHtmlWrites, handlers
+    };
+  };
+  await runScenario({
+    href: STEAM_URL,
+    document: baseDocument({ createElement: recordingButton, body: { appendChild(node) { appended.push(node); } } }),
+    fetch: async url => {
+      if (url.includes('ajaxgetsaledynamicappquery')) return json({ appids: [333] });
+      if (url.includes('appids=333&l=english')) return json({ 333: { success: true, data: { name: 'Button Game', short_description: 'sd', genres: [] } } });
+      return json({});
+    }
+  });
+  const btn = appended.find(node => node.id === 'dramamo-scrape-btn');
+  check('B1 按钮已挂载，初始文案走 textContent', !!btn && btn.textContent === '🎬 抓取到 ShortScraping',
+    show(btn && btn.textContent));
+  check('B2 不写任何内联样式（cssText / transform 都不写，:hover/:active/:disabled 才不被压住）',
+    !!btn && btn.styleWrites.length === 0, show(btn && btn.styleWrites));
+  check('B3 不用 mouseenter / mouseleave 模拟 :hover，只挂 click', !!btn && show(Object.keys(btn.handlers)) === show(['click']),
+    show(btn && Object.keys(btn.handlers)));
+  if (btn && btn.handlers.click) {
+    const clicking = btn.handlers.click[0]();
+    check('B4 点击后立即禁用并显示「抓取中」', btn.disabled === true && btn.textContent === '⏳ 抓取中...',
+      show({ disabled: btn.disabled, text: btn.textContent }));
+    await within(clicking, 5000);
+    // 'scrape' 消息那一轮已把 333 存进桩库，按钮这一轮是去重命中 → 新增 0 部；禁用要停 2 秒才复原
+    check('B5 抓完显示新增数、仍保持禁用（2 秒后复原）', btn.textContent === '✅ 新增 0 部' && btn.disabled === true,
+      show({ disabled: btn.disabled, text: btn.textContent }));
+  }
+  check('B6 全程没有写 innerHTML（文案都是纯文本）', !!btn && btn.innerHtmlWrites.length === 0, show(btn && btn.innerHtmlWrites));
+  const css = fs.readFileSync(new URL('../src/content/content.css', import.meta.url), 'utf8');
+  check('B7 content.css 自带按钮的基础 / :hover / :active / :disabled 规则（样式唯一来源）',
+    ['#dramamo-scrape-btn {', '#dramamo-scrape-btn:hover {', '#dramamo-scrape-btn:active {', '#dramamo-scrape-btn:disabled {']
+      .every(sel => css.includes(sel)), '');
+}
+
+// ---------- S：批次 E 清理的源码守卫——收拢过的东西不得各自回潮 ----------
+{
+  const count = re => [...codeOnly.matchAll(re)].length;
+  const skeleton = {
+    status: count(/status: 'new'/g),
+    sourceListUrl: count(/sourceListUrl: window\.location\.href/g),
+    translatedAt: count(/translatedAt: null/g)
+  };
+  check('S1 卡片骨架只有 createDramaCard 一份（新增适配器传字段即可，不再手抄 15 个键）',
+    skeleton.status === 1 && skeleton.sourceListUrl === 1 && skeleton.translatedAt === 1 && /function createDramaCard\(/.test(codeOnly),
+    show(skeleton));
+  check('S2 HTML 解析只在 parseHtmlDocument 里 new DOMParser 一次', count(/new DOMParser\(\)/g) === 1,
+    show(count(/new DOMParser\(\)/g)));
+  check('S3 中文判定统一走 TranslateConfig.hasChineseChars，不再手写 /[一-鿿]/（少了扩展 A 区）',
+    !/\[一-鿿\]/.test(codeOnly), '');
+  check('S4 括号配对 / 轮询到稳定 / 文章长段落各只剩一个 helper',
+    count(/function sliceBalanced\(/g) === 1 && !/function sliceBalancedObject\(/.test(codeOnly)
+      && count(/function pollUntilStable\(/g) === 1 && count(/\.filter\(t => t\.length > 80\)/g) === 1, '');
+  check('S5 与后台共用的采集口径不在 content.js 里另写（cleanGenres / fandom 前缀 / sitemap <loc> 解析都取自 ScrapeRules）',
+    /= ScrapeRules;/.test(codeOnly) && !/function cleanGenres\(/.test(codeOnly)
+      && !/\(mdf\|rsf\|smf\)/.test(codeOnly) && !/<loc>/.test(codeOnly), '');
+}
 
 await sleep(50);
 check('Z 全程无未处理的 Promise 拒绝（超时竞争的落败方已被接住）', unhandled === 0, `unhandled=${unhandled}`);

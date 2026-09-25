@@ -4,12 +4,13 @@
  * Chrome 扩展无法直接写入项目目录文件，因此由本地 Node 服务接收扩展数据，
  * 将时间线内容实时同步到 db/timeline.csv，并向局域网提供只读时间线页面。
  *
- * 启动：node server/sync-server.js [--local-only]
+ * 启动：node server/sync-server.js [--local-only] [--allow-host=<域名>]
  *   默认监听 0.0.0.0，局域网设备可通过 http://<本机IP>:31919/ 访问只读共享页；
- *   --local-only 退回仅本机 127.0.0.1。测试可用环境变量 PORT 覆盖端口。
+ *   --local-only 退回仅本机 127.0.0.1；--allow-host=<域名>（可多次）放行用该主机名访问共享页
+ *   （默认只认 IP 与 localhost，见 ALLOWED_HOSTS）。测试可用环境变量 PORT 覆盖端口。
  *
- * 安全边界：写入接口（POST /sync、POST /config/*）仅接受本机回环地址调用，
- * 局域网设备只能访问只读页面与只读数据接口；trans.json（含 API Key）与
+ * 安全边界：写入接口（POST /sync、POST /config/*、POST /shutdown、POST /restart）仅接受
+ * 本机回环地址调用，局域网设备只能访问只读页面与只读数据接口；trans.json（含 API Key）与
  * lark.json（webhook 地址即写权限凭据）均无任何读取接口。
  */
 
@@ -75,10 +76,15 @@ let updatedAt = null;
 let csvSerialized = '[]';
 const sseClients = new Set();
 
+// 本次启动时 CSV 不存在、由 ensureDb 新建了只有表头的空文件：停机期间被手删（或首次运行）。
+// loadSnapshot 据此让首次推送补写——新建文件比快照新，单看 mtime 认不出它落后
+let csvCreatedAtStartup = false;
+
 function ensureDb() {
   fs.mkdirSync(DB_DIR, { recursive: true });
   if (!fs.existsSync(CSV_PATH)) {
     fs.writeFileSync(CSV_PATH, TimelineCsv.buildTimelineCsv([]).content, 'utf8');
+    csvCreatedAtStartup = true;
   }
 }
 
@@ -249,7 +255,7 @@ function writeTagConfig(rawTags) {
 // 翻译 / Lark / 定时三个写回接口的请求体形态闸：必须是 { <key>: 普通对象 }，缺键、null、数组、
 // 键名写错一律返回 null（路由回 400、不落盘）。旧写法 `payload.X || {}` 会把缺键规范化成默认配置
 // 原子覆盖文件：API Key、webhook、App Secret 静默清空，且这三份没有 history 备份，
-// SW 下次唤醒还会把清空后的文件回灌进 storage。设置页 trySync* 始终发完整对象，不受影响
+// SW 下次唤醒还会把清空后的文件回灌进 storage。设置页 trySyncConfig 始终发完整对象，不受影响
 function pickConfigObject(payload, key) {
   const value = payload?.[key];
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
@@ -345,8 +351,9 @@ function loadSnapshot() {
     latestSerialized = JSON.stringify(latestDramas);
     // /sync 先写 json 再写 CSV，正常情况下 CSV 不会比快照旧；旧了说明上次运行里 CSV 写失败
     // （Windows 上被 Excel 锁住）后没等到补写就重启了——签名留空让首次推送补写，否则重启后
-    // 同内容推送会一直跳过它。CSV 被手删时 /sync 的 existsSync 守卫兜底
-    csvSerialized = csvOlderThanSnapshot() ? null : latestSerialized;
+    // 同内容推送会一直跳过它。服务运行期间 CSV 被手删，由 /sync 的 existsSync 守卫兜底；停机期间
+    // 被删的，启动时 ensureDb 已先建出只有表头的新文件（比快照新、mtime 认不出），靠 csvCreatedAtStartup 补上
+    csvSerialized = csvCreatedAtStartup || csvOlderThanSnapshot() ? null : latestSerialized;
     dataVersion = Number.isInteger(raw.version) ? raw.version : 0;
     updatedAt = raw.updatedAt || null;
     console.log(`[ShortScraping Sync] 已恢复时间线快照：${latestDramas.length} 条（version ${dataVersion}）`);
@@ -472,6 +479,8 @@ const STATIC_ROUTES = {
   '/shared/timeline-render.js': { file: path.join(SHARED_DIR, 'timeline-render.js'), type: 'text/javascript; charset=utf-8' },
   '/shared/site-registry.js': { file: path.join(SHARED_DIR, 'site-registry.js'), type: 'text/javascript; charset=utf-8' },
   '/shared/site-tabs.js': { file: path.join(SHARED_DIR, 'site-tabs.js'), type: 'text/javascript; charset=utf-8' },
+  // 弹窗与共享页共用的卡片/标签条样式（share.html 须在 share.css 之前引入）
+  '/shared/timeline-cards.css': { file: path.join(SHARED_DIR, 'timeline-cards.css'), type: 'text/css; charset=utf-8' },
   // timeline-render 的标题文案单一真源（v1.6.2）；漏了这条共享页直接白屏
   '/shared/translate-config.js': { file: path.join(SHARED_DIR, 'translate-config.js'), type: 'text/javascript; charset=utf-8' }
 };
@@ -666,7 +675,8 @@ async function handleRequest(req, res) {
       }
       const configured = filterDramasByTagConfig(dramas);
       // 同内容跳过 CSV 重写：扩展 SW 每次唤醒都预热推送，绝大多数与上次内容一致，
-      // 无谓的磁盘重写全部拦在这里；existsSync 守卫保住「CSV 被手删后下次推送自愈」的行为
+      // 无谓的磁盘重写全部拦在这里；existsSync 守卫保住「服务运行期间 CSV 被手删后下次推送自愈」的行为
+      //（停机期间被删的见 loadSnapshot）
       const serialized = JSON.stringify(configured);
       const snapshotChanged = serialized !== latestSerialized;
       const csvStale = serialized !== csvSerialized || !fs.existsSync(CSV_PATH);
@@ -700,12 +710,14 @@ async function handleRequest(req, res) {
         broadcastUpdate();
       }
 
+      // 不重写时 CSV 就是这份内容写出的，条数照 buildTimelineCsv 同一去重口径现算
+      // （TimelineCsv.countTimelineRows），与写入那次回报的条数一致
       let count;
       if (csvStale) {
         count = writeTimelineCsv(configured);
         csvSerialized = serialized;
       } else {
-        count = new Set(latestDramas.map(d => d.itemId || d.id)).size;
+        count = TimelineCsv.countTimelineRows(configured);
       }
 
       return sendJson(res, 200, { ok: true, count, csvPath: CSV_PATH });

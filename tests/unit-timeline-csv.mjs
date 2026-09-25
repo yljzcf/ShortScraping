@@ -102,6 +102,20 @@ check('T16 无偏移时间戳仍判无效（原有语义不变）', TimelineCsv.
     && TimelineCsv.neutralizeFormula('=1') === "'=1" && TimelineCsv.neutralizeFormula('a=1') === 'a=1', '');
 }
 
+// 去重键单一真源（2026-09-25 审计 E）：/sync 不重写 CSV 时按 countTimelineRows 回报条数，
+// Lark 表格导出的 tableRowKey 也直接用 rowKey——三处口径必须与 buildTimelineCsv 完全一致
+{
+  check('T19 rowKey：itemId 优先、旧字段 imdbId 兼容、都没有退回 id、全无为空串',
+    TimelineCsv.rowKey({ id: 'a', itemId: 'tt1' }) === 'tt1' && TimelineCsv.rowKey({ id: 'a', imdbId: 'tt2' }) === 'tt2'
+    && TimelineCsv.rowKey({ id: 'a' }) === 'a' && TimelineCsv.rowKey({}) === '' && TimelineCsv.rowKey(null) === '', '');
+  const mixed = [...FIXTURE, { id: 'id-2', itemId: 'tt0002' }, { id: '', itemId: '' }, { id: 'only-id' }, { id: 'only-id' }];
+  check('T20 countTimelineRows 与 buildTimelineCsv 的行数一致（金样卡集 + 旧字段重复 + 无键 + 只有 id）',
+    TimelineCsv.countTimelineRows(FIXTURE) === count
+    && TimelineCsv.countTimelineRows(mixed) === TimelineCsv.buildTimelineCsv(mixed).count
+    && TimelineCsv.countTimelineRows(mixed) === 3 && TimelineCsv.countTimelineRows([]) === 0,
+    `${TimelineCsv.countTimelineRows(mixed)} vs ${TimelineCsv.buildTimelineCsv(mixed).count}`);
+}
+
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

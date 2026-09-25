@@ -6,6 +6,7 @@
 importScripts('../shared/url-match.js');
 importScripts('../shared/subscription-config.js'); // 订阅规范化单一真源（与设置页/同步服务共用）
 importScripts('../shared/site-registry.js'); // 须先于 lark.js（其 SOURCE_NAMES 取自本模块）
+importScripts('../shared/scrape-rules.js'); // 与 content.js 共用的采集口径（fandom 临时键前缀 / genres 清洗 / Shortical sitemap 解析）
 importScripts('../shared/timeline-csv.js');
 importScripts('../shared/schedule-config.js'); // cron 解析/校验/默认值单一真源
 importScripts('../shared/translate-config.js');
@@ -44,7 +45,7 @@ let emptySyncSkipWarned = false;
 let csvSyncScheduleSeq = 0;
 
 // 四个配置文件 ↔ storage 键 ↔ 同步服务写回端点 POST /config/<key>。请求体 { <storage 键>: 值 }
-// 与设置页 trySync*Config 同形；configAheadOfFile（设置页写了 storage 但写回文件失败的标记）
+// 与设置页 trySyncConfig 同形；configAheadOfFile（设置页写了 storage 但写回文件失败的标记）
 // 的键名即这里的 key。
 const CONFIG_FILES = {
   tag: { file: 'config/tag.json', storageKey: 'urlTags' },
@@ -139,32 +140,28 @@ const WATCHDOG_ALARM_NAME = 'watchdog';
 const WATCHDOG_INTERVAL_MINUTES = 60;
 
 /**
- * 初始化
+ * 初始化：service worker 每次启动（含为分发 onInstalled / onStartup 而启动的那一次）在顶层
+ * 恢复一次配置并装定时任务，确保 JSON 是配置源（configAheadOfFile 标记的项例外：本地领先于
+ * 文件，改为推回文件，见 loadConfigFromJsonFiles）。两个监听器不再各跑一遍 load + setup：
+ * 此前扩展升级 / 浏览器启动时同一实例里两条迁移链并发，标记未置位时 ReelShort / Shortical
+ * 迁移的网络阶段各跑一遍（审查 double-init-on-install-startup）。本 promise 不会 reject。
  */
-chrome.runtime.onInstalled.addListener(async (details) => {
-  await loadConfigFromJsonFiles();
-
-  if (details.reason === 'install') {
-    await clearAllDramas();
-
-    // 打开设置页面
-    chrome.tabs.create({ url: chrome.runtime.getURL('src/settings/settings.html') });
-  }
-
-  // 设置定时任务
-  await setupAlarms();
-});
-
-chrome.runtime.onStartup.addListener(async () => {
-  await loadConfigFromJsonFiles();
-  await setupAlarms();
-});
-
-// service worker 被唤醒时也恢复一次配置，确保 JSON 是配置源（configAheadOfFile 标记的项
-// 例外：本地领先于文件，改为推回文件，见 loadConfigFromJsonFiles）。
-loadConfigFromJsonFiles().then(setupAlarms).catch(error => {
+const initPromise = loadConfigFromJsonFiles().then(setupAlarms).catch(error => {
   console.error('[ShortScraping] 从 JSON 恢复配置失败:', error);
 });
+
+chrome.runtime.onInstalled.addListener(async (details) => {
+  if (details.reason !== 'install') return;
+  // 排在顶层初始化之后：清库不能与同一实例里的订阅外清理 / 迁移交错写 dramas
+  await initPromise;
+  await clearAllDramas();
+
+  // 打开设置页面
+  chrome.tabs.create({ url: chrome.runtime.getURL('src/settings/settings.html') });
+});
+
+// 监听器本身要留着：浏览器启动时靠它把 SW 拉起来，顶层初始化才会执行
+chrome.runtime.onStartup.addListener(() => initPromise);
 
 // SW 每次启动预热一次共享快照：扩展重载/同步服务重启后局域网共享页
 // 立即有数据，无需等下一次抓取；服务端对相同内容不会广播刷新。
@@ -284,9 +281,9 @@ async function loadConfigFromJsonFiles() {
     : null;
 
   // 水位线同步与一次性迁移各自兜底：任一抛错只记日志、下轮唤醒重试（各自的完成标记未置位）。
-  // 它们的失败不能向上冒泡——setupAlarms 挂在本函数之后（顶层 .then 与 onInstalled/onStartup
-  // 两条路都是先 load 再 setup），某迁移确定性抛错＝看门狗与定时任务一起装不上、用户以为在跑
-  // 其实全停（2026-09-17 审计 H1）。配置种子 set 失败仍照旧向上传播：那是「配置没恢复成」。
+  // 它们的失败不能向上冒泡——setupAlarms 挂在本函数之后（顶层 initPromise 先 load 再 setup），
+  // 某迁移确定性抛错＝看门狗与定时任务一起装不上、用户以为在跑其实全停（2026-09-17 审计 H1）。
+  // 配置种子 set 失败仍照旧向上传播：那是「配置没恢复成」。
   await runGuarded('群机器人水位线同步', () => syncBotWatermark(larkConfig));
   for (const [label, step] of [
     ['itemId/标签/未映射 fandom 迁移', runLegacyDramaMigrations],
@@ -311,7 +308,7 @@ function isPlainObject(value) {
 }
 
 /**
- * 把「本地领先于文件」的配置推回同步服务（POST /config/<key>，请求体与设置页 trySync*Config
+ * 把「本地领先于文件」的配置推回同步服务（POST /config/<key>，请求体与设置页 trySyncConfig
  * 同形），逐个成功才摘 configAheadOfFile[key]。摘标记前重读 storage：写回在飞期间设置页可能
  * 又存了新值，本地值已变的键不摘、反而重新置位——设置页的退订是「先写文件、同次 set 清标记」，
  * 这边迟到的旧值 POST 可能正好把它刚写好的 tag.json 盖回旧订阅；标记若随之消失，下次唤醒
@@ -727,27 +724,47 @@ async function nextPruneTrash(reason, removed) {
 }
 
 /**
+ * 存量迁移的逐条改写骨架：在 dramas 写队列内对每条跑 mapDrama（返回原对象＝不动，
+ * 返回新对象＝改了），有改动才整表写回并打 describe(改动条数) 的日志；无改动零写入。
+ */
+function mapDramasInQueue(label, mapDrama, describe) {
+  return enqueueDramaWrite(label, async () => {
+    const dramas = await getDramasInQueue();
+    const next = dramas.map(drama => mapDrama(drama));
+    const changedCount = next.filter((drama, i) => drama !== dramas[i]).length;
+
+    if (changedCount > 0) {
+      await writeDramasInQueue(next);
+      console.log(`[ShortScraping] ${describe(changedCount)}`);
+    }
+  });
+}
+
+/**
+ * 挂独立完成标记的一次性逐条迁移：标记置位即跳过（标记单独读，不连带 dramas）；
+ * 改写经 mapDramasInQueue 落库成功后才置标记——写表失败向上抛（runGuarded 兜住），
+ * 标记不置位，下轮唤醒重试。
+ */
+async function runOnceDramaMigration(flag, label, mapDrama, describe) {
+  const { [flag]: done } = await chrome.storage.local.get(flag);
+  if (done) return;
+
+  await mapDramasInQueue(label, mapDrama, describe);
+
+  await chrome.storage.local.set({ [flag]: true });
+}
+
+/**
  * 去重键字段更名迁移（2026-07-25）：历史条目 imdbId → itemId，值不变。
  * imdbId 这个名字今后仅指 IMDB 站点条目的 tt 值本身，不再指代全站点去重键。
  * 幂等：无旧字段时零写入；必须先于其它按 itemId 读数的迁移/清理执行。
  */
 function migrateItemIdField() {
-  return enqueueDramaWrite('去重键字段更名', async () => {
-    const dramas = await getDramasInQueue();
-    let changedCount = 0;
-
-    const migrated = dramas.map(drama => {
-      if (!drama || !('imdbId' in drama)) return drama;
-      changedCount++;
-      const { imdbId, ...rest } = drama;
-      return { ...rest, itemId: rest.itemId || imdbId };
-    });
-
-    if (changedCount > 0) {
-      await writeDramasInQueue(migrated);
-      console.log(`[ShortScraping] 已迁移 ${changedCount} 条历史记录的去重键字段 imdbId -> itemId`);
-    }
-  });
+  return mapDramasInQueue('去重键字段更名', drama => {
+    if (!drama || !('imdbId' in drama)) return drama;
+    const { imdbId, ...rest } = drama;
+    return { ...rest, itemId: rest.itemId || imdbId };
+  }, count => `已迁移 ${count} 条历史记录的去重键字段 imdbId -> itemId`);
 }
 
 /**
@@ -762,28 +779,12 @@ function migrateItemIdField() {
  * 幂等：无该键时零写入；写回经 storage.onChanged 自动触发一次 CSV 全量重写
  * （同步服务按 dramas 载荷签名判重，字段被摘掉即签名必变，新列序才落得了盘）。
  */
-async function dropCompanyField() {
-  const { companyFieldDropped } = await chrome.storage.local.get('companyFieldDropped');
-  if (companyFieldDropped) return;
-
-  await enqueueDramaWrite('移除 company 字段', async () => {
-    const dramas = await getDramasInQueue();
-    let changedCount = 0;
-
-    const cleaned = dramas.map(drama => {
-      if (!drama || !('company' in drama)) return drama;
-      changedCount++;
-      const { company, ...rest } = drama;
-      return rest;
-    });
-
-    if (changedCount > 0) {
-      await writeDramasInQueue(cleaned);
-      console.log(`[ShortScraping] 已从 ${changedCount} 条历史记录中移除 company 字段`);
-    }
-  });
-
-  await chrome.storage.local.set({ companyFieldDropped: true });
+function dropCompanyField() {
+  return runOnceDramaMigration('companyFieldDropped', '移除 company 字段', drama => {
+    if (!drama || !('company' in drama)) return drama;
+    const { company, ...rest } = drama;
+    return rest;
+  }, count => `已从 ${count} 条历史记录中移除 company 字段`);
 }
 
 /**
@@ -796,31 +797,15 @@ async function dropCompanyField() {
  * 复位是安全的：翻译线走 fillOnly，只补空缺，已有的官方译名/既有译文不会被冲掉。
  * 独立标记 companyFieldDropped 同款理由——runLegacyDramaMigrations 早已置位。
  */
-async function resetPartialTranslations() {
-  const { partialTranslationReset } = await chrome.storage.local.get('partialTranslationReset');
-  if (partialTranslationReset) return;
-
-  await enqueueDramaWrite('半成品翻译复位', async () => {
-    const dramas = await getDramasInQueue();
-    let changedCount = 0;
-
-    const reset = dramas.map(drama => {
-      if (!drama || drama.status !== 'trans') return drama;
-      const needTitle = Boolean(String(drama.title || '').trim()) && !String(drama.titleZh || '').trim();
-      const needDesc = Boolean(String(drama.description || '').trim()) && !String(drama.descriptionZh || '').trim();
-      if (!needTitle && !needDesc) return drama;
-      changedCount++;
-      const { translateAttempts, ...rest } = drama;
-      return { ...rest, status: 'new' };
-    });
-
-    if (changedCount > 0) {
-      await writeDramasInQueue(reset);
-      console.log(`[ShortScraping] 已把 ${changedCount} 条半成品翻译退回待翻译队列`);
-    }
-  });
-
-  await chrome.storage.local.set({ partialTranslationReset: true });
+function resetPartialTranslations() {
+  return runOnceDramaMigration('partialTranslationReset', '半成品翻译复位', drama => {
+    if (!drama || drama.status !== 'trans') return drama;
+    const needTitle = Boolean(String(drama.title || '').trim()) && !String(drama.titleZh || '').trim();
+    const needDesc = Boolean(String(drama.description || '').trim()) && !String(drama.descriptionZh || '').trim();
+    if (!needTitle && !needDesc) return drama;
+    const { translateAttempts, ...rest } = drama;
+    return { ...rest, status: 'new' };
+  }, count => `已把 ${count} 条半成品翻译退回待翻译队列`);
 }
 
 /**
@@ -836,30 +821,14 @@ async function resetPartialTranslations() {
  * translateAttempts，让复位后的条目重新拿满重试额度。
  * 独立标记理由同 companyFieldDropped——runLegacyDramaMigrations 早已置位。
  */
-async function resetNonChineseTitleZh() {
-  const { nonChineseTitleZhReset } = await chrome.storage.local.get('nonChineseTitleZhReset');
-  if (nonChineseTitleZhReset) return;
-
-  await enqueueDramaWrite('非中文译名复位', async () => {
-    const dramas = await getDramasInQueue();
-    let changedCount = 0;
-
-    const reset = dramas.map(drama => {
-      if (!drama) return drama;
-      const titleZh = String(drama.titleZh || '').trim();
-      if (!titleZh || TranslateConfig.hasChineseChars(titleZh)) return drama;
-      changedCount++;
-      const { translateAttempts, ...rest } = drama;
-      return { ...rest, titleZh: '', status: 'new' };
-    });
-
-    if (changedCount > 0) {
-      await writeDramasInQueue(reset);
-      console.log(`[ShortScraping] 已把 ${changedCount} 条非中文译名退回待翻译队列`);
-    }
-  });
-
-  await chrome.storage.local.set({ nonChineseTitleZhReset: true });
+function resetNonChineseTitleZh() {
+  return runOnceDramaMigration('nonChineseTitleZhReset', '非中文译名复位', drama => {
+    if (!drama) return drama;
+    const titleZh = String(drama.titleZh || '').trim();
+    if (!titleZh || TranslateConfig.hasChineseChars(titleZh)) return drama;
+    const { translateAttempts, ...rest } = drama;
+    return { ...rest, titleZh: '', status: 'new' };
+  }, count => `已把 ${count} 条非中文译名退回待翻译队列`);
 }
 
 /**
@@ -891,22 +860,9 @@ function hasGarbledSourceFields(drama) {
     .some(value => String(value || '').includes('\uFFFD'));
 }
 
-async function resetGarbledTranslations() {
-  const { garbledTranslationReset } = await chrome.storage.local.get('garbledTranslationReset');
-  if (garbledTranslationReset) return;
-
-  await enqueueDramaWrite('乱码译文复位', async () => {
-    const dramas = await getDramasInQueue();
-    const reset = dramas.map(clearGarbledTranslations);
-    const changedCount = reset.filter((drama, i) => drama !== dramas[i]).length;
-
-    if (changedCount > 0) {
-      await writeDramasInQueue(reset);
-      console.log(`[ShortScraping] 已把 ${changedCount} 条乱码译文退回待翻译队列`);
-    }
-  });
-
-  await chrome.storage.local.set({ garbledTranslationReset: true });
+function resetGarbledTranslations() {
+  return runOnceDramaMigration('garbledTranslationReset', '乱码译文复位', clearGarbledTranslations,
+    count => `已把 ${count} 条乱码译文退回待翻译队列`);
 }
 
 /**
@@ -915,22 +871,11 @@ async function resetGarbledTranslations() {
  * 幂等：无变化时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
  */
 function migrateLegacyTags() {
-  return enqueueDramaWrite('标签迁移', async () => {
-    const dramas = await getDramasInQueue();
-    let changedCount = 0;
-
-    const migrated = dramas.map(drama => {
-      if (!Array.isArray(drama.tags) || !drama.tags.includes('RR')) return drama;
-      changedCount++;
-      const tags = Array.from(new Set(drama.tags.map(tag => (tag === 'RR' ? 'RoyalRoad' : tag))));
-      return { ...drama, tags };
-    });
-
-    if (changedCount > 0) {
-      await writeDramasInQueue(migrated);
-      console.log(`[ShortScraping] 已迁移 ${changedCount} 条历史记录的显示标签 RR -> RoyalRoad`);
-    }
-  });
+  return mapDramasInQueue('标签迁移', drama => {
+    if (!Array.isArray(drama.tags) || !drama.tags.includes('RR')) return drama;
+    const tags = Array.from(new Set(drama.tags.map(tag => (tag === 'RR' ? 'RoyalRoad' : tag))));
+    return { ...drama, tags };
+  }, count => `已迁移 ${count} 条历史记录的显示标签 RR -> RoyalRoad`);
 }
 
 /**
@@ -994,21 +939,13 @@ async function migrateReelshortEpisodeUrls() {
 
 /**
  * 取 Shortical 规范 slug 表（`slug 基名 → 规范 slug`，基名＝去掉尾部 `-<数字>`）。
- * 解析逻辑与 content.js 的 readShorticalCanonicalSlugs 一致——SW 侧重写一份，同
- * migrateReelshortEpisodeUrls 在 SW 内重写 __NEXT_DATA__ 抽取的先例：为一条一次性迁移
- * 新立共享模块要同时改 manifest / importScripts / 各 HTML 顺序 / STATIC_ROUTES 四处，不划算。
+ * 解析与 content.js 的 readShorticalCanonicalSlugs 共用 ScrapeRules.parseShorticalSitemap
+ * （src/shared/scrape-rules.js）；这里只管取数与失败即抛（runGuarded 兜住、下轮重试）。
  */
 async function fetchShorticalCanonicalSlugs() {
   const response = await fetch('https://shortical.com/sitemaps/series.xml', { headers: { 'Accept': 'application/xml' } });
   if (!response.ok) throw new Error(`Shortical sitemap HTTP ${response.status}`);
-  const xml = await response.text();
-  const map = new Map();
-  for (const match of xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)) {
-    const slug = (match[1].match(/\/drama\/([^/?#]+)/) || [])[1] || '';
-    if (!/-\d+$/.test(slug)) continue;
-    const base = slug.replace(/-\d+$/, '');
-    if (!map.has(base)) map.set(base, slug);   // 先到先得（实测 142 条基名零碰撞）
-  }
+  const map = ScrapeRules.parseShorticalSitemap(await response.text());
   // 站点对未命中路径一律回 200＋9KB 空壳，「拿到响应」不等于「拿到 sitemap」
   if (!map.size) throw new Error('Shortical sitemap 里没有 /drama/ 条目');
   return map;
@@ -1105,18 +1042,14 @@ async function migrateShorticalCanonicalIds() {
  * 清理 fandom 未映射条目（itemId 为 mdf-/rsf-/smf- 临时键；带连字符，与 md+UUID、
  * rs+hex、sm+数字 的正式键无歧义）：v1.4.8 起内容脚本对映射失败的 fandom 条目不再入库
  * （scrapePage 未映射闸门，下轮抓取自动重试），存量由此处一并清除。
- * 前缀集合必须与 content.js scrapePage 的未映射闸门同步（v1.6.9 加 ShortMax 的 smf-）。
+ * 前缀集合与 content.js scrapePage 的未映射闸门共用 ScrapeRules.isUnmappedFandomKey
+ * （src/shared/scrape-rules.js，v1.6.9 加 ShortMax 的 smf-）。
  * 幂等：无匹配时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
  */
-const UNMAPPED_FANDOM_PREFIXES = ['mdf-', 'rsf-', 'smf-'];
-
 function pruneUnmappedFandomEntries() {
   return enqueueDramaWrite('fandom 未映射清理', async () => {
     const dramas = await getDramasInQueue();
-    const kept = dramas.filter(drama => {
-      const key = String(drama.itemId || '');
-      return !UNMAPPED_FANDOM_PREFIXES.some(prefix => key.startsWith(prefix));
-    });
+    const kept = dramas.filter(drama => !ScrapeRules.isUnmappedFandomKey(drama.itemId));
 
     if (kept.length !== dramas.length) {
       await writeDramasInQueue(kept);
@@ -1210,7 +1143,7 @@ async function scrapeLoadedTab(tabId, url, page) {
       // 与 manifest content_scripts 的 js 数组保持一致：共享模块先于 content.js
       // （漏一个共享模块＝content.js 在兜底注入路径上直接 ReferenceError，
       //  而这条路径正是后台节流标签页的常态入口。unit-site-registry T4a/T4b 守着）
-      files: ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/content/content.js']
+      files: ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/shared/scrape-rules.js', 'src/content/content.js']
     }).catch(err => console.warn(`[ShortScraping] 强制注入失败（继续轮询）: ${err.message}`));
     return await sendScrapeWhenReady(tabId, 40, 3000, page);
   }
@@ -1584,10 +1517,6 @@ async function performTranslateOnce(source) {
       console.warn(`[ShortScraping] 本轮一条都没翻成、却有 ${failures.length} 条没拿到译文，更像接口或提示词的全局问题，不计重试次数`);
     }
 
-    await chrome.storage.local.set({
-      lastTranslate: new Date().toISOString()
-    });
-
     console.log(`[ShortScraping] 翻译完成: ${translatedCount}/${newDramas.length}`);
 
     if (translatedCount > 0) {
@@ -1738,9 +1667,8 @@ function saveDramaRecord(drama) {
       // genres 回填（v1.5.3）：仅「库中缺、本次有」才补写这一个键，其余字段一律
       // 不动（先到先得/翻译状态/scrapedAt 语义不变）；写时不带 lastScrape（回填
       // 不是新卡）。权威判定在队列内：并发第二个到达者在此看到已有 → 不写，幂等。
-      const incoming = Array.isArray(drama.genres)
-        ? [...new Set(drama.genres.map(v => String(v || '').trim()).filter(Boolean))]
-        : [];
+      // 清洗与采集侧同口径（ScrapeRules.cleanGenres：trim/去空/去重，非数组当空）
+      const incoming = ScrapeRules.cleanGenres(drama.genres);
       const current = existing[index];
       const currentHas = Array.isArray(current.genres) && current.genres.length > 0;
       if (incoming.length > 0 && !currentHas) {
@@ -1767,10 +1695,7 @@ function saveDramaRecord(drama) {
  * 空库推送护栏见 syncTimelineToCsv。
  */
 function clearAllDramas() {
-  return enqueueDramaWrite('清空数据', () => writeDramasInQueue([], {
-    lastScrape: null,
-    lastTranslate: null
-  }));
+  return enqueueDramaWrite('清空数据', () => writeDramasInQueue([], { lastScrape: null }));
 }
 
 /**

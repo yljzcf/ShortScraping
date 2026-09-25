@@ -1,40 +1,28 @@
 @echo off
 setlocal
-
-rem Pass --no-pause to skip key prompts (used by restart-sync.bat).
+rem Stops the sync service through server\tools\stop.js, the same helper used by
+rem npm run stop and stop-sync.command: it asks this service to exit gracefully
+rem via POST /shutdown and never scans the port or kills other processes.
+rem Pass --no-pause to skip the key prompt.
 set "SKIP_PAUSE=%~1"
-set "PORT=31919"
-set "HEALTH_URL=http://127.0.0.1:%PORT%/health"
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$connections = Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue;" ^
-  "if (-not $connections) { Write-Host '[ShortScraping Sync] Service is not running.'; exit 0 }" ^
-  "$pids = $connections | Select-Object -ExpandProperty OwningProcess -Unique;" ^
-  "foreach ($pidValue in $pids) {" ^
-  "  $proc = Get-Process -Id $pidValue -ErrorAction SilentlyContinue;" ^
-  "  if ($proc -and $proc.ProcessName -eq 'node') {" ^
-  "    Write-Host ('[ShortScraping Sync] Stopping node process PID ' + $pidValue + ' on port %PORT%...');" ^
-  "    Stop-Process -Id $pidValue -Force;" ^
-  "  } elseif ($proc) {" ^
-  "    Write-Host ('[ShortScraping Sync] Port %PORT% is owned by non-node process: ' + $proc.ProcessName + ' PID ' + $pidValue);" ^
-  "    exit 2;" ^
-  "  }" ^
-  "}"
-
-if errorlevel 2 (
-  echo [ShortScraping Sync] Stop skipped because port %PORT% is not owned by node.exe.
-  if /I not "%SKIP_PAUSE%"=="--no-pause" pause
-  exit /b 2
-)
-
-timeout /t 1 /nobreak >nul
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-RestMethod -Uri '%HEALTH_URL%' -TimeoutSec 2; if ($r.ok) { exit 1 } exit 0 } catch { exit 0 }" >nul 2>nul
+where node >nul 2>nul
 if errorlevel 1 (
-  echo [ShortScraping Sync] Stop command was sent, but service still responds at %HEALTH_URL%.
+  echo [ShortScraping Sync] Node.js was not found in PATH.
+  echo Please install Node.js or add node.exe to PATH, then run this file again.
   if /I not "%SKIP_PAUSE%"=="--no-pause" pause
   exit /b 1
 )
 
-echo [ShortScraping Sync] Service stopped.
+rem Run from the project root so this works no matter where it was started from.
+cd /d "%~dp0..\.."
+if errorlevel 1 (
+  echo [ShortScraping Sync] Failed to enter the project folder.
+  if /I not "%SKIP_PAUSE%"=="--no-pause" pause
+  exit /b 1
+)
+
+node server\tools\stop.js
+set "EXIT_CODE=%ERRORLEVEL%"
 if /I not "%SKIP_PAUSE%"=="--no-pause" pause
-exit /b 0
+exit /b %EXIT_CODE%

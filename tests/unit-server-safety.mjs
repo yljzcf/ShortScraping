@@ -190,6 +190,31 @@ try {
   assert.deepEqual(JSON.parse(zhSnapshot).dramas.map(d => d.descriptionZh), zhDramas.map(d => d.descriptionZh));
   assert.equal(fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8').includes('\uFFFD'), false);
 
+  // Same-content pushes skip the CSV rewrite but must report the same count as the push that wrote it
+  // (2026-09-25 audit E): the route used to recount with `itemId || id`, while the CSV dedupes on
+  // TimelineCsv's key (itemId, legacy imdbId, then id; keyless entries produce no row).
+  const mixedKeys = [
+    card('tt1'),
+    { ...card('tt2'), itemId: undefined, imdbId: 'tt2' }, // legacy field name only
+    card('tt2', { id: 'id_tt2b' }),                       // same item under the new field name
+    { ...card('tt3'), id: '', itemId: '' },               // no key at all: never becomes a CSV row
+    card('tt1')
+  ];
+  const firstMixed = await post('/sync', { dramas: mixedKeys });
+  assert.equal(firstMixed.body.count, 2, JSON.stringify(firstMixed.body));
+  const csvLines = fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8').trim().split('\r\n');
+  assert.equal(csvLines.length - 1, 2);
+  const csvMtime = fs.statSync(path.join(directory, 'db/timeline.csv')).mtimeMs;
+  const sameMixed = await post('/sync', { dramas: mixedKeys });
+  assert.equal(sameMixed.body.count, firstMixed.body.count, JSON.stringify(sameMixed.body));
+  assert.equal(fs.statSync(path.join(directory, 'db/timeline.csv')).mtimeMs, csvMtime); // really took the no-rewrite branch
+
+  // The share page's card/tab styles are shared with the popup and served from src/shared.
+  const sharedCss = await fetch(base + '/shared/timeline-cards.css');
+  assert.equal(sharedCss.status, 200);
+  assert.equal(sharedCss.headers.get('content-type'), 'text/css; charset=utf-8');
+  assert.equal(await sharedCss.text(), fs.readFileSync(path.join(root, 'src/shared/timeline-cards.css'), 'utf8'));
+
   const exited = once(child, 'exit');
   const stopped = await post('/shutdown', {});
   assert.equal(stopped.status, 200);

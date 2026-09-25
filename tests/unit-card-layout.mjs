@@ -8,8 +8,10 @@ import './bootstrap.cjs';
 //
 // 两道防线，分别由 O 组与 C 组守着：
 //   O：orientationFromPoster 不拿占位图改判（根因，修完标题 12px → 196px）
-//   C：两份 CSS 都带「窄卡标题让行」底线（Steam 真发竖版封面时兜底，12px → 92px）
-//      以及「占位图不铺满整行」——popup.css 与 share.css 必须同步，这里防漂移
+//   C：「占位图不铺满整行」在两页共用的 timeline-cards.css 里；「窄卡标题让行」底线（Steam 真发
+//      竖版封面时兜底，12px → 92px）属于 Steam 双列网格，两页各有一份（共享页包在 @media 里）
+//   D：2026-09-25 审计 E 把两页逐字相同的规则收进 src/shared/timeline-cards.css——三份文件之间
+//      不许再出现重复规则（重复就又回到「改一处漏一处」），两页都要先引入共享文件再引入自己的 css
 //
 // 用法：node tests/unit-card-layout.mjs
 import fs from 'node:fs';
@@ -38,7 +40,9 @@ check('O4 尺寸未知（图还没解码）返回 null，不瞎判',
   `${orient(0, 0, false)} / ${orient(undefined, undefined, false)}`);
 check('O5 正方形不算横版（宽>高才是）', orient(300, 300, false) === false, String(orient(300, 300, false)));
 
-// ---------- C 组：两份 CSS 同步 ----------
+// ---------- C 组：卡片版式规则 ----------
+const SHARED_CSS_REL = 'src/shared/timeline-cards.css';
+const sharedCss = read(`../${SHARED_CSS_REL}`);
 const CSS = {
   'src/popup/popup.css': read('../src/popup/popup.css'),
   'server/public/share.css': read('../server/public/share.css')
@@ -49,15 +53,15 @@ const ruleBody = (src, selector) => {
   const m = squash(src).match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`));
   return m ? m[1].trim() : null;
 };
+// 占位图不带信息，横版布局（封面在上）留着它就白占一整行把卡片撑高 → 不显示
+const fallbackPoster = ruleBody(sharedCss, '.drama-card.poster-fallback.card-landscape .card-poster');
+check(`C1 ${SHARED_CSS_REL} 横版下的占位图不显示`, Boolean(fallbackPoster) && /display:\s*none/.test(fallbackPoster),
+  fallbackPoster || '(未匹配到规则)');
+// 占位图一藏，标题成了最上面的元素，必须让到右上按钮带下方，否则被压住
+const fallbackTitle = ruleBody(sharedCss, '.drama-card.poster-fallback.card-landscape .card-title');
+check(`C1b ${SHARED_CSS_REL} 藏了占位图后标题让到按钮下方`, Boolean(fallbackTitle) && /margin-top:\s*[1-9]/.test(fallbackTitle),
+  fallbackTitle || '(未匹配到规则)');
 for (const [rel, src] of Object.entries(CSS)) {
-  // 占位图不带信息，横版布局（封面在上）留着它就白占一整行把卡片撑高 → 不显示
-  const poster = ruleBody(src, '.drama-card.poster-fallback.card-landscape .card-poster');
-  check(`C1 ${rel} 横版下的占位图不显示`, Boolean(poster) && /display:\s*none/.test(poster),
-    poster || '(未匹配到规则)');
-  // 占位图一藏，标题成了最上面的元素，必须让到右上按钮带下方，否则被压住
-  const title = ruleBody(src, '.drama-card.poster-fallback.card-landscape .card-title');
-  check(`C1b ${rel} 藏了占位图后标题让到按钮下方`, Boolean(title) && /margin-top:\s*[1-9]/.test(title),
-    title || '(未匹配到规则)');
   check(`C2 ${rel} 有「窄卡标题让行」底线规则`,
     squash(src).includes('.drama-card:not(.card-full):not(.card-landscape) .card-title'), '');
 }
@@ -70,6 +74,59 @@ for (const [rel, src] of Object.entries(CSS)) {
 // 加 poster-fallback 类的是共享渲染模块，两页共用——类名拼错就全盘失效
 check('C4 timeline-render 在封面失败时加 poster-fallback 类',
   read('../src/shared/timeline-render.js').includes("classList.add('poster-fallback')"), '');
+
+// ---------- D 组：三份 CSS 之间零重复、两页先引共享样式 ----------
+/** 顶层切块（去注释、压空白）：@media / @keyframes 整块算一条，块内规则随所在上下文比较。 */
+function topLevelRules(src) {
+  const text = src.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}' && --depth === 0) {
+      rules.push(text.slice(start, i + 1).replace(/\s+/g, ' ').replace(/\s*([{};:,>])\s*/g, '$1').trim());
+      start = i + 1;
+    }
+  }
+  return rules;
+}
+const ruleSets = {
+  [SHARED_CSS_REL]: topLevelRules(sharedCss),
+  ...Object.fromEntries(Object.entries(CSS).map(([rel, src]) => [rel, topLevelRules(src)]))
+};
+check('D0 切块自检：共享文件收了卡片/标签条规则，两页各自还有布局规则',
+  ruleSets[SHARED_CSS_REL].length >= 60 && Object.keys(CSS).every(rel => ruleSets[rel].length >= 10),
+  JSON.stringify(Object.fromEntries(Object.entries(ruleSets).map(([rel, rules]) => [rel, rules.length]))));
+const rels = Object.keys(ruleSets);
+for (let a = 0; a < rels.length; a++) {
+  for (let b = a + 1; b < rels.length; b++) {
+    const other = new Set(ruleSets[rels[b]]);
+    const dups = ruleSets[rels[a]].filter(rule => other.has(rule));
+    check(`D1 ${rels[a]} 与 ${rels[b]} 没有逐字相同的规则`, dups.length === 0,
+      dups.map(rule => rule.slice(0, rule.indexOf('{'))).join(' | '));
+  }
+}
+for (const [rel, rules] of Object.entries(ruleSets)) {
+  const seen = new Set();
+  const dups = rules.filter(rule => (seen.has(rule) ? true : (seen.add(rule), false)));
+  check(`D1b ${rel} 自身没有重复规则`, dups.length === 0, dups.join(' | '));
+}
+// 共享文件必须排在页面 css 之前：两边同特异度的规则以页面为准（抽取时就按这个次序核过层叠）
+for (const [rel, sharedHref, pageHref] of [
+  ['src/popup/popup.html', '../shared/timeline-cards.css', 'popup.css'],
+  ['server/public/share.html', '/shared/timeline-cards.css', '/public/share.css']
+]) {
+  const html = read(`../${rel}`);
+  const sharedAt = html.indexOf(`<link rel="stylesheet" href="${sharedHref}">`);
+  const pageAt = html.indexOf(`<link rel="stylesheet" href="${pageHref}">`);
+  check(`D2 ${rel} 先引入 ${sharedHref} 再引入 ${pageHref}`, sharedAt >= 0 && pageAt > sharedAt,
+    `shared=${sharedAt} page=${pageAt}`);
+}
+// 共享页的样式经同步服务静态白名单伺服（实际请求在 unit-server-safety 里验）
+check('D3 同步服务静态白名单含 /shared/timeline-cards.css（text/css）',
+  /'\/shared\/timeline-cards\.css': \{ file: path\.join\(SHARED_DIR, 'timeline-cards\.css'\), type: 'text\/css; charset=utf-8' \}/
+    .test(read('../server/sync-server.js')), '');
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

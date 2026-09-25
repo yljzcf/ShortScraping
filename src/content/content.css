@@ -1,4 +1,6 @@
-/* ShortScraping 内容脚本样式 */
+/* ShortScraping 内容脚本样式
+ * 抓取按钮样式的唯一来源：content.js 只建节点、改文案，不写内联样式——
+ * 内联 transform 会压住下面的 :hover / :active / :disabled */
 
 #dramamo-scrape-btn {
   position: fixed;

@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ShortScraping - 短剧监控</title>
+  <!-- 与局域网共享页共用的卡片/标签条样式须排在 popup.css 之前：同特异度时以弹窗自己的规则为准 -->
+  <link rel="stylesheet" href="../shared/timeline-cards.css">
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
@@ -40,12 +42,8 @@
 
     <!-- 内容区域 -->
     <main class="content">
-      <!-- 时间线视图 -->
-      <div id="timelineView" class="view active">
-        <div class="timeline-container">
-          <!-- 动态生成 -->
-        </div>
-      </div>
+      <!-- 时间线（由 shared/timeline-render.js 动态生成） -->
+      <div class="timeline-container"></div>
 
       <!-- 空状态 -->
       <div id="emptyState" class="empty-state hidden">

@@ -451,6 +451,11 @@ function scheduleRestart(h, { body, oldMs = 1500, downMs = 1000, newPid = 200 })
   await h.drive(h.fx.onSyncStopClick());
   check('S1 轮询到 /health 不再应答才判已停止', h.toasts.at(-1)?.message === '同步服务已停止'
     && h.toasts.at(-1)?.type === 'success' && h.statusText() === '同步服务：已关闭', JSON.stringify(h.toasts));
+  // 判定停止的那次轮询之后只刷新一次状态栏（2026-09-25 审计 E：此前 waitForSyncService 刷一次、回到
+  // onSyncStopClick 又刷一次）。服务 1200ms 后不再应答：1500ms 那次轮询判停，紧跟一次状态刷新
+  const afterDown = h.healthCalls().filter(c => c.at >= 1200);
+  check('S1b 停止成功后只多一次 /health（刷新状态栏），不重复探测', afterDown.length === 2,
+    JSON.stringify(h.healthCalls().map(c => c.at)));
 }
 {
   const h = await onlineFixture();

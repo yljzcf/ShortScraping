@@ -78,7 +78,7 @@ const ok = { status: 200, body: { ok: true } };
     JSON.stringify([bg.data.translateConfig.translateMode, bg.data.scheduleConfig.scrapeInterval, bg.data.larkConfig.botEnabled]));
   check('C1d 机器人水位线与重试队列未被清空', same(bg.data.larkBotState, BOT_STATE), JSON.stringify(bg.data.larkBotState));
   const byKey = Object.fromEntries(bg.posts.map(p => [p.key, p.body]));
-  check('C1e 四个配置都推回同步服务，请求体与设置页 trySync* 同形',
+  check('C1e 四个配置都推回同步服务，请求体与设置页 trySyncConfig 同形',
     bg.posts.length === 4 && same(byKey.tag, { urlTags: localTags }) && same(byKey.trans, { translateConfig: localTrans })
     && same(byKey.cron, { scheduleConfig: localCron }) && same(byKey.lark, { larkConfig: localLark }), JSON.stringify(bg.posts));
   check('C1f 写回成功后四个标记都摘掉', same(bg.data.configAheadOfFile, {}), JSON.stringify(bg.data.configAheadOfFile));

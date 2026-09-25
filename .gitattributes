@@ -2,5 +2,10 @@
 *.command text eol=lf
 *.sh      text eol=lf
 
+# Windows 批处理与 VBScript 固定 CRLF：cmd.exe 解析纯 LF 的 .bat 时，goto/call :label 跨 512 字节块可能找不到标签。
+# 声明后 GitHub ZIP 下载（git archive）与 core.autocrlf=false 的检出拿到的也是 CRLF
+*.bat     text eol=crlf
+*.vbs     text eol=crlf
+
 # 黄金 CSV 必须保留 BOM 和 CRLF，跨平台 checkout 不得改写字节。
 /tests/timeline-csv-golden.csv -text

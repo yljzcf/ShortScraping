@@ -2,6 +2,7 @@
 require('../src/shared/translate-config.js');
 require('../src/shared/url-match.js'); // subscription-config 的依赖，须先于它
 require('../src/shared/subscription-config.js');
+require('../src/shared/scrape-rules.js'); // content.js 与后台共用的采集口径（ScrapeRules）
 
 // Recursive cleanup must stay inside a directory created by this test process.
 const fs = require('node:fs');

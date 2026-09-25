@@ -6,6 +6,7 @@ import './bootstrap.cjs';
 // （itemId 停留 rsf- 临时键，应被闸门跳过、不入库）。
 // /movie/ 页 fixture 内嵌（原 tmp/rs-movie.html 真实存档已丢失，2026-08-02 按
 // 其关键结构重建；fixture 一律内嵌，不再依赖外部文件）。
+// F5–F7 守临时键前缀的单一真源 src/shared/scrape-rules.js（内容侧闸门与后台存量清理共用）。
 // 用法：node tests/unit-fandom-unmapped-skip.mjs
 import fs from 'node:fs';
 
@@ -150,6 +151,26 @@ check('F3 未映射条目被闸门跳过（库中无 rsf- 临时键）',
 check('F4 映射条目 genres 取 /movie/ 页 tag_list（v1.5.3，与取 chapter_id 同一请求）',
   JSON.stringify(saved[0]?.genres) === JSON.stringify(['Fantasy', 'Secret Identity']),
   JSON.stringify(saved[0]?.genres));
+
+// ---------- F5–F7：临时键前缀单一真源 ScrapeRules（审查 cross-file-sync-constants） ----------
+// 内容侧闸门与后台存量清理以前各写一份前缀、靠注释提醒同步；现在都经 ScrapeRules.isUnmappedFandomKey
+const { UNMAPPED_FANDOM_PREFIXES, isUnmappedFandomKey } = globalThis.ScrapeRules;
+const codeOnly = src => src.split('\n').filter(line => !/^\s*(\*|\/\/)/.test(line)).join('\n');
+const contentCode = codeOnly(contentSrc);
+const backgroundCode = codeOnly(fs.readFileSync(new URL('../src/background/background.js', import.meta.url), 'utf8'));
+// 各 fandom 适配器 extractId 造临时键的模板字面量：`mdf-${…}` / `rsf-${…}` / `smf-${…}`
+const builtPrefixes = [...new Set([...contentCode.matchAll(/`([a-z]{2}f-)\$\{/g)].map(m => m[1]))].sort();
+check('F5 content.js 造出的每种临时键前缀都在共享前缀表里，表里也没有没人造的前缀',
+  builtPrefixes.length > 0 && JSON.stringify(builtPrefixes) === JSON.stringify([...UNMAPPED_FANDOM_PREFIXES].sort()),
+  JSON.stringify({ builtPrefixes, shared: UNMAPPED_FANDOM_PREFIXES }));
+check('F6 内容侧闸门与后台存量清理都经 ScrapeRules.isUnmappedFandomKey，不再各留一份前缀',
+  /\bisUnmappedFandomKey\(detailed\.itemId\)/.test(contentCode) && /ScrapeRules\.isUnmappedFandomKey\(/.test(backgroundCode)
+    && !/\(mdf\|rsf\|smf\)/.test(contentCode) && !/UNMAPPED_FANDOM_PREFIXES\s*=/.test(backgroundCode), '');
+const keyCases = [['mdf-some-slug', true], ['rsf-some-slug', true], ['smf-some-slug', true],
+  ['mda36a7fe3-0e89-45ff-a409-f75093c5144f', false], [`rs${BOOK_ID}`, false], ['sm123456', false],
+  ['mdfabc', false], ['', false], [null, false], [undefined, false]];
+const wrongKeys = keyCases.filter(([key, want]) => isUnmappedFandomKey(key) !== want);
+check('F7 isUnmappedFandomKey：带连字符的临时键才算，正式键 / 空值都不算', wrongKeys.length === 0, JSON.stringify(wrongKeys));
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 process.exit(results.every(r => r.pass) ? 0 : 1);

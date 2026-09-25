@@ -48,7 +48,7 @@ let trace;
 let store;
 let storageWrites;
 let statusMessages;
-let syncResults;   // { trans, lark, cron }：各 trySync* 的返回
+let syncResults;   // { trans, lark, cron }：trySyncConfig 按路由给的返回
 let fileContents;  // fetchJsonFile 的返回，按文件名
 let sentMessages;
 let downloads;
@@ -119,9 +119,19 @@ const getLarkText = () => 'lark';
 const readTranslateConfigFromForm = () => ({ ...TranslateConfig.DEFAULT_CONFIG, translateMode: 'ai', aiApiKey: 'sk-test' });
 const readLarkConfigFromForm = () => ({ ...Lark.DEFAULT_CONFIG, botEnabled: false });
 const readScheduleConfigFromForm = () => ({ ...ScheduleConfig.DEFAULT_CONFIG, scheduleMode: 'interval', scrapeInterval: 3, translateInterval: 1 });
-const trySyncTransConfig = async () => { trace.push('syncTrans'); return syncResults.trans; };
-const trySyncLarkConfig = async () => { trace.push('syncLark'); return syncResults.lark; };
-const trySyncCronConfig = async () => { trace.push('syncCron'); return syncResults.cron; };
+// 写回统一走 trySyncConfig(route, body)（2026-09-25 审计 E 由四个 trySync*Config 合并）；
+// 桩按路由分派，并校验 body 用的是服务端认的那个键
+const SYNC_ROUTES = {
+  '/config/trans': ['trans', 'translateConfig', 'syncTrans'],
+  '/config/lark': ['lark', 'larkConfig', 'syncLark'],
+  '/config/cron': ['cron', 'scheduleConfig', 'syncCron']
+};
+const trySyncConfig = async (route, body) => {
+  const [key, bodyKey, step] = SYNC_ROUTES[route] || [];
+  if (!key || !body || typeof body[bodyKey] !== 'object') throw new Error(`意外的写回 ${route} ${JSON.stringify(body)}`);
+  trace.push(step);
+  return syncResults[key];
+};
 const fetchJsonFile = async (fileName, fallback) => (fileName in fileContents ? structuredClone(fileContents[fileName]) : fallback);
 const normalizeUrlTags = rawTags => SubscriptionConfig.normalizeUrlTags(rawTags);
 const triggerDownload = (filename, blob) => { trace.push('download'); downloads.push({ filename, blob }); };
@@ -350,6 +360,52 @@ check('S7e 非 local 区域的变更忽略', externalUrlTagsCalls.length === 1, 
   check('S8b init 读取回收站并挂 onChanged', /refreshPruneTrashButton\(\);/.test(grab('function init'))
     && /bindStorageEvents\(\);/.test(grab('function init')), '');
   check('S8c 按钮点击绑定到导出', /bindClick\(elements\.archive\.exportPruneTrash, handleExportPruneTrash\)/.test(src), '');
+}
+
+// ---------- S9：真实的 trySyncConfig（四个保存入口共用的写回 helper，2026-09-25 审计 E） ----------
+// 服务端拒绝写入回非 2xx + { ok:false, error }：原先先抛 HTTP 码，具体原因被丢掉
+{
+  // eslint-disable-next-line no-unused-vars
+  const SYNC_BASE_URL = constValue('SYNC_BASE_URL');
+  const realTrySyncConfig = eval(`(${grab('async function trySyncConfig')})`);
+  const requests = [];
+  const respond = (status, body) => async (url, init) => {
+    requests.push({ url, init });
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => { if (body === undefined) throw new SyntaxError('Unexpected token < in JSON'); return structuredClone(body); }
+    };
+  };
+  const run = async (fetchImpl) => {
+    const saved = globalThis.fetch;
+    globalThis.fetch = fetchImpl;
+    try { return await realTrySyncConfig('/config/cron', { scheduleConfig: { scheduleMode: 'interval' } }); } finally { globalThis.fetch = saved; }
+  };
+
+  check('S9a 同步服务地址常量', SYNC_BASE_URL === 'http://127.0.0.1:31919', String(SYNC_BASE_URL));
+  const ok = await run(respond(200, { ok: true }));
+  const sent = requests.at(-1);
+  check('S9b 成功：POST 到 <base>/config/cron，application/json，body 原样序列化',
+    ok.ok === true && sent.url === 'http://127.0.0.1:31919/config/cron' && sent.init.method === 'POST'
+    && sent.init.headers['Content-Type'] === 'application/json'
+    && sent.init.body === JSON.stringify({ scheduleConfig: { scheduleMode: 'interval' } }), JSON.stringify({ ok, sent }));
+  const refused = await run(respond(500, { ok: false, error: 'Cron 配置无效——scrapeCron: 字段数不对' }));
+  check('S9c 500 + JSON 错误：带出服务端给的原因（不再只有「HTTP 500」）',
+    refused.ok === false && refused.error === 'Cron 配置无效——scrapeCron: 字段数不对', JSON.stringify(refused));
+  const opaque = await run(respond(502));
+  check('S9d 非 2xx 且不是 JSON：退回 HTTP 状态码', opaque.ok === false && opaque.error === 'HTTP 502', JSON.stringify(opaque));
+  const noReason = await run(respond(403, { ok: false }));
+  check('S9e 非 2xx 的 JSON 不带 error：仍报 HTTP 状态码', noReason.error === 'HTTP 403', JSON.stringify(noReason));
+  const soft = await run(respond(200, { ok: false }));
+  check('S9f 2xx 但 ok 不为 true：报「同步服务返回失败」', soft.ok === false && soft.error === '同步服务返回失败', JSON.stringify(soft));
+  const garbled = await run(respond(200));
+  check('S9g 2xx 却不是 JSON：照旧报解析错误', garbled.ok === false && /JSON/.test(garbled.error), JSON.stringify(garbled));
+  const offline = await run(async () => { throw new TypeError('Failed to fetch'); });
+  check('S9h 连不上：不抛错，以 { ok:false, error } 返回', offline.ok === false && offline.error === 'Failed to fetch', JSON.stringify(offline));
+  check('S9i 四个保存入口都走 trySyncConfig，旧的 trySync*Config 已删除',
+    ['/config/tag', '/config/trans', '/config/lark', '/config/cron'].every(route => src.includes(`trySyncConfig('${route}'`))
+    && !/trySync(Tag|Trans|Lark|Cron)Config/.test(src), '');
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

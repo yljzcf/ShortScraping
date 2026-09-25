@@ -6,11 +6,8 @@
 (function() {
   'use strict';
 
-  const SYNC_HEALTH_URL = 'http://127.0.0.1:31919/health';
-  const TAG_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/tag';
-  const TRANS_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/trans';
-  const LARK_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/lark';
-  const CRON_CONFIG_SYNC_URL = 'http://127.0.0.1:31919/config/cron';
+  const SYNC_BASE_URL = 'http://127.0.0.1:31919';
+  const SYNC_HEALTH_URL = `${SYNC_BASE_URL}/health`;
   const SUBSCRIPTION_CATALOG_FILE = 'config/tag.example.json';
   // 「本地配置领先于文件」标记 { tag?, trans?, lark?, cron? }，与后台 loadConfigFromJsonFiles 共用（见 configAheadPatch）
   const CONFIG_AHEAD_KEY = 'configAheadOfFile';
@@ -37,8 +34,7 @@
     groupPins: {},
     scheduleConfig: { ...ScheduleConfig.DEFAULT_CONFIG },
     translateConfig: { ...DEFAULT_TRANSLATE_CONFIG },
-    larkConfig: { ...Lark.DEFAULT_CONFIG },
-    activeTab: 'config'
+    larkConfig: { ...Lark.DEFAULT_CONFIG }
   };
 
   const elements = {};
@@ -446,8 +442,6 @@
   }
 
   function switchTab(tabName) {
-    state.activeTab = tabName;
-
     elements.tabs.forEach(button => {
       button.classList.toggle('active', button.dataset.tab === tabName);
     });
@@ -636,36 +630,13 @@
       alarmNote = `（定时任务即时重排失败：${e.message}，扩展下次唤醒会自动生效）`;
     }
 
-    const sync = await trySyncCronConfig(config);
+    const sync = await trySyncConfig('/config/cron', { scheduleConfig: config });
     if (sync.ok) {
       await clearConfigAhead('cron');
       showStatus(`已保存定时任务配置并写回 config/cron.json${alarmNote}`, true);
     } else {
       // 领先标记已随配置落库：后台唤醒时不再拿旧 cron.json 覆盖，而是把本地配置推回去写文件
       showStatus(`已保存到扩展本地配置并更新定时任务${alarmNote}；写回 config/cron.json 失败：${sync.error}——本地配置会保留，并在同步服务启动后（扩展下次唤醒时）自动写回文件`, false);
-    }
-  }
-
-  async function trySyncCronConfig(scheduleConfig) {
-    try {
-      const response = await fetch(CRON_CONFIG_SYNC_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scheduleConfig })
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const result = await response.json();
-      if (!result?.ok) {
-        throw new Error(result?.error || '同步服务返回失败');
-      }
-
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: e.message };
     }
   }
 
@@ -967,7 +938,7 @@
       // 纯新增/改标签走 storage 优先，但它并非「最多回滚、不会删历史」：旧文件回滚订阅会
       // 连带清掉这段时间新订阅下抓到的历史（审计 A2）。因此同一次 set 里乐观置
       // configAheadOfFile.tag，后台见标记就不拿文件覆盖，改为把本地订阅推回服务端写文件。
-      const preflight = removed.length > 0 ? await trySyncTagConfig(normalized) : null;
+      const preflight = removed.length > 0 ? await trySyncConfig('/config/tag', { urlTags: normalized }) : null;
       if (preflight && !preflight.ok) {
         showStatus(`未取消订阅：写回 config/tag.json 失败（${preflight.error}）——取消订阅会删除历史，必须先写成配置文件，否则历史清掉后订阅仍可能在扩展下次唤醒时从旧文件回读恢复；请启动同步服务后重试`, false);
         return;
@@ -984,7 +955,7 @@
       renderSubscriptions();
       renderConfigSummary();
 
-      const syncResult = preflight || await trySyncTagConfig(state.urlTags);
+      const syncResult = preflight || await trySyncConfig('/config/tag', { urlTags: state.urlTags });
       if (syncResult.ok) {
         if (!preflight) await clearConfigAhead('tag');
         showStatus(`已保存 ${state.urlTags.length} 条网页订阅，并写回 config/tag.json`, true);
@@ -1071,7 +1042,7 @@
       renderTranslateForm();
       renderConfigSummary();
 
-      const syncResult = await trySyncTransConfig(translateConfig);
+      const syncResult = await trySyncConfig('/config/trans', { translateConfig });
       if (syncResult.ok) {
         await clearConfigAhead('trans');
         showStatus('已保存翻译接口配置，并写回 config/trans.json', true);
@@ -1120,7 +1091,7 @@
       renderLarkForm();
       renderConfigSummary();
 
-      const syncResult = await trySyncLarkConfig(larkConfig);
+      const syncResult = await trySyncConfig('/config/lark', { larkConfig });
       if (syncResult.ok) {
         await clearConfigAhead('lark');
         showStatus('已保存 Lark 推送配置，并写回 config/lark.json', true);
@@ -1192,65 +1163,30 @@
     }
   }
 
-  async function trySyncTagConfig(urlTags) {
+  /**
+   * 把配置写回同步服务（POST /config/tag|trans|lark|cron，body 为 { <键>: 配置 }），四个保存入口共用。
+   * 先读响应体再判状态：服务端拒绝写入时回非 2xx + { ok:false, error:'具体原因' }（如「Cron 配置无效——…」
+   * 「网页订阅包含无效或重复条目」），原先先抛 HTTP 码，用户只看到「HTTP 500」；非 JSON 的错误响应仍报 HTTP 码。
+   * 不抛错：失败以 { ok:false, error } 返回，由调用方拼各自的提示文案。
+   */
+  async function trySyncConfig(route, body) {
     try {
-      const response = await fetch(TAG_CONFIG_SYNC_URL, {
+      const response = await fetch(SYNC_BASE_URL + route, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urlTags })
+        body: JSON.stringify(body)
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      let result = null;
+      try {
+        result = await response.json();
+      } catch (e) {
+        if (response.ok) throw e;
       }
-
-      const result = await response.json();
-      if (!result?.ok) {
-        throw new Error(result?.error || '同步服务返回失败');
-      }
-
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: e.message };
-    }
-  }
-
-  async function trySyncTransConfig(translateConfig) {
-    try {
-      const response = await fetch(TRANS_CONFIG_SYNC_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ translateConfig })
-      });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        throw new Error(result?.error || `HTTP ${response.status}`);
       }
-
-      const result = await response.json();
-      if (!result?.ok) {
-        throw new Error(result?.error || '同步服务返回失败');
-      }
-
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: e.message };
-    }
-  }
-
-  async function trySyncLarkConfig(larkConfig) {
-    try {
-      const response = await fetch(LARK_CONFIG_SYNC_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ larkConfig })
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const result = await response.json();
       if (!result?.ok) {
         throw new Error(result?.error || '同步服务返回失败');
       }
@@ -1677,7 +1613,7 @@
     if (status === 'off') {
       container.classList.add('is-off');
       text.textContent = '同步服务：已关闭';
-      archiveInfo.textContent = '请运行 npm run sync（Windows 可双击 start-sync.bat）后再使用文件写回能力。';
+      archiveInfo.textContent = '请运行 npm run sync（Windows 可双击 start-sync.bat，macOS 可双击 start-sync.command）后再使用文件写回能力。';
       return;
     }
 

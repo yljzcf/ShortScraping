@@ -97,9 +97,11 @@ const renderConfigSummary = () => {};
 // eslint-disable-next-line no-unused-vars
 const showStatus = (text, ok) => { statusMessages.push({ text, ok }); };
 // eslint-disable-next-line no-unused-vars
-const trySyncTagConfig = async (tags) => {
+const trySyncConfig = async (route, body) => {
+  // 写回统一走 trySyncConfig(route, body)（2026-09-25 审计 E 合并）；这里只该出现 tag 路由
+  if (route !== '/config/tag' || !Array.isArray(body?.urlTags)) throw new Error(`意外的写回 ${route}`);
   trace.push('syncTag');
-  syncTagCalls.push(SubscriptionConfig.normalizeUrlTags(tags).map(t => t.urlPattern));
+  syncTagCalls.push(SubscriptionConfig.normalizeUrlTags(body.urlTags).map(t => t.urlPattern));
   return syncTagResult;
 };
 // eslint-disable-next-line no-unused-vars

@@ -59,8 +59,8 @@
   function render() {
     // 分组折叠标签条：同一时间只展开一组，收起组压成「‹ 代表 logo ›」胶囊。
     // 共享页读不到扩展存储，所以没有「固定 logo」，代表站点恒按「最近有更新」；
-    // 也不做展开状态记忆（刷新即回到默认短剧组）。站点显隐同样不做过滤，
-    // 九站全列（与改造前一致，共享页没有订阅信息）。
+    // 也不做展开状态记忆（刷新即回到默认短剧组）。站点显隐同样不做过滤：
+    // site-registry 登记的站点全部列出（共享页没有订阅信息，不传 visibleSites）。
     const layout = SiteTabs.resolveLayout({
       activeSource: state.activeSource,
       latestBySite: SiteTabs.latestUpdateBySite(state.dramas)

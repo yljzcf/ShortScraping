@@ -331,4 +331,69 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
   }
 }
 
+// SW 初始化只跑一遍（审查 double-init-on-install-startup）：顶层 initPromise 负责配置恢复 + 装定时
+// 任务；onInstalled / onStartup 不再各自再跑一遍——此前同一实例里两条迁移链并发，标记未置位时
+// ReelShort / Shortical 迁移的网络阶段各跑一遍。settle:false＝SW 为分发事件刚启动、初始化仍在飞。
+{
+  const configLoads = bg => bg.log.filter(e => e === 'fetch:chrome-extension://fixture/config/tag.json').length;
+  const watchdogInstalls = bg => bg.log.filter(e => e === 'alarm:watchdog').length;
+  const SETTINGS_TAB = 'tab:chrome-extension://fixture/src/settings/settings.html';
+  const drain = async () => {
+    for (let i = 0; i < 100; i++) await Promise.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+  };
+
+  // 普通唤醒（闹钟 / 消息把 SW 拉起，不派发生命周期事件）：配置恢复与装定时任务各一次，不开页、不清库
+  {
+    const bg = await background({ data: { dramas: [card('tt1')] } });
+    assert.equal(configLoads(bg), 1);
+    assert.equal(watchdogInstalls(bg), 1);
+    assert.deepEqual(['watchdog', 'scrape-task', 'translate-task'].filter(name => bg.alarms.has(name)), ['watchdog', 'scrape-task', 'translate-task']);
+    assert.equal(bg.log.some(e => e.startsWith('tab:')), false);
+    assert.equal(bg.data.dramas.length, 1);
+  }
+
+  // 浏览器启动：onStartup 只等顶层初始化落定（返回时定时任务已装好），不再自跑一遍
+  {
+    const bg = await background({ settle: false });
+    assert.equal(bg.alarms.has('watchdog'), false, '派发时顶层初始化应仍在飞');
+    await bg.listeners.startup();
+    assert.equal(bg.alarms.has('watchdog'), true);
+    await drain();
+    assert.equal(configLoads(bg), 1);
+    assert.equal(watchdogInstalls(bg), 1);
+  }
+
+  // 首次安装：清库 + 打开设置页各一次，且排在顶层初始化（订阅外清理、迁移、装定时任务）之后
+  {
+    const bg = await background({ settle: false, data: { dramas: [card('tt1')], lastScrape: '2026-09-05T00:00:00.000Z' } });
+    await bg.listeners.installed({ reason: 'install' });
+    await drain();
+    assert.equal(configLoads(bg), 1);
+    assert.equal(watchdogInstalls(bg), 1);
+    assert.deepEqual(bg.data.dramas, []);
+    assert.equal(bg.data.lastScrape, null);
+    assert.equal('lastTranslate' in bg.data, false, 'lastTranslate 无读取方，清库不再写它');
+    const clearAt = bg.log.indexOf('set:dramas,lastScrape');
+    const lastMigrationAt = bg.log.indexOf('set:shorticalCanonicalIdsMigrated');
+    const alarmsAt = bg.log.indexOf('alarm:translate-task');
+    assert.ok(lastMigrationAt >= 0 && alarmsAt >= 0, bg.log.join(' | '));
+    assert.ok(clearAt > lastMigrationAt, `清库须在最后一条迁移之后: ${bg.log.join(' | ')}`);
+    assert.ok(clearAt > alarmsAt, `清库须在装定时任务之后: ${bg.log.join(' | ')}`);
+    assert.deepEqual(bg.log.filter(e => e.startsWith('tab:')), [SETTINGS_TAB]);
+    assert.ok(bg.log.indexOf(SETTINGS_TAB) > clearAt);
+  }
+
+  // 扩展升级：顶层初始化已覆盖，onInstalled 不清库、不开页、不重跑
+  {
+    const bg = await background({ settle: false, data: { dramas: [card('tt1')] } });
+    await bg.listeners.installed({ reason: 'update' });
+    await drain();
+    assert.equal(configLoads(bg), 1);
+    assert.equal(watchdogInstalls(bg), 1);
+    assert.equal(bg.data.dramas.length, 1);
+    assert.equal(bg.log.some(e => e.startsWith('tab:')), false);
+  }
+}
+
 console.log('Audit regression scenarios passed');
