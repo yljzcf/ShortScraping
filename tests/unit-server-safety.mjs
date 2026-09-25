@@ -52,7 +52,7 @@ try {
   // The first extension write pins that origin; any other extension is refused afterwards.
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, 'config/sync-origin.json'), 'utf8')).origin, extensionOrigin);
   for (const origin of ['https://audit.invalid', 'null', base, 'chrome-extension://bad', `chrome-extension://${'b'.repeat(32)}`]) {
-    for (const route of ['/config/trans', '/config/tag', '/sync', '/shutdown']) {
+    for (const route of ['/config/trans', '/config/tag', '/sync', '/shutdown', '/restart']) {
       assert.equal((await post(route, {}, { Origin: origin, 'Content-Type': 'text/plain' })).status, 403);
     }
   }
@@ -112,6 +112,19 @@ try {
   assert.equal((await post('/sync', { dramas: [card('tt1')] })).body.count, 0);
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8')).dramas.length, 0);
   assert.equal(fs.existsSync(tagFile + '.tmp'), false);
+
+  // A large Chinese body arrives in many TCP chunks; a 3-byte character split across two chunks
+  // must still decode intact (2026-09-25: per-chunk decoding wrote `\uFFFD\uFFFD` into db/timeline.*).
+  fs.writeFileSync(tagFile, JSON.stringify(tags));
+  const zhDramas = Array.from({ length: 40 }, (_, i) => card(`tt9${i}`, {
+    titleZh: `中文标题${i}`, descriptionZh: '短剧简介：她在民政局被前任抛弃，三年后带娃归来。'.repeat(120) + i
+  }));
+  assert.equal((await post('/sync', { dramas: zhDramas })).body.count, zhDramas.length);
+  const zhSnapshot = fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8');
+  assert.ok(Buffer.byteLength(JSON.stringify(zhDramas)) > 300 * 1024);
+  assert.equal(zhSnapshot.includes('\uFFFD'), false);
+  assert.deepEqual(JSON.parse(zhSnapshot).dramas.map(d => d.descriptionZh), zhDramas.map(d => d.descriptionZh));
+  assert.equal(fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8').includes('\uFFFD'), false);
 
   const exited = once(child, 'exit');
   const stopped = await post('/shutdown', {});

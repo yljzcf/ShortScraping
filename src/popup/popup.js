@@ -6,7 +6,8 @@
 (function() {
   'use strict';
 
-  const SYNC_HEALTH_URL = 'http://127.0.0.1:31919/health';
+  const SYNC_BASE_URL = 'http://127.0.0.1:31919';
+  const SYNC_HEALTH_URL = `${SYNC_BASE_URL}/health`;
   const REMOTE_MANIFEST_URL = 'https://raw.githubusercontent.com/yljzcf/ShortScraping/master/manifest.json';
 
   // 状态
@@ -96,7 +97,9 @@
       container: document.getElementById('syncServiceStatus'),
       text: document.getElementById('syncServiceText'),
       folderBtn: document.getElementById('btnSyncFolder'),
-      startBtn: document.getElementById('btnSyncStart')
+      startBtn: document.getElementById('btnSyncStart'),
+      stopBtn: document.getElementById('btnSyncStop'),
+      restartBtn: document.getElementById('btnSyncRestart')
     };
 
     elements.versionStatus = {
@@ -152,6 +155,14 @@
     elements.syncService.startBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       onSyncStartClick();
+    });
+    elements.syncService.stopBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onSyncStopClick();
+    });
+    elements.syncService.restartBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onSyncRestartClick();
     });
     // 箭头包装防 click 事件对象误入参数位；手动重检永远绕过缓存
     bindActivatable(elements.versionStatus.container, () => checkVersionStatus({ force: true }));
@@ -290,7 +301,7 @@
     showToast(
       isWindowsPlatform()
         ? '路径已复制：未自动打开时 Win+E 粘贴，或运行 setup-launcher.bat 注册一键打开'
-        : '路径已复制：在 Finder 按 ⌘⇧G 粘贴打开（一键集成仅支持 Windows）',
+        : '路径已复制：未自动打开时在访达按 ⌘⇧G 粘贴，或运行 setup-autostart.command 注册一键打开',
       { duration: 4000 }
     );
   }
@@ -315,7 +326,7 @@
         showToast(
           isWindowsPlatform()
             ? '未检测到服务：请运行 server/start-sync.bat（一键启动需先运行 setup-launcher.bat 注册）'
-            : '未检测到服务：请在项目目录运行 npm run sync（一键启动仅支持 Windows）',
+            : '未检测到服务：请双击 server/start-sync.command 或运行 npm run sync；想开机自启可运行一次 server/setup-autostart.command',
           { type: 'error', duration: 5000 }
         );
       }
@@ -324,20 +335,91 @@
     }
   }
 
-  async function waitForSyncServiceUp(attempts, intervalMs) {
+  /**
+   * ⏹ 停止：直接调服务的 /shutdown（与 npm run stop 同一接口；服务只认固定下来的本扩展来源）。
+   * macOS 开机自启下这属于正常退出，launchd 不会拉回；之后用 ▶ 或 start-sync.command 再开。
+   */
+  async function onSyncStopClick() {
+    await runSyncControl(async () => {
+      await postSyncControl('/shutdown');
+      const stopped = await waitForSyncService(6, 500, health => !health);
+      await checkSyncServiceStatus();
+      showToast(stopped ? '同步服务已停止' : '已发送停止请求，服务仍在响应，请稍后点状态刷新',
+        { type: stopped ? 'success' : 'error' });
+    }, '停止');
+  }
+
+  /**
+   * 🔄 重启：调 /restart 后轮询到「进程号变了」才算成功——旧进程退出前还可能应答一两次 /health。
+   * macOS 开机自启交给 launchd 拉起，其余场景由服务自行派生新实例（见 sync-server.js /restart）。
+   */
+  async function onSyncRestartClick() {
+    await runSyncControl(async () => {
+      const before = await fetchSyncHealth();
+      await postSyncControl('/restart');
+      showToast('正在重启同步服务…', { duration: 13000 });
+      const ok = await waitForSyncService(10, 1000, health => health?.ok && health.pid !== before?.pid);
+      showToast(ok ? '同步服务已重启 ✓' : '重启后未检测到服务：请点状态刷新，或手动启动',
+        { type: ok ? 'success' : 'error', duration: ok ? 3000 : 5000 });
+    }, '重启');
+  }
+
+  /** 停止/重启期间两个按钮一起禁用，防连点；请求失败统一给出原因。 */
+  async function runSyncControl(action, label) {
+    const { stopBtn, restartBtn } = elements.syncService;
+    if (stopBtn.disabled) return;
+    stopBtn.disabled = restartBtn.disabled = true;
+    try {
+      await action();
+    } catch (e) {
+      showToast(`${label}失败：${e.message}`, { type: 'error', duration: 5000 });
+    } finally {
+      stopBtn.disabled = restartBtn.disabled = false;
+    }
+  }
+
+  async function postSyncControl(route) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    try {
+      const response = await fetch(SYNC_BASE_URL + route, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: controller.signal
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      return result;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** 读一次 /health，服务不在或返回异常时为 null。 */
+  async function fetchSyncHealth() {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1200);
+      const response = await fetch(SYNC_HEALTH_URL, { cache: 'no-store', signal: controller.signal });
+      clearTimeout(timer);
+      return response.ok ? await response.json() : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function waitForSyncServiceUp(attempts, intervalMs) {
+    return waitForSyncService(attempts, intervalMs, health => health?.ok);
+  }
+
+  /** 按间隔轮询 /health 直到 accept(health) 成立；成立时顺带刷新状态栏。 */
+  async function waitForSyncService(attempts, intervalMs, accept) {
     for (let i = 0; i < attempts; i++) {
       await new Promise(r => setTimeout(r, intervalMs));
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 1200);
-        const response = await fetch(SYNC_HEALTH_URL, { cache: 'no-store', signal: controller.signal });
-        clearTimeout(timer);
-        if (response.ok && (await response.json())?.ok) {
-          await checkSyncServiceStatus();
-          return true;
-        }
-      } catch (e) {
-        // 服务尚未起来，继续轮询
+      if (accept(await fetchSyncHealth())) {
+        await checkSyncServiceStatus();
+        return true;
       }
     }
     return false;
@@ -444,8 +526,10 @@
     const text = elements.syncService.text;
 
     container.classList.remove('is-on', 'is-off');
-    // ▶ 启动按钮只在确认服务未开启时出现
+    // ▶ 启动只在确认服务未开启时出现；⏹ 停止 / 🔄 重启只在确认已开启时出现
     elements.syncService.startBtn.classList.toggle('hidden', status !== 'off');
+    elements.syncService.stopBtn.classList.toggle('hidden', status !== 'on');
+    elements.syncService.restartBtn.classList.toggle('hidden', status !== 'on');
 
     if (status === 'on') {
       container.classList.add('is-on');
@@ -456,7 +540,7 @@
 
     if (status === 'off') {
       container.classList.add('is-off');
-      container.title = '本地 CSV 同步服务未开启，请运行 npm run sync（Windows 可双击 start-sync.bat）；点击可重新检测';
+      container.title = '本地 CSV 同步服务未开启，请运行 npm run sync（Windows 可双击 start-sync.bat，macOS 可双击 start-sync.command）；点击可重新检测';
       text.textContent = '同步服务：已关闭';
       return;
     }

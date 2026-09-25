@@ -26,6 +26,7 @@ function request(method, requestPath) {
       },
       res => {
         let data = '';
+        res.setEncoding('utf8'); // 跨块的多字节字符由内置解码器拼好，不会被拆成乱码
         res.on('data', chunk => { data += chunk; });
         res.on('end', () => resolve({ status: res.statusCode, body: data }));
       }

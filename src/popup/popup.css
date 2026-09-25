@@ -307,6 +307,7 @@ body {
   color: var(--success);
 }
 
+.sync-inline-btn:disabled,
 .sync-start-btn:disabled {
   opacity: 0.5;
   cursor: default;

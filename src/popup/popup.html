@@ -22,10 +22,12 @@
     <!-- 状态栏：左侧同步服务，右侧版本 -->
     <section class="status-bar">
       <div class="sync-service" id="syncServiceStatus" role="button" tabindex="0" title="正在检测本地 CSV 同步服务">
-        <button id="btnSyncFolder" class="sync-inline-btn" title="打开同步服务脚本所在文件夹（需先运行 server/setup-launcher.bat 注册；未注册时复制路径）">📁</button>
+        <button id="btnSyncFolder" class="sync-inline-btn" title="打开同步服务脚本所在文件夹（需先注册一键集成：Windows 运行 server/setup-launcher.bat，macOS 运行 server/setup-autostart.command；未注册时复制路径）">📁</button>
         <span class="sync-service-dot" aria-hidden="true"></span>
         <span id="syncServiceText">同步服务：检测中</span>
-        <button id="btnSyncStart" class="sync-inline-btn sync-start-btn hidden" title="一键启动同步服务（需先运行 server/setup-launcher.bat 注册）">▶ 启动</button>
+        <button id="btnSyncRestart" class="sync-inline-btn hidden" title="重启同步服务" aria-label="重启同步服务">🔄</button>
+        <button id="btnSyncStop" class="sync-inline-btn hidden" title="停止同步服务" aria-label="停止同步服务">⏹</button>
+        <button id="btnSyncStart" class="sync-inline-btn sync-start-btn hidden" title="一键启动同步服务（需先注册一键集成：Windows 运行 server/setup-launcher.bat，macOS 运行 server/setup-autostart.command）">▶ 启动</button>
         <span class="sync-service-hint">点击刷新状态</span>
       </div>
       <div class="version-status" id="versionStatus" role="button" tabindex="0" title="正在检查远端版本">

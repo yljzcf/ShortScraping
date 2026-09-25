@@ -45,6 +45,23 @@ const Config = require('../src/shared/translate-config.js');
   assert.equal(bg.data.dramas.find(d => d.itemId === 'tt8').id, 'import_tt8_1');
 }
 
+// Garbled translations in an old backup (U+FFFD from the pre-fix sync server) go back to the queue.
+{
+  const bg = await background();
+  const done = { status: 'trans', translateAttempts: 2 };
+  bg.context.fixture = [
+    card('tt1', { ...done, titleZh: '完好标题', descriptionZh: '发现\uFFFD\uFFFD的强势掌控' }),
+    card('tt2', { ...done, titleZh: '顶级\uFFFD\uFFFD\uFFFD会主厨', descriptionZh: '完好简介' }),
+    card('tt3', { ...done, titleZh: '完好标题', descriptionZh: '完好简介' })
+  ];
+  assert.equal((await bg.run('importDramaRecords(fixture)')).added, 3);
+  const byItem = Object.fromEntries(bg.data.dramas.map(d => [d.itemId, d]));
+  assert.deepEqual([byItem.tt1.status, byItem.tt1.titleZh, byItem.tt1.descriptionZh], ['new', '完好标题', '']);
+  assert.deepEqual([byItem.tt2.status, byItem.tt2.titleZh, byItem.tt2.descriptionZh], ['new', '', '完好简介']);
+  assert.equal('translateAttempts' in byItem.tt1, false);
+  assert.deepEqual([byItem.tt3.status, byItem.tt3.descriptionZh], ['trans', '完好简介']);
+}
+
 // Preview tokens bind both criteria and membership, including same-count replacements.
 {
   const bg = await background();

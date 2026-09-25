@@ -18,6 +18,7 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const os = require('os');
+const { spawn } = require('child_process');
 const UrlMatch = require('../src/shared/url-match.js');
 const SubscriptionConfig = require('../src/shared/subscription-config.js');
 const Lark = require('../src/shared/lark.js');
@@ -26,6 +27,13 @@ const ScheduleConfig = require('../src/shared/schedule-config.js');
 const TranslateConfig = require('../src/shared/translate-config.js');
 
 const PORT = Number(process.env.PORT) || 31919;
+// macOS 开机自启的 launchd 标签（server/setup-autostart.command 注册）；launchd 会把它写进
+// 子进程的 XPC_SERVICE_NAME，据此判断重启该交给 launchd 还是自行派生新实例
+const LAUNCHD_LABEL = 'com.shortscraping.sync';
+const RESTART_EXIT_CODE = 75; // 非零退出才触发 KeepAlive.SuccessfulExit=false 的拉起
+// 自行重启派生的新实例带此标记：旧实例还没让出端口时重试监听，而不是直接报占用退出
+const WAIT_PORT_ENV = 'SHORTSCRAPING_WAIT_PORT';
+const WAIT_PORT_TIMEOUT_MS = 10000;
 const LOCAL_ONLY = process.argv.includes('--local-only');
 // 域名形态的 Host 默认拒绝（DNS rebinding 只能经域名发起）；确需用主机名访问
 // 共享页时显式放行：node server/sync-server.js --allow-host=mypc.local
@@ -410,17 +418,21 @@ function sendJson(res, statusCode, body) {
   res.end(JSON.stringify(body));
 }
 
+// 分块先攒 Buffer、收齐再整体解码：逐块 `data += chunk` 会把跨块的多字节汉字
+// 拆成两半各自解码成 `\uFFFD`（2026-09-25 实测每次整表推送都随机写坏几个字）
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    let data = '';
+    const chunks = [];
+    let size = 0;
     req.on('data', chunk => {
-      data += chunk;
-      if (data.length > 20 * 1024 * 1024) {
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size > 20 * 1024 * 1024) {
         reject(new Error('请求体过大'));
         req.destroy();
       }
     });
-    req.on('end', () => resolve(data));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
 }
@@ -470,22 +482,32 @@ async function handleRequest(req, res) {
     if (isLocalRequest(req)) {
       body.csvPath = CSV_PATH;
       body.serverDir = __dirname;
+      body.pid = process.pid; // 重启后据此确认已换成新进程
     }
     return sendJson(res, 200, body);
   }
 
-  // 停止服务：仅本机可调用（已受上方 POST 回环护栏保护），供 stop.js / 停止脚本优雅关停
+  // 停止服务：仅本机可调用（已受上方 POST 回环护栏保护），供 stop.js / 停止脚本 / 弹窗 ⏹ 优雅关停
   if (req.method === 'POST' && pathname === '/shutdown') {
     sendJson(res, 200, { ok: true, message: 'shutting down' });
     console.log('[ShortScraping Sync] 收到停止请求，正在关闭服务...');
-    // 主动断开 SSE 长连接，否则 server.close 会一直等待其结束
-    for (const client of sseClients) {
-      try { client.end(); } catch (error) { /* 忽略断开异常 */ }
+    shutdownServer(0);
+    return;
+  }
+
+  // 重启服务（弹窗 🔄）：macOS 开机自启下以非零码退出、由 launchd 按 KeepAlive 立即拉起，
+  // 进程仍归 launchd 管；其余场景（前台 / Windows）先派生脱离的新实例再退出，新实例等端口空出后接管
+  if (req.method === 'POST' && pathname === '/restart') {
+    const managed = process.env.XPC_SERVICE_NAME === LAUNCHD_LABEL;
+    if (!managed) {
+      spawn(process.execPath, [__filename, ...process.argv.slice(2)], {
+        cwd: process.cwd(), env: { ...process.env, [WAIT_PORT_ENV]: '1' },
+        detached: true, stdio: 'ignore', windowsHide: true
+      }).unref();
     }
-    sseClients.clear();
-    server.close(() => process.exit(0));
-    // 兜底：即使仍有未结束的连接，也在短暂延迟后强制退出
-    setTimeout(() => process.exit(0), 500).unref();
+    sendJson(res, 200, { ok: true, message: 'restarting', mode: managed ? 'launchd' : 'respawn' });
+    console.log(`[ShortScraping Sync] 收到重启请求，正在重启服务（${managed ? '交由 launchd 拉起' : '已派生新实例'}）...`);
+    shutdownServer(managed ? RESTART_EXIT_CODE : 0);
     return;
   }
 
@@ -644,7 +666,22 @@ setInterval(() => {
   }
 }, 30000);
 
+/** 优雅关停：主动断开 SSE 长连接（否则 server.close 会一直等它们结束），兜底 500ms 强退。 */
+function shutdownServer(exitCode) {
+  for (const client of sseClients) {
+    try { client.end(); } catch (error) { /* 忽略断开异常 */ }
+  }
+  sseClients.clear();
+  server.close(() => process.exit(exitCode));
+  setTimeout(() => process.exit(exitCode), 500).unref();
+}
+
+const waitPortDeadline = process.env[WAIT_PORT_ENV] ? Date.now() + WAIT_PORT_TIMEOUT_MS : 0;
 server.on('error', (error) => {
+  if (error.code === 'EADDRINUSE' && Date.now() < waitPortDeadline) {
+    setTimeout(listen, 200);
+    return;
+  }
   if (error.code === 'EADDRINUSE') {
     console.error(`[ShortScraping Sync] 端口 ${PORT} 已被占用（可能同步服务已在运行）。`);
     console.error('[ShortScraping Sync] 如需停止，请运行 npm run stop（macOS 可双击 stop-sync.command）。');
@@ -654,7 +691,13 @@ server.on('error', (error) => {
   process.exit(1);
 });
 
-server.listen(PORT, LOCAL_ONLY ? '127.0.0.1' : '0.0.0.0', () => {
+function listen() {
+  server.listen(PORT, LOCAL_ONLY ? '127.0.0.1' : '0.0.0.0');
+}
+server.once('listening', onListening); // 等端口重试时 listen() 会调多次，回调只挂一次
+listen();
+
+function onListening() {
   console.log(`[ShortScraping Sync] 服务已启动：http://127.0.0.1:${PORT}${LOCAL_ONLY ? '（仅本机模式）' : ''}`);
   console.log(`[ShortScraping Sync] CSV 输出：${CSV_PATH}`);
   if (!LOCAL_ONLY) {
@@ -664,4 +707,4 @@ server.listen(PORT, LOCAL_ONLY ? '127.0.0.1' : '0.0.0.0', () => {
       console.log('[ShortScraping Sync] 首次启动如系统弹出防火墙授权提示，请允许 Node 访问局域网（专用网络）。');
     }
   }
-});
+}

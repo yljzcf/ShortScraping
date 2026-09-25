@@ -68,7 +68,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 - **站点图标标签**：只显示有订阅的站点；点未激活图标＝切换查看，再点已激活图标＝只抓取该站点（图标转圈，完成后提示新增条数）
 - **`🌐` 全部翻译**：手动触发一轮全量翻译，悬停按钮可见「已处理 X/Y」实时进度
 - **卡片 `🌍` 单卡翻译**：只翻这一张，新结果覆盖旧译文（可用于重译）；请求由后台执行，弹窗关闭不中断。只翻出一半时卡片保持「待翻译」并提示，等下轮自动补齐
-- **顶部状态栏**：左侧同步服务状态（`📁` 打开服务目录、服务关闭时出现 `▶ 启动`，见「一键启动集成」）；右侧当前版本与远端版本对比（点击重新检查）
+- **顶部状态栏**：左侧同步服务状态（`📁` 打开服务目录；服务开启时出现 `🔄` 重启 / `⏹` 停止，关闭时出现 `▶ 启动`，见「一键启动集成」）；右侧当前版本与远端版本对比（点击重新检查）
 - **底部状态栏**：条目总数、上次抓取时间、翻译进度，以及局域网共享链接 `📡 <IP>:31919`（点击复制，`▦` 弹出二维码）
 
 **设置页**（弹窗 ⚙️ 进入，独立页面，六个标签页）：
@@ -169,14 +169,18 @@ server\tools\stop-sync.bat     # 停止
 server\tools\restart-sync.bat  # 重启
 ```
 
-macOS 双击对应 `.command` 脚本（首次先 `chmod +x server/start-sync.command server/tools/*.command`）：
+macOS 双击对应 `.command` 脚本（首次先 `chmod +x server/*.command server/tools/*.command`）：
 
 ```bash
 server/start-sync.command              # 启动
+server/setup-autostart.command         # 一次性设置开机自启（见下）
 server/tools/stop-sync.command         # 停止
 server/tools/restart-sync.command      # 重启
+server/tools/remove-autostart.command  # 撤销开机自启
 server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 ```
+
+**macOS 开机自启**：运行一次 `server/setup-autostart.command`，注册当前用户的 launchd 后台服务（`~/Library/LaunchAgents/com.shortscraping.sync.plist`）：登录即启动、崩溃自动拉起，日志在 `~/Library/Logs/ShortScraping/sync.log`。`npm run stop` 或弹窗 `⏹` 停下后不会被自动拉回；设置后 `start-sync.command` / `restart-sync.command` 改为操作这个后台服务（等价 `launchctl kickstart [-k] gui/$(id -u)/com.shortscraping.sync`）。同一脚本还会生成 `~/Applications/ShortScraping Launcher.app` 接住 `shortscraping://` 协议，弹窗 `▶ 启动` 与 `📁` 在 macOS 上随即可用（双击这个应用也能启动服务）。plist 与小应用记的都是绝对路径，移动项目文件夹后重新运行一次设置脚本。
 
 服务地址：`http://127.0.0.1:31919`；端口被占用时会打印友好提示（先 `npm run stop`）而非报错堆栈。未启动同步服务时扩展一切照常，只是 CSV/配置写回不可用。
 
@@ -185,6 +189,8 @@ server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 时间线数据变化时自动同步到 `db/timeline.csv`，带 BOM 的 UTF-8 + Windows 换行，Excel/WPS 直接识别中文。若历史文件乱码：关闭 Excel/WPS 后运行 `npm run fix-encoding`（或双击对应脚本）重新编码；也可以启动服务后打开一次扩展弹窗，弹窗会自动补推当前时间线重写 CSV。
 
 ### 一键启动集成（Windows 可选）
+
+> macOS 由 `server/setup-autostart.command` 一并注册（见上文「macOS 开机自启」），行为与下述一致。弹窗 `🔄` / `⏹` 直接调服务接口，两个平台都无需注册；`🔄` 在 macOS 开机自启下交由 launchd 拉起，其余场景由服务自行派生新实例接管端口。
 
 运行一次 `server/setup-launcher.bat`（只写当前用户注册表 `HKCU\Software\Classes\shortscraping`，无需管理员）注册 `shortscraping://` 协议后，弹窗获得两个能力：
 
@@ -260,7 +266,7 @@ ShortScraping/
 
 ## 验证与升级
 
-使用 Node.js 22 或更新版本运行 `npm test`（当前 41 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+使用 Node.js 22 或更新版本运行 `npm test`（当前 44 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
 
 更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本域名清单，测试会检查两者一致。
 

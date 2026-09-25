@@ -90,7 +90,7 @@ const resetDramasCache = async () => {
   failNextSet = false;
 };
 // 种入条数（条数断言一律由它推导，加夹具时不必再逐处改数字）
-const SEEDED = 9;
+const SEEDED = 11;
 const seedLegacy = async () => {
   await resetDramasCache();
   rawStore.dramas = [
@@ -112,13 +112,22 @@ const seedLegacy = async () => {
       tags: ['T'], source: 'steam', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB },
     { id: 'id-9', itemId: 'st005', title: 'The Mansion of Campanillas', description: 'en desc',
       titleZh: 'La mansión de Campanillas', descriptionZh: '中文简介',
-      tags: ['T'], source: 'steam', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB }
+      tags: ['T'], source: 'steam', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB },
+    // v1.6.13 乱码译文复位：旧同步服务逐块解码写出的 U+FFFD 经导入进了扩展库。
+    // 译名/简介都齐全且含汉字，前两道复位都不会碰
+    { id: 'id-10', itemId: 'rr176669', title: 'Second Life', description: 'en desc',
+      titleZh: '第二人生', descriptionZh: '眼看就要随\uFFFD\uFFFD咽气', translateAttempts: 1,
+      tags: ['T'], source: 'royalroad', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB },
+    { id: 'id-11', itemId: 'ns2092788755268141057', title: 'Top Chef', description: 'en desc',
+      titleZh: '顶级\uFFFD\uFFFD\uFFFD会主厨', descriptionZh: '中文简介',
+      tags: ['T'], source: 'netshort', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB }
   ];
   delete rawStore.legacyDramaMigrated;
   delete rawStore.rsEpisodeUrlMigrated;
   delete rawStore.companyFieldDropped;
   delete rawStore.partialTranslationReset;
   delete rawStore.nonChineseTitleZhReset;
+  delete rawStore.garbledTranslationReset;
   delete rawStore.shorticalCanonicalIdsMigrated;
   rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
 };
@@ -166,6 +175,14 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
     byId['id-7']?.titleZh === '完整中文名' && byId['id-7']?.status === 'trans', JSON.stringify(byId['id-7']));
   check('T1o nonChineseTitleZhReset 已置位', rawStore.nonChineseTitleZhReset === true,
     String(rawStore.nonChineseTitleZhReset));
+  check('T1p 乱码简介已清空并退回 new（完好译名保留、重试计数清零）',
+    byId['id-10']?.status === 'new' && byId['id-10']?.descriptionZh === '' && byId['id-10']?.titleZh === '第二人生'
+    && !('translateAttempts' in (byId['id-10'] || {})), JSON.stringify(byId['id-10']));
+  check('T1q 乱码译名已清空并退回 new（完好简介保留）',
+    byId['id-11']?.status === 'new' && byId['id-11']?.titleZh === '' && byId['id-11']?.descriptionZh === '中文简介',
+    JSON.stringify(byId['id-11']));
+  check('T1r garbledTranslationReset 已置位', rawStore.garbledTranslationReset === true,
+    String(rawStore.garbledTranslationReset));
 }
 
 // ---------- T2 二次唤醒：dramas 全表读恰 1 次（仅 prune，不可标记项） ----------

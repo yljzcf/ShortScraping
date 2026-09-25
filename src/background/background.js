@@ -237,6 +237,7 @@ async function loadConfigFromJsonFiles() {
     ['company 字段移除', dropCompanyField],
     ['半成品翻译复位', resetPartialTranslations],
     ['非中文译名复位', resetNonChineseTitleZh],
+    ['乱码译文复位', resetGarbledTranslations],
     ['ReelShort 播放页 URL 迁移', migrateReelshortEpisodeUrls],
     ['Shortical 规范 id 迁移', migrateShorticalCanonicalIds]
   ]) {
@@ -717,6 +718,42 @@ async function resetNonChineseTitleZh() {
   });
 
   await chrome.storage.local.set({ nonChineseTitleZhReset: true });
+}
+
+/**
+ * 乱码译文清理（v1.6.13）：titleZh / descriptionZh 含 U+FFFD 的清空该字段并退回
+ * status='new'，交翻译线用英文原文重译；另一个完好的译文字段保留（fillOnly 只补空缺）。
+ * 返回原对象表示无需改动。
+ *
+ * 成因：同步服务 readBody 曾逐块解码请求体，跨块的汉字被写成 `\uFFFD`，坏字进了
+ * db/timeline.*；从这份文件「导入恢复」就把坏字带进扩展库（2026-09-25 实测 11 条）。
+ * 服务端已修，存量与旧备份仍会带进来，所以迁移与导入两处都要过这一道。
+ */
+function clearGarbledTranslations(drama) {
+  if (!drama) return drama;
+  const garbled = ['titleZh', 'descriptionZh'].filter(key => String(drama[key] || '').includes('\uFFFD'));
+  if (garbled.length === 0) return drama;
+  const { translateAttempts, ...rest } = drama;
+  for (const key of garbled) rest[key] = '';
+  return { ...rest, status: 'new' };
+}
+
+async function resetGarbledTranslations() {
+  const { garbledTranslationReset } = await chrome.storage.local.get('garbledTranslationReset');
+  if (garbledTranslationReset) return;
+
+  await enqueueDramaWrite('乱码译文复位', async () => {
+    const dramas = await getDramasInQueue();
+    const reset = dramas.map(clearGarbledTranslations);
+    const changedCount = reset.filter((drama, i) => drama !== dramas[i]).length;
+
+    if (changedCount > 0) {
+      await writeDramasInQueue(reset);
+      console.log(`[ShortScraping] 已把 ${changedCount} 条乱码译文退回待翻译队列`);
+    }
+  });
+
+  await chrome.storage.local.set({ garbledTranslationReset: true });
 }
 
 /**
@@ -1433,7 +1470,7 @@ function importDramaRecords(rawDramas) {
       }
       seenItemIds.add(normalized.itemId);
       seenIds.add(normalized.id);
-      added.push(normalized);
+      added.push(clearGarbledTranslations(normalized)); // 旧备份里的乱码译文退回重译
     }
 
     if (added.length > 0) {
