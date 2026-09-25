@@ -14,7 +14,8 @@
  *   - 其余情况：停止后在当前终端前台启动 sync-server.js（Ctrl+C 停止），--restart 之后的参数原样转给它。
  *
  * 用法：node server/tools/stop.js [--restart [服务参数...]]
- * 环境变量：PORT 指定端口；SHORTSCRAPING_NO_LAUNCHD=1 跳过 launchd 探测（测试用，免得碰到本机真实的自启服务；
+ * 环境变量：SHORTSCRAPING_PORT 指定端口（与 sync-server.js 同名；不读通用的 PORT，免得继承别的项目的设置）；
+ *   SHORTSCRAPING_NO_LAUNCHD=1 跳过 launchd 探测（测试用，免得碰到本机真实的自启服务；
  *   会传给前台启动的服务，它启动时的同款探测一并跳过，见 sync-server.js exitIfLaunchdAgentLoaded）
  */
 
@@ -24,7 +25,7 @@ const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
 const DEFAULT_PORT = 31919;
-const PORT = Number(process.env.PORT) || DEFAULT_PORT;
+const PORT = Number(process.env.SHORTSCRAPING_PORT) || DEFAULT_PORT;
 const HOST = '127.0.0.1';
 const REQUEST_TIMEOUT_MS = 2000;
 const LAUNCHD_LABEL = 'com.shortscraping.sync'; // 与 setup-autostart.command、sync-server.js 保持一致
@@ -119,7 +120,7 @@ async function stopService() {
 
 /** macOS 已设置开机自启时返回 LaunchAgent 的 launchctl 目标，否则 null */
 function launchdTarget() {
-  // plist 不带 PORT，托管实例固定在默认端口；指定了别的端口说明要操作的是另一个前台实例
+  // plist 不带 SHORTSCRAPING_PORT，托管实例固定在默认端口；指定了别的端口说明要操作的是另一个前台实例
   if (process.platform !== 'darwin' || PORT !== DEFAULT_PORT || process.env.SHORTSCRAPING_NO_LAUNCHD === '1') {
     return null;
   }
@@ -185,6 +186,11 @@ function runForeground(serverArgs) {
 
 async function main() {
   const args = process.argv.slice(2);
+  if (PORT !== DEFAULT_PORT) {
+    // 端口来自环境变量而非参数，终端里看不出来：说清楚这次操作的不是扩展连的那个服务
+    console.log(`[ShortScraping Sync] 注意：按环境变量 SHORTSCRAPING_PORT 操作端口 ${PORT}（非默认 ${DEFAULT_PORT}），`
+      + '扩展连接的默认端口服务与开机自启的后台服务不受影响。');
+  }
 
   if (args[0] !== '--restart') {
     const { state, freed } = await stopService();

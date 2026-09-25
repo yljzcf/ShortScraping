@@ -5,9 +5,11 @@ import './bootstrap.cjs';
 // 断言：详情请求发往 /movie/（简介源不变）、成功后 url 为 /episodes/episode-1 第一集
 // 播放页（chapter_id 取 __NEXT_DATA__ 的 start_play）、简介取自 /movie/ 页真实剧情
 // （非 full-episodes 的 SEO 模板）、详情失败退构造的 /full-episodes/ 全集页兜底、
-// genres 取详情 tag_list（v1.5.3）。
+// genres 取详情 tag_list（v1.5.3）；详情请求被跳到首页或别的剧（200）时不采跳转页的数据
+// （审查 reelshort-redirect-overwrites-url，U7/U8）。
 // 用法：node tests/unit-reelshort-playurl.mjs
 import fs from 'node:fs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const HOME_URL = 'https://www.reelshort.com/';
 const BOOK_A = {
@@ -22,10 +24,24 @@ const BOOK_B = {
   special_desc: 'truncated B',
   book_pic: 'https://cdn.test/b.jpg'
 };
+// 下架 / 地区不可用：/movie/ 请求被 302 到首页（200）
+const BOOK_C = {
+  book_id: 'cccccccccccccccccccccccc',
+  book_title: 'Delisted Drama',
+  special_desc: 'truncated C',
+  book_pic: 'https://cdn.test/c.jpg'
+};
+// 被跳到另一部剧（A）的 /movie/ 页
+const BOOK_D = {
+  book_id: 'dddddddddddddddddddddddd',
+  book_title: 'Moved Drama',
+  special_desc: 'truncated D',
+  book_pic: 'https://cdn.test/d.jpg'
+};
 const HOME_NEXT_DATA = {
   props: { pageProps: { fallback: { '/api/ms/hall/webInfo': { bookShelfList: [
     { bookshelf_name: 'Banner' },
-    { bookshelf_name: 'TOP', books: [BOOK_A, BOOK_B] }
+    { bookshelf_name: 'TOP', books: [BOOK_A, BOOK_B, BOOK_C, BOOK_D] }
   ] } } } }
 };
 // 内嵌 /movie/ 页 fixture：__NEXT_DATA__ 直出 pageProps.data（start_play.chapter_id
@@ -53,21 +69,11 @@ const listeners = [];
 const fetchedUrls = [];
 
 globalThis.chrome = {
-  storage: {
-    local: {
-      async get() {
-        await Promise.resolve();
-        return {
-          dramas: structuredClone(rawStore.dramas),
-          urlTags: [{ urlPattern: HOME_URL, tags: ['ReelShort', 'TOP'] }]
-        };
-      }
-    }
-  },
   runtime: {
     onMessage: { addListener(fn) { listeners.push(fn); } },
     async sendMessage(message) {
       await Promise.resolve();
+      if (message?.action === 'getScrapeContext') return scrapeContextReply(rawStore.dramas, [{ urlPattern: HOME_URL, tags: ['ReelShort', 'TOP'] }]);
       if (message?.action === 'saveDrama') {
         const dup = rawStore.dramas.some(d => d.itemId === message.drama.itemId);
         if (!dup) rawStore.dramas.push(structuredClone(message.drama));
@@ -111,6 +117,8 @@ globalThis.DOMParser = class {
 globalThis.fetch = async (url) => {
   fetchedUrls.push(url);
   if (url.includes(BOOK_B.book_id)) throw new Error('detail 故障注入');
+  // 跳转后的正文都给 A 的剧目页：不校验 response.url 就会把 A 的标题 / 简介 / tag_list 采给 C、D
+  if (url.includes(BOOK_C.book_id)) return { ok: true, url: HOME_URL, text: async () => MOVIE_HTML };
   return { ok: true, url: CANONICAL_MOVIE, text: async () => MOVIE_HTML };
 };
 
@@ -137,11 +145,13 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
 const byId = id => rawStore.dramas.find(d => d.itemId === id);
 const a = byId(`rs${BOOK_A.book_id}`);
 const b = byId(`rs${BOOK_B.book_id}`);
+const c = byId(`rs${BOOK_C.book_id}`);
+const d = byId(`rs${BOOK_D.book_id}`);
 
-check('U0 抓取成功且入库 2 条', resp?.success === true && rawStore.dramas.length === 2,
+check('U0 抓取成功且入库 4 条', resp?.success === true && rawStore.dramas.length === 4,
   JSON.stringify({ success: resp?.success, len: rawStore.dramas.length }));
 check('U1 详情请求发往 /movie/ 剧目页（简介源不变）',
-  fetchedUrls.length === 2 && fetchedUrls.every(u => u.startsWith('https://www.reelshort.com/movie/')),
+  fetchedUrls.length === 4 && fetchedUrls.every(u => u.startsWith('https://www.reelshort.com/movie/')),
   JSON.stringify(fetchedUrls));
 check('U2 详情成功：url 为 /episodes/episode-1 第一集播放页（真实 chapter_id）',
   a?.url === 'https://www.reelshort.com/episodes/episode-1-the-sylvan-crest-swap-6a31351edd8a999e1e0f891c-roevwnpo9t',
@@ -157,6 +167,14 @@ check('U5 genres 取详情 tag_list（v1.5.3）',
   JSON.stringify(a?.genres));
 check('U6 详情失败条目 genres 保持列表级值（无 theme 即空数组）',
   Array.isArray(b?.genres) && b.genres.length === 0, JSON.stringify(b?.genres));
+check('U7 详情被跳到首页 → url 保持构造的 /full-episodes/ 全集页，标题 / 简介 / genres 不被跳转页覆盖',
+  c?.url === `https://www.reelshort.com/full-episodes/delisted-drama-${BOOK_C.book_id}`
+    && c?.title === 'Delisted Drama' && c?.description === 'truncated C' && JSON.stringify(c?.genres) === '[]',
+  JSON.stringify({ url: c?.url, title: c?.title, desc: c?.description, genres: c?.genres }));
+check('U8 详情被跳到另一部剧的 /movie/ 页 → 不采那部剧的数据，url 仍指向本剧',
+  d?.url === `https://www.reelshort.com/full-episodes/moved-drama-${BOOK_D.book_id}`
+    && d?.title === 'Moved Drama' && d?.description === 'truncated D',
+  JSON.stringify({ url: d?.url, title: d?.title, desc: d?.description }));
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 process.exit(results.every(r => r.pass) ? 0 : 1);

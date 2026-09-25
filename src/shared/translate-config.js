@@ -49,7 +49,10 @@
 
   // 标题比对用的归一化：去空白、转小写、剥装饰性标点。只服务于「中英文名是否
   // 其实是同一个」的判断，不改变任何存储值。
-  const TITLE_DECORATION = /[\s《》「」『』""''（）()[\]【】{}~!！?？.。,，:：;；·・\-—–_™®©]/g;
+  // 弯引号（U+201C/201D/2018/2019）一律用 \u 转义写：7cd50f0 引入时字面弯引号变成了
+  // 重复的 ASCII "" ''，从未生效——MyDrama 标题常带 ’（It’s Me），模型或 Steam 官方中文
+  // 只把它换成 ' 时比不上，卡片 / 多维表格 / 群机器人都显示成「It's Me（It’s Me）」。
+  const TITLE_DECORATION = /[\s《》「」『』"'\u201C\u201D\u2018\u2019（）()[\]【】{}~!！?？.。,，:：;；·・\-—–_™®©]/g;
   function normalizeTitleForCompare(text) {
     return String(text || '').toLowerCase().replace(TITLE_DECORATION, '');
   }

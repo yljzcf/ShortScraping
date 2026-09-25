@@ -28,7 +28,7 @@ const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const envFor = targetPort => ({
-  ...process.env, PORT: String(targetPort), XPC_SERVICE_NAME: '', SHORTSCRAPING_NO_LAUNCHD: '1',
+  ...process.env, SHORTSCRAPING_PORT: String(targetPort), XPC_SERVICE_NAME: '', SHORTSCRAPING_NO_LAUNCHD: '1',
   SHORTSCRAPING_LOG_FILE: path.join(directory, 'sync.log')
 });
 
@@ -89,6 +89,8 @@ try {
   assert.notEqual(after.pid, restarter.pid); // 服务是包装进程的子进程，包装进程留在前台等它
   assert.equal(after.localOnly, true); // --restart 之后的参数转给了服务
   assert.match(restarter.output, /服务已停止/);
+  // 端口来自专用环境变量 SHORTSCRAPING_PORT（不再是通用的 PORT）：非默认端口时明说操作的不是扩展连的那个服务
+  assert.match(restarter.output, new RegExp(`按环境变量 SHORTSCRAPING_PORT 操作端口 ${port}（非默认 31919）`));
   await waitFor(() => /服务已启动/.test(restarter.output), 3000, `服务输出直通前台\n${restarter.output}`);
   const stopped = await fetch(base + '/shutdown', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(3000)

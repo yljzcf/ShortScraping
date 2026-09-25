@@ -7,6 +7,7 @@ import './bootstrap.cjs';
 // 去重跳过、adapter.matches 路径闸门。
 // 用法：node tests/unit-netflix-top10.mjs
 import fs from 'node:fs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const contentSrc = fs.readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 (0, eval)(fs.readFileSync(new URL('../src/shared/site-registry.js', import.meta.url), 'utf8'));
@@ -135,11 +136,11 @@ async function runScenario({ location, subscriptions, document, dramas = [], pro
   const proxyCalls = [];
   const listeners = [];
   globalThis.chrome = {
-    storage: { local: { async get() { await Promise.resolve(); return { dramas: structuredClone(store.dramas), urlTags: subscriptions }; } } },
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
       async sendMessage(message) {
         await Promise.resolve();
+        if (message?.action === 'getScrapeContext') return scrapeContextReply(store.dramas, subscriptions);
         if (message?.action === 'saveDrama') {
           saveCalls.push(structuredClone(message.drama));
           const dup = store.dramas.some(d => d.itemId === message.drama.itemId);
@@ -262,6 +263,14 @@ const TRICKY_SYN = 'Path a\\b and 100% ünïcode — done.';
   const data = buildData({ cardItems: [top10Item('CARD', { videoId: 88888, title: 'Movie Item' })] });
   const { saved } = await runScenario({ location: loc('https://www.netflix.com/tudum/top10'), subscriptions: [SUB_TV, SUB_MOVIES], document: scriptsDoc([graphqlScript(data)]) });
   check('U3 top10 页在 tv 订阅排前时仍精确命中 top10 标签', eq(saved[0]?.tags, SUB_MOVIES.tags), JSON.stringify(saved[0]?.tags));
+}
+{
+  // 审查 subscription-prefix-misattribution：以前前缀轮裸 startsWith，只订 /tudum/top10 时在 /tv 页点按钮，
+  // 剧集榜的卡会带着电影榜的标签与 sourceListUrl 入库。前缀轮现在不许新增路径段
+  const data = buildData({ cardItems: [top10Item('CARD', { videoId: 77777, title: 'TV Item', category: 'ENGLISH_SERIES' })] });
+  const { saved, response } = await runScenario({ location: loc('https://www.netflix.com/tudum/top10/tv'), subscriptions: [SUB_MOVIES], document: scriptsDoc([graphqlScript(data)]) });
+  check('U4 只订 /tudum/top10 时 /tudum/top10/tv 页 → 0 条（不归到电影榜订阅名下）',
+    response?.success === true && saved.length === 0, JSON.stringify(saved.map(d => [d.itemId, d.tags])));
 }
 
 // ---------- R：去重 ----------

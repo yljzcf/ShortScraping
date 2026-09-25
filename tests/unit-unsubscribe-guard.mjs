@@ -15,6 +15,8 @@ import './bootstrap.cjs';
 //    失败则保留——后台见标记不再拿旧 tag.json 回滚订阅、连带删新订阅下的历史；
 // A3 差集基准是 storage 里此刻的订阅而不是页面快照 state.urlTags；别处改了订阅，
 //    列表跟着刷新，本页有未保存勾选时明确提示。
+// 批次 F（unsubscribe-backup-unverified）：备份下载只是发起、确认不了成败，确认框与成功提示要
+//    告诉用户这批条目还在「自动清理回收站」可补导（G3j/G3k）；零历史与纯新增不提（G1d/G5d）。
 // 用法：node tests/unit-unsubscribe-guard.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -171,6 +173,8 @@ check('G1a 纯新增不弹确认、不下载', !trace.includes('confirm') && dow
 check('G1b 纯新增仍写 storage 并回写 tag.json', urlTagWrites().length === 1 && syncTagCalls.length === 1, trace.join('>'));
 check('G1c 纯新增沿用 storage 优先（set 早于 syncTag）',
   trace.indexOf('set') < trace.indexOf('syncTag'), trace.join('>'));
+check('G1d 纯新增的成功提示不提备份/回收站（没有下载）',
+  statusMessages.at(-1)?.ok === true && !/备份|回收站/.test(statusMessages.at(-1).text), statusMessages.at(-1)?.text);
 
 // ---------- G2：有删除 + 用户点取消 → 什么都不做 ----------
 reset({ urlTags: bothSubs, dramas: dramasFixture, confirm: false });
@@ -205,6 +209,17 @@ check('G3g 确认文案给出订阅条数与历史条数',
 check('G3h 确认文案点明不可恢复', confirmTexts[0].includes('不可恢复'), confirmTexts[0]);
 check('G3i 最终只留 A 订阅', deepEq(state.urlTags.map(t => t.urlPattern), [SUB_A]),
   JSON.stringify(state.urlTags.map(t => t.urlPattern)));
+// 下载只是发起（a.click() 拿不到另存为被取消 / 被拦的结果），没有 downloads 权限也确认不了；
+// 兜底是后台清理前写的回收站（2026-09-25 审计 unsubscribe-backup-unverified）。文案要把这条退路
+// 告诉用户，否则点了「取消另存为」会以为数据已经没了。批数与后台常量逐字对齐，防以后改了一边
+const bgSrc = fs.readFileSync(path.join(root, 'src/background/background.js'), 'utf8');
+const trashBatches = bgSrc.match(/const PRUNE_TRASH_MAX_BATCHES = (\d+);/)?.[1];
+check('G3j 有历史的确认文案点明：下载被取消/拦截时仍可从「自动清理回收站」补导，批数与后台一致',
+  Boolean(trashBatches) && confirmTexts[0].includes('自动清理回收站') && confirmTexts[0].includes(`保留最近 ${trashBatches} 批`)
+    && confirmTexts[0].includes('取消或拦截'), `${trashBatches} | ${confirmTexts[0]}`);
+check('G3k 退订成功提示说明备份已触发下载、没保存上可导出回收站',
+  statusMessages.at(-1)?.ok === true && statusMessages.at(-1).text.includes('备份文件已触发下载')
+    && statusMessages.at(-1).text.includes('回收站'), statusMessages.at(-1)?.text);
 
 // ---------- G4：有删除一律文件优先——tag.json 写失败就整体放弃 ----------
 reset({ urlTags: bothSubs, dramas: dramasFixture, sync: { ok: false, error: '服务未启动' } });
@@ -226,6 +241,8 @@ await saveSubscriptions();
 check('G5a 零历史仍弹确认', confirmTexts.length === 1, trace.join('>'));
 check('G5b 零历史不下载空备份', downloads.length === 0, trace.join('>'));
 check('G5c 零历史文案不提备份', !confirmTexts[0].includes('备份'), confirmTexts[0]);
+check('G5d 零历史退订的成功提示也不提备份/回收站', statusMessages.at(-1)?.ok === true
+  && !/备份|回收站/.test(statusMessages.at(-1).text), statusMessages.at(-1)?.text);
 
 // ---------- G6：取消全部订阅仍按原语义（clearingAll 只是 removed 的特例） ----------
 reset({ urlTags: bothSubs, dramas: dramasFixture });

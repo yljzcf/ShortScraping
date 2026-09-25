@@ -17,7 +17,9 @@ export const card = (itemId, extra = {}) => ({
 // 选项：data 覆盖初始 storage；settle:false 在顶层代码刚执行完（顶层初始化仍在飞）时就返回，
 // 供「SW 为分发 onInstalled/onStartup 而启动」的场景在初始化落定前派发事件。
 // log 按发生顺序记 fetch / storage.set / alarms.create / tabs.create，供断言先后与次数。
-export async function background({ data: seed = {}, settle = true } = {}) {
+// fetch(url, options)：外网请求的替身，返回 undefined 则落回默认行为（config/ 读文件，其余抛错）；
+// 可返回永不 resolve 的 promise 模拟「请求挂住」。
+export async function background({ data: seed = {}, settle = true, fetch: fetchOverride = null } = {}) {
   const data = { dramas: [], urlTags: [{ urlPattern: SUB, tags: ['IMDB'] }], rsEpisodeUrlMigrated: true, legacyDramaMigrated: true, ...seed };
   const alarms = new Map();
   const listeners = {};
@@ -28,7 +30,7 @@ export async function background({ data: seed = {}, settle = true } = {}) {
     static now() { return now; }
   }
   const context = vm.createContext({
-    console: { log() {}, warn() {}, error() {} }, Date: Clock, URL, AbortController,
+    console: { log() {}, warn() {}, error() {} }, Date: Clock, URL, AbortController, AbortSignal,
     structuredClone, TextEncoder, crypto: webcrypto, setTimeout: () => 1, clearTimeout() {},
     chrome: {
       storage: { local: {
@@ -46,8 +48,10 @@ export async function background({ data: seed = {}, settle = true } = {}) {
       },
       tabs: { create(info) { log.push(`tab:${info?.url}`); }, onUpdated: { addListener() {}, removeListener() {} } }, notifications: { create() {} }
     },
-    fetch: async url => {
+    fetch: async (url, options) => {
       log.push(`fetch:${url}`);
+      const overridden = fetchOverride?.(url, options);
+      if (overridden !== undefined) return overridden;
       if (!String(url).startsWith('chrome-extension://fixture/config/')) throw new Error('External network disabled in test');
       return { ok: true, async json() { return String(url).endsWith('/tag.json') ? [{ url: SUB, tags: ['IMDB'] }] : {}; } };
     }

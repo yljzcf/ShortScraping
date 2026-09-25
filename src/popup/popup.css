@@ -442,6 +442,11 @@ body {
   flex-shrink: 0;
 }
 
+/* 最近一轮抓取全部失败：「抓取于 …」后缀提示，原因在悬停 title 里 */
+#statsLastUpdate.is-failed {
+  color: var(--danger);
+}
+
 /* 底栏局域网共享区块（与翻译状态、抓取时间同一行） */
 .lan-share {
   display: flex;

@@ -25,7 +25,7 @@ const tags = [{ url: SUB, tags: ['IMDB'] }];
 fs.writeFileSync(tagFile, JSON.stringify(tags));
 const port = await freePort();
 const child = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
-  cwd: directory, env: { ...process.env, PORT: String(port) }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
+  cwd: directory, env: { ...process.env, SHORTSCRAPING_PORT: String(port) }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
 });
 let output = '';
 child.stdout.on('data', chunk => { output += chunk; });
@@ -208,6 +208,64 @@ try {
   const sameMixed = await post('/sync', { dramas: mixedKeys });
   assert.equal(sameMixed.body.count, firstMixed.body.count, JSON.stringify(sameMixed.body));
   assert.equal(fs.statSync(path.join(directory, 'db/timeline.csv')).mtimeMs, csvMtime); // really took the no-rewrite branch
+
+  // Oversized bodies get a readable 413 instead of a destroyed socket (the old 20MB cap called req.destroy(),
+  // so the route's error response never left and the extension only saw "fetch failed" -> "is the service
+  // running?"), and the cap has headroom for the whole-table push that grows every month.
+  const MAX_BODY = 64 * 1024 * 1024;
+  const rawPost = (route, send) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: route, method: 'POST', headers: send.headers }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => {
+        resolve({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
+        req.destroy(); // a declared-but-unsent body would otherwise keep the socket open
+      });
+    });
+    req.setTimeout(10000, () => req.destroy(new Error(`${route} got no response`)));
+    // errors after the response resolved (writes still queued when we destroy the request) are no-ops;
+    // before it, a reset/EPIPE is exactly the old destroy-the-socket behaviour and must fail the test
+    req.on('error', reject);
+    Promise.resolve(send.body(req)).catch(reject);
+  });
+  const timelineBefore = [fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8'), fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8')];
+  // (a) The extension's fetch always declares Content-Length: refused up front, without reading the body.
+  const declared = await rawPost('/sync', {
+    headers: { 'Content-Type': 'application/json', 'Content-Length': String(MAX_BODY + 1) },
+    body: req => req.write('{"dramas":[')
+  });
+  assert.equal(declared.status, 413, JSON.stringify(declared.body));
+  assert.equal(declared.body.code, 'BODY_TOO_LARGE');
+  assert.match(declared.body.error, /64MB 上限/);
+  // (b) A chunked body with no length crosses the cap mid-stream: still a 413 the client can read.
+  const block = Buffer.alloc(1024 * 1024, 0x20);
+  const streamed = await rawPost('/sync', {
+    headers: { 'Content-Type': 'application/json' },
+    body: async req => {
+      req.write('{"dramas":[]');
+      for (let i = 0; i < MAX_BODY / block.length + 1; i++) {
+        if (!req.write(block)) await once(req, 'drain');
+      }
+      req.end('}');
+    }
+  });
+  assert.equal(streamed.status, 413, JSON.stringify(streamed.body));
+  assert.equal(streamed.body.code, 'BODY_TOO_LARGE');
+  assert.deepEqual([fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8'), fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8')], timelineBefore);
+  // (c) Bodies above the old 20MB cap are accepted now (shared readBody, so a padded config write proves it).
+  const cronConfig = { scheduleMode: 'cron', scrapeInterval: 6, translateInterval: 1, scrapeCron: '10 3 * * *', translateCron: '20 3 * * *' };
+  const padded = await fetch(base + '/config/cron', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scheduleConfig: cronConfig, pad: 'x'.repeat(21 * 1024 * 1024) }), signal: AbortSignal.timeout(10000)
+  });
+  assert.equal(padded.status, 200, await padded.clone().text());
+  assert.deepEqual((await padded.json()).config, ScheduleConfig.validateConfig(cronConfig).config);
+  // The service is still healthy and keeps accepting normal pushes afterwards.
+  assert.equal((await fetch(base + '/health')).status, 200);
+  assert.equal((await post('/sync', { dramas: mixedKeys })).body.count, 2);
+  assert.equal(child.exitCode, null);
+  // A test port is not the extension's port: say so at startup.
+  assert.match(output, new RegExp(`当前监听非默认端口 ${port}（来自环境变量 SHORTSCRAPING_PORT），扩展只连 31919`));
 
   // The share page's card/tab styles are shared with the popup and served from src/shared.
   const sharedCss = await fetch(base + '/shared/timeline-cards.css');

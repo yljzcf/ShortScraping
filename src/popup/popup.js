@@ -15,6 +15,8 @@
     dramas: [],
     urlTags: [],
     lastScrape: null,
+    // 后台写的「最近一轮全部失败」{ at, failed, total, error }；有 URL 成功时后台同一次写清成 null
+    lastScrapeFailure: null,
     activeSource: null,
     // 分组代表 logo 的固定项（设置页写入）：{ [group]: site|null }
     groupPins: {},
@@ -46,11 +48,23 @@
         handleTranslateRunStateChange(changes.translateRunState.newValue);
       }
 
-      // 设置页改了分组固定 logo：只重画标签条，不动卡片
+      // 设置页改了分组固定 logo：只重画标签条，不动卡片。本页选站时 persistActiveSource
+      // 也写这个键（只改 activeSource），pins 没变就不重画——setActiveCategory 已经画过一次，
+      // 再画一次只是白白重建标签条（丢焦点、打断拖动）
       if (changes.siteTabPrefs) {
-        const prefs = changes.siteTabPrefs.newValue || {};
-        state.groupPins = prefs.pins || {};
-        renderCategoryTabs();
+        const pins = (changes.siteTabPrefs.newValue || {}).pins || {};
+        if (JSON.stringify(pins) !== JSON.stringify(state.groupPins)) {
+          state.groupPins = pins;
+          renderCategoryTabs();
+        }
+      }
+
+      // 底栏「抓取于 …」：后台每存一张新卡、每收一轮都会写 lastScrape，弹窗开着也要跟上
+      if (changes.lastScrape) {
+        state.lastScrape = changes.lastScrape.newValue ?? null;
+      }
+      if (changes.lastScrapeFailure) {
+        state.lastScrapeFailure = changes.lastScrapeFailure.newValue ?? null;
       }
 
       if (changes.urlTags) {
@@ -67,6 +81,9 @@
       if (changes.dramas || changes.urlTags) {
         // 抓取洪峰期 storage 每保存一张卡变更一次，整树重渲染合并为 ≤1 次/秒
         scheduleRender();
+      } else if (changes.lastScrape || changes.lastScrapeFailure) {
+        // 只有抓取时间变了（收轮时单独写）：刷底栏即可，不重建时间线
+        updateStats();
       }
     });
   }
@@ -193,9 +210,12 @@
     });
 
     elements.buttons.goScrape.addEventListener('click', () => {
-      const urls = getConfiguredScrapeUrls();
-      const host = SiteRegistry.hostBySource[state.activeSource] || 'imdb.com';
-      const target = urls.find(u => u.includes(host)) || urls[0];
+      // 按域名归类挑当前站点的订阅页，与图标栏 getSubscribedSites 同一标准（siteOfUrl）。
+      // 此前按 host 子串挑：DramaBox 只订了 dramaboxdb.com 时 'dramabox.com' 子串不中，
+      // 回退到 urls[0] 打开了别的站。找不到就去设置页，不再随手开一条别站的订阅
+      const target = state.activeSource
+        ? getConfiguredScrapeUrls().find(u => siteOfUrl(u) === state.activeSource)
+        : null;
       if (target) {
         chrome.tabs.create({ url: target });
         return;
@@ -673,11 +693,12 @@
     showLoading(true);
 
     try {
-      const result = await chrome.storage.local.get(['dramas', 'urlTags', 'lastScrape', 'syncServerDir', 'siteTabPrefs']);
+      const result = await chrome.storage.local.get(['dramas', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'syncServerDir', 'siteTabPrefs']);
 
       state.urlTags = result.urlTags || [];
       state.dramas = filterDramasByConfiguredUrls(result.dramas || []);
       state.lastScrape = result.lastScrape;
+      state.lastScrapeFailure = result.lastScrapeFailure || null;
       state.syncServerDir = result.syncServerDir || state.syncServerDir;
 
       // 上次看的站点与分组固定项；首帧之后 activeSource 只由用户操作改写
@@ -744,10 +765,18 @@
    * 再次点击已激活的站点标签：只抓取该站点的订阅 URL。
    * 转圈状态记在 state 里由标签条渲染读取——抓取期间卡片陆续入库会重建整条
    * 标签栏，直接给 DOM 节点加 class 会被下一次重建抹掉。
+   * 定时全量抓取在跑（或排着）且还没抓到该站时，后台不再重复排队，直接回 merged:true：
+   * 该站会在那一轮里更新、卡片经 onChanged 陆续出现，这里立刻停转圈并告知，不等整轮跑完。
    */
   async function refreshActiveSource(site) {
     const source = site || state.activeSource;
-    if (!source || state.refreshingSite) return;
+    if (!source) return;
+    if (state.refreshingSite) {
+      // 一次只刷一个站：此前静默吞掉，用户以为点了没反应
+      const name = SiteRegistry.SOURCE_NAMES[state.refreshingSite] || state.refreshingSite;
+      showToast(`正在刷新 ${name}，请稍候`, { type: 'info' });
+      return;
+    }
 
     state.refreshingSite = source;
     renderCategoryTabs();
@@ -758,6 +787,12 @@
 
       if (!response?.success) {
         throw new Error(response?.error || '后台抓取失败');
+      }
+
+      if (response.merged) {
+        // 并入进行中的全量轮：没有本次新增条数可报，finally 里立即停转圈
+        showToast('全量抓取进行中，该站点会在本轮内更新，新卡片会自动出现', { type: 'info', duration: 4000 });
+        return;
       }
 
       console.log('[ShortScraping] 站点抓取完成:', response.summary);
@@ -1223,13 +1258,9 @@
   }
 
   function filterDramasByConfiguredUrls(dramas) {
-    const configuredUrls = getConfiguredScrapeUrls();
-    if (configuredUrls.length === 0) return [];
-
-    // 与后台/同步服务同规则：尾斜杠归一后的精确等值（UrlMatch 三端共用），
-    // 前缀匹配会让互为前缀的订阅串扰（退订带参订阅后历史卡片仍显示）。
-    const configuredSet = UrlMatch.buildConfiguredUrlSet(configuredUrls);
-    return (dramas || []).filter(drama => UrlMatch.isUrlCovered(drama.sourceListUrl, configuredSet));
+    // 与后台/同步服务同规则：尾斜杠归一后的精确等值，前缀匹配会让互为前缀的订阅串扰
+    // （退订带参订阅后历史卡片仍显示）。归属判定只在 subscription-config.js 一处，零订阅得 []
+    return SubscriptionConfig.dramasUnderUrls(dramas, getConfiguredScrapeUrls());
   }
 
   /**
@@ -1242,12 +1273,29 @@
     const pending = total - translated;
 
     elements.stats.total.textContent = `${total} 部`;
-    elements.stats.lastUpdate.textContent = state.lastScrape
+    // 整轮全失败时后台不更新 lastScrape（断网/站点改版时定时抓取停摆），「抓取于」停在上次成功；
+    // 失败记录比它新就在后面点明，原因放悬停提示
+    const failure = latestRoundFailure();
+    elements.stats.lastUpdate.textContent = (state.lastScrape
       ? `抓取于 ${TimelineRender.formatRelativeTime(state.lastScrape)}`
-      : '未抓取';
+      : '未抓取') + (failure ? ' · 最近一轮全部失败' : '');
+    const counts = failure && Number.isFinite(failure.total) ? ` ${failure.failed}/${failure.total} 个来源` : '';
+    elements.stats.lastUpdate.title = failure
+      ? `${TimelineRender.formatRelativeTime(failure.at)}那一轮${counts}全部失败：${failure.error || '未知错误'}`
+      : '';
+    elements.stats.lastUpdate.classList.toggle('is-failed', Boolean(failure));
     elements.stats.status.textContent = pending > 0
       ? `${translated} 已翻译, ${pending} 待翻译`
       : (total > 0 ? '全部已翻译' : '暂无数据');
+  }
+
+  /** 比最近一次成功抓取更新的「整轮全失败」记录；没有或已被成功轮盖过时为 null。 */
+  function latestRoundFailure() {
+    const failure = state.lastScrapeFailure;
+    if (!failure || !failure.at) return null;
+    if (!state.lastScrape) return failure;
+    // 两边都是 toISOString 写的 UTC 串，按时间戳比较以防格式细节差异
+    return Date.parse(failure.at) > Date.parse(state.lastScrape) ? failure : null;
   }
 
   /**

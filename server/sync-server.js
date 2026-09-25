@@ -7,7 +7,8 @@
  * 启动：node server/sync-server.js [--local-only] [--allow-host=<域名>]
  *   默认监听 0.0.0.0，局域网设备可通过 http://<本机IP>:31919/ 访问只读共享页；
  *   --local-only 退回仅本机 127.0.0.1；--allow-host=<域名>（可多次）放行用该主机名访问共享页
- *   （默认只认 IP 与 localhost，见 ALLOWED_HOSTS）。测试可用环境变量 PORT 覆盖端口。
+ *   （默认只认 IP 与 localhost，见 ALLOWED_HOSTS）。测试可用环境变量 SHORTSCRAPING_PORT 覆盖端口
+ *   （扩展只连 31919，非默认端口启动时会打印告警）。
  *
  * 安全边界：写入接口（POST /sync、POST /config/*、POST /shutdown、POST /restart）仅接受
  * 本机回环地址调用，局域网设备只能访问只读页面与只读数据接口；trans.json（含 API Key）与
@@ -20,7 +21,6 @@ const net = require('net');
 const path = require('path');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
-const UrlMatch = require('../src/shared/url-match.js');
 const SubscriptionConfig = require('../src/shared/subscription-config.js');
 const Lark = require('../src/shared/lark.js');
 const TimelineCsv = require('../src/shared/timeline-csv.js');
@@ -28,7 +28,9 @@ const ScheduleConfig = require('../src/shared/schedule-config.js');
 const TranslateConfig = require('../src/shared/translate-config.js');
 
 const DEFAULT_PORT = 31919;
-const PORT = Number(process.env.PORT) || DEFAULT_PORT;
+// 专用变量名而不是通用的 PORT：开发者在 ~/.zshrc / direnv / Windows 用户变量里给别的项目设的 PORT
+// 会被静默继承，服务跑到扩展连不上的端口，stop / restart 也跟着去找错端口（与 stop.js 同一口径）
+const PORT = Number(process.env.SHORTSCRAPING_PORT) || DEFAULT_PORT;
 // macOS 开机自启的 launchd 标签（server/setup-autostart.command 注册）；launchd 会把它写进
 // 子进程的 XPC_SERVICE_NAME，据此判断重启该交给 launchd 还是自行派生新实例
 const LAUNCHD_LABEL = 'com.shortscraping.sync';
@@ -331,14 +333,10 @@ function readTagConfig() {
   return tags;
 }
 
+// 与扩展端同规则：尾斜杠归一后的精确等值、零订阅返回 []。归属判定单一真源是
+// SubscriptionConfig.dramasUnderUrls（内部委托 src/shared/url-match.js），这里不再另写一份
 function filterDramasByTagConfig(dramas) {
-  const urlTags = readTagConfig();
-  const configuredUrls = urlTags.map(item => item.url);
-  if (configuredUrls.length === 0) return [];
-
-  // 与扩展端同规则：尾斜杠归一后的精确等值（src/shared/url-match.js 三端共用）
-  const configuredSet = UrlMatch.buildConfiguredUrlSet(configuredUrls);
-  return (dramas || []).filter(drama => UrlMatch.isUrlCovered(drama.sourceListUrl, configuredSet));
+  return SubscriptionConfig.dramasUnderUrls(dramas, readTagConfig().map(item => item.url));
 }
 
 // —— 局域网共享：快照持久化、SSE 广播与地址枚举 ——
@@ -442,9 +440,17 @@ function loadPinnedWriteOrigin() {
 /**
  * 写接口来源判定。chrome-extension:// 正则只能证明「是某个扩展」——同一 profile 下
  * 任何持 localhost 主机权限的扩展都能冒名清空数据，因此只认「首次写入时固定下来的
- * 那一个」。未打包扩展的 ID 由加载路径派生、每台机器不同，服务端无从预知，
- * 故用首见即固定（config/sync-origin.json，已 gitignore）；换目录重载扩展导致
- * ID 变化时，删掉该文件即可重新固定。Node 管理工具不带 Origin，照常放行。
+ * 那一个」（首见即固定 / TOFU，存 config/sync-origin.json，已 gitignore）；换目录重载
+ * 扩展导致 ID 变化时，删掉该文件即可重新固定。Node 管理工具不带 Origin，照常放行。
+ *
+ * 为什么不按项目路径推算扩展 ID 做强校验：manifest 没有 key 字段，未打包扩展的 ID 确实
+ * 由加载目录的绝对路径派生（SHA-256 取前 16 字节映射到 a-p），PROJECT_DIR 在手，理论上
+ * 能算。但 Chrome 用的是它自己规范化后的路径（解析符号链接；Windows 盘符大写并按 UTF-16LE
+ * 取字节；macOS 上含中文的目录名 NFC/NFD 未必与 __dirname 一致），扩展也可能从另一份副本
+ * 目录加载——算错一次，用户自己的扩展就被 403、同步悄悄失效。给 manifest 加 key 固定 ID
+ * 又会换掉现有用户的扩展 ID、丢光 chrome.storage.local。能钻 TOFU 窗口（首次固定前、
+ * 或按 README 删掉该文件后）抢先写入的，只能是已装进同一 profile、持 127.0.0.1 或全站
+ * 主机权限的扩展，它本就能读全部网页数据，增量风险很低，因此维持首见即固定（2026-09 复核）。
  */
 function checkWriteOrigin(req) {
   const origin = req.headers.origin;
@@ -513,23 +519,56 @@ function sendJson(res, statusCode, body) {
   res.end(JSON.stringify(body));
 }
 
+// 写接口请求体上限。/sync 每次推送订阅内的整表，体积随数据只增不减（2026-09 时 db/timeline.json
+// 约 3.7MB、按月增长），旧的 20MB 约一年触顶；64MB 留出数年余量。只拦异常体积，不是配额
+const MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
+
+// 带 statusCode 的请求错误由路由 catch 经 sendRouteError 原样回给调用方，其余错误按 500
+function bodyTooLargeError(maxBytes) {
+  const error = new Error(`请求体超过 ${Math.round(maxBytes / 1024 / 1024)}MB 上限，本次未写入任何文件`);
+  error.statusCode = 413;
+  error.apiCode = 'BODY_TOO_LARGE';
+  return error;
+}
+
 // 分块先攒 Buffer、收齐再整体解码：逐块 `data += chunk` 会把跨块的多字节汉字
 // 拆成两半各自解码成 `\uFFFD`（2026-09-25 实测每次整表推送都随机写坏几个字）
-function readBody(req) {
+// 超限回 413 而不是 req.destroy()：销毁 socket 后路由再写的错误响应发不出去，扩展只拿到
+// 「fetch failed」、提示成「请确认同步服务已启动」，而 /health 一切正常，无从定位。现在超限后
+// 只丢弃余下分块（不再累积），响应结束后 Node 会自行排空请求体，客户端能读到 413 JSON
+function readBody(req, maxBytes = MAX_REQUEST_BODY_BYTES) {
   return new Promise((resolve, reject) => {
-    const chunks = [];
+    // 声明的 Content-Length 已超限（扩展 fetch 字符串 body 必带）：不必先收几十 MB 再拒
+    if (Number(req.headers['content-length']) > maxBytes) {
+      reject(bodyTooLargeError(maxBytes));
+      return;
+    }
+    let chunks = [];
     let size = 0;
+    let over = false;
     req.on('data', chunk => {
-      chunks.push(chunk);
+      if (over) return;
       size += chunk.length;
-      if (size > 20 * 1024 * 1024) {
-        reject(new Error('请求体过大'));
-        req.destroy();
+      if (size > maxBytes) {
+        over = true;
+        chunks = [];
+        reject(bodyTooLargeError(maxBytes));
+        return;
       }
+      chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => { if (!over) resolve(Buffer.concat(chunks).toString('utf8')); });
     req.on('error', reject);
   });
+}
+
+// 写接口 catch 的统一出口：带 statusCode 的请求错误只记一行原因，其余照旧打印完整错误并回 500
+function sendRouteError(res, label, error) {
+  if (error.statusCode) console.warn(`[ShortScraping Sync] ${label}: ${error.message}`);
+  else console.error(`[ShortScraping Sync] ${label}:`, error);
+  const body = { ok: false, error: error.message };
+  if (error.apiCode) body.code = error.apiCode;
+  return sendJson(res, error.statusCode || 500, body);
 }
 
 async function handleRequest(req, res) {
@@ -722,8 +761,7 @@ async function handleRequest(req, res) {
 
       return sendJson(res, 200, { ok: true, count, csvPath: CSV_PATH });
     } catch (error) {
-      console.error('[ShortScraping Sync] 同步失败:', error);
-      return sendJson(res, 500, { ok: false, error: error.message });
+      return sendRouteError(res, '同步失败', error);
     }
   }
 
@@ -735,8 +773,7 @@ async function handleRequest(req, res) {
       const count = writeTagConfig(rawTags);
       return sendJson(res, 200, { ok: true, count, configPath: TAG_CONFIG_PATH });
     } catch (error) {
-      console.error('[ShortScraping Sync] 写入网页订阅配置失败:', error);
-      return sendJson(res, 500, { ok: false, error: error.message });
+      return sendRouteError(res, '写入网页订阅配置失败', error);
     }
   }
 
@@ -749,8 +786,7 @@ async function handleRequest(req, res) {
       const config = writeTransConfig(rawConfig);
       return sendJson(res, 200, { ok: true, config, configPath: TRANS_CONFIG_PATH });
     } catch (error) {
-      console.error('[ShortScraping Sync] 写入翻译接口配置失败:', error);
-      return sendJson(res, 500, { ok: false, error: error.message });
+      return sendRouteError(res, '写入翻译接口配置失败', error);
     }
   }
 
@@ -763,8 +799,7 @@ async function handleRequest(req, res) {
       const config = writeLarkConfig(rawConfig);
       return sendJson(res, 200, { ok: true, config, configPath: LARK_CONFIG_PATH });
     } catch (error) {
-      console.error('[ShortScraping Sync] 写入 Lark 推送配置失败:', error);
-      return sendJson(res, 500, { ok: false, error: error.message });
+      return sendRouteError(res, '写入 Lark 推送配置失败', error);
     }
   }
 
@@ -777,8 +812,7 @@ async function handleRequest(req, res) {
       const config = writeCronConfig(rawConfig);
       return sendJson(res, 200, { ok: true, config, configPath: CRON_CONFIG_PATH });
     } catch (error) {
-      console.error('[ShortScraping Sync] 写入定时任务配置失败:', error);
-      return sendJson(res, 500, { ok: false, error: error.message });
+      return sendRouteError(res, '写入定时任务配置失败', error);
     }
   }
 
@@ -796,7 +830,7 @@ const server = http.createServer((req, res) => {
 /**
  * 已设 macOS 开机自启（LaunchAgent 已加载）时不再另起前台实例（npm run sync / npm start / 直接 node）：
  * 后台服务在跑时只会撞端口；后台服务停着时则占住端口，服务从此脱离 launchd 托管、随终端存亡。
- * 判定与 stop.js launchdTarget 同一口径（plist 不带 PORT，只有默认端口会相撞）；🔄 派生的接替实例
+ * 判定与 stop.js launchdTarget 同一口径（plist 不带 SHORTSCRAPING_PORT，只有默认端口会相撞）；🔄 派生的接替实例
  * 由旧实例决定过去向，放行；SHORTSCRAPING_NO_LAUNCHD=1 留给前台调试（测试也靠它与随机端口避开本机自启）
  */
 function exitIfLaunchdAgentLoaded() {
@@ -886,6 +920,11 @@ listen();
 function onListening() {
   console.log(`[ShortScraping Sync] 服务已启动：http://127.0.0.1:${PORT}${LOCAL_ONLY ? '（仅本机模式）' : ''}`);
   console.log(`[ShortScraping Sync] CSV 输出：${CSV_PATH}`);
+  // 扩展（后台 / 弹窗 / 设置页）写死连 31919：非默认端口上的实例收不到任何推送，弹窗照样显示「已关闭」
+  if (PORT !== DEFAULT_PORT) {
+    console.warn(`[ShortScraping Sync] 注意：当前监听非默认端口 ${PORT}（来自环境变量 SHORTSCRAPING_PORT），`
+      + `扩展只连 ${DEFAULT_PORT}，此实例仅供测试 / 调试；日常使用请取消该变量后重启`);
+  }
   if (!LOCAL_ONLY) {
     const lanUrls = getLanUrls();
     if (lanUrls.length > 0) {

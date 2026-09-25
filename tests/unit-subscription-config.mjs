@@ -67,6 +67,21 @@ if (SC) {
   // 无效条目不占去重名额：首条零标签被丢后，同 URL 的后一条合法条目仍应保留（与设置页/同步服务旧语义一致）
   const invalidFirst = norm([{ url: 'https://a.test', tags: [] }, { url: 'https://a.test', tags: ['ok'] }]);
   check('N12 被丢弃的无效条目不占去重名额', deepEq(invalidFirst, [{ urlPattern: 'https://a.test', tags: ['ok'] }]), show(invalidFirst));
+
+  // urltags-dedupe-raw（batch F）：去重键曾是 trim 后的原串，而归属判定（UrlMatch）按尾斜杠归一——
+  // 手写 tag.json 同时写 '…/x' 与 '…/x/' 时两条都保留，同一页每轮被抓两次
+  const slashDup = norm([{ url: 'https://a.test/x', tags: ['first'] }, { url: 'https://a.test/x/', tags: ['second'] }]);
+  check('N13 仅尾斜杠之差按同一订阅去重，保留先出现的原串写法',
+    deepEq(slashDup, [{ urlPattern: 'https://a.test/x', tags: ['first'] }]), show(slashDup));
+  const slashFirst = norm([{ url: 'https://a.test/x/', tags: ['first'] }, { url: 'https://a.test/x', tags: ['second'] }]);
+  check('N13b 先出现的是带斜杠写法时保留带斜杠的原串',
+    deepEq(slashFirst, [{ urlPattern: 'https://a.test/x/', tags: ['first'] }]), show(slashFirst));
+
+  check('N14 字符串标签去重（A, A ,B → A,B）', deepEq(one({ url: 'https://a.test', tags: 'A, A ,B' })[0]?.tags, ['A', 'B']),
+    show(one({ url: 'https://a.test', tags: 'A, A ,B' })));
+  check('N15 先去重后截断（[A,A,B,C] → [A,B,C]，重复项不占名额）',
+    deepEq(one({ url: 'https://a.test', tags: ['A', 'A', 'B', 'C'] })[0]?.tags, ['A', 'B', 'C']),
+    show(one({ url: 'https://a.test', tags: ['A', 'A', 'B', 'C'] })));
 }
 
 // ---------- R 组：退订差集与受影响条数（v1.6.7）----------

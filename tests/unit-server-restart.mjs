@@ -4,7 +4,8 @@ import './bootstrap.cjs';
 //   launchd 模式（macOS 开机自启）：以 75 退出交给 launchd 拉起，自身不派生（否则会和 launchd 抢端口）。
 //   respawn 的新实例转入后台，stdout/stderr 写进日志文件（此前是 stdio:'ignore'，启动报错全丢）；
 //   日志打不开 / 派生失败时回 500、旧实例不退出；launchd 拉起却撞上前台实例占端口时以 0 退出，免得崩溃循环；
-//   已设开机自启（LaunchAgent 已加载）时 npm run sync 提示改用 npm run restart 后退出，不另起前台实例（仅 darwin）。
+//   已设开机自启（LaunchAgent 已加载）时 npm run sync 提示改用 npm run restart 后退出，不另起前台实例（仅 darwin）；
+//   端口只认 SHORTSCRAPING_PORT：shell 里的通用 PORT 不再把服务带到扩展连不上的端口、也绕不过上面的守卫。
 // 隔离方式沿用 unit-server-safety：复制到 os.tmpdir() 隔离树、随机端口，不碰真实 31919 与 db/；
 // SHORTSCRAPING_LOG_FILE 指到隔离树，不写用户的 ~/Library/Logs。
 import assert from 'node:assert/strict';
@@ -30,7 +31,7 @@ const base = `http://127.0.0.1:${port}`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function start(extraEnv) {
-  const env = { ...process.env, PORT: String(port), XPC_SERVICE_NAME: '', SHORTSCRAPING_LOG_FILE: logFile, ...extraEnv };
+  const env = { ...process.env, SHORTSCRAPING_PORT: String(port), XPC_SERVICE_NAME: '', SHORTSCRAPING_LOG_FILE: logFile, ...extraEnv };
   const child = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
     cwd: directory, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -154,6 +155,25 @@ try {
   assert.equal((await post('/shutdown')).status, 200);
   await foregroundExit;
 
+  // —— 端口只认专用的 SHORTSCRAPING_PORT：shell 里给别的项目 export 的通用 PORT 不再被继承 ——
+  // 预加载把 listen 换成「打印端口后以 42 退出」：落到默认端口的那一例也绝不会真去监听本机 31919
+  const recordListen = path.join(directory, 'record-listen.cjs');
+  fs.writeFileSync(recordListen, "require('net').Server.prototype.listen = function (p) { console.log('LISTEN:' + p); process.exit(42); };\n");
+  const portEnv = { ...process.env, XPC_SERVICE_NAME: '', SHORTSCRAPING_LOG_FILE: logFile, SHORTSCRAPING_NO_LAUNCHD: '1' };
+  for (const key of ['PORT', 'SHORTSCRAPING_PORT', 'SHORTSCRAPING_WAIT_PORT']) delete portEnv[key];
+  const listenPort = extra => {
+    const run = spawnSync(process.execPath, ['-r', recordListen, 'server/sync-server.js', '--local-only'], {
+      cwd: directory, env: { ...portEnv, ...extra }, encoding: 'utf8', timeout: 10000
+    });
+    assert.equal(run.status, 42, run.stdout + run.stderr);
+    return Number(/LISTEN:(\d+)/.exec(run.stdout)?.[1]);
+  };
+  assert.equal(listenPort({ PORT: String(port) }), 31919); // 旧实现会跑到 PORT 指定的端口，扩展连不上
+  assert.equal(listenPort({ SHORTSCRAPING_PORT: String(port) }), port);
+  assert.equal(listenPort({ PORT: '3000', SHORTSCRAPING_PORT: String(port) }), port);
+  // 非默认端口启动时告警：扩展只连 31919（上面各实例都跑在随机端口，启动输出里都该有这一行）
+  assert.match(first.output, /当前监听非默认端口 \d+（来自环境变量 SHORTSCRAPING_PORT），扩展只连 31919/);
+
   // —— 已设开机自启时拒绝另起前台实例：只在 darwin + 默认端口下探测 launchctl ——
   // 探测目标是默认端口，也就是本机真实的 31919：launchctl 换成 PATH 前置的假脚本（不碰本机真实的
   // LaunchAgent），再预加载把 listen 换成直接以 42 退出——守卫失效也绝不会真去监听
@@ -165,7 +185,7 @@ try {
     const noListen = path.join(directory, 'no-listen.cjs');
     fs.writeFileSync(noListen, "require('net').Server.prototype.listen = function () { process.exit(42); };\n");
     const guardEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, XPC_SERVICE_NAME: '', SHORTSCRAPING_LOG_FILE: logFile };
-    for (const key of ['PORT', 'SHORTSCRAPING_WAIT_PORT', 'SHORTSCRAPING_NO_LAUNCHD']) delete guardEnv[key];
+    for (const key of ['PORT', 'SHORTSCRAPING_PORT', 'SHORTSCRAPING_WAIT_PORT', 'SHORTSCRAPING_NO_LAUNCHD']) delete guardEnv[key];
     const runGuarded = extra => spawnSync(process.execPath, ['-r', noListen, 'server/sync-server.js', '--local-only'], {
       cwd: directory, env: { ...guardEnv, ...extra }, encoding: 'utf8', timeout: 10000
     });
@@ -176,10 +196,14 @@ try {
     assert.match(refusedStart.stderr, /SHORTSCRAPING_NO_LAUNCHD=1/); // 前台调试的逃生口写在提示里
     // 放行：前台调试开关、🔄 接替实例、launchd 自己拉起的实例、与 plist 不相撞的自定义端口——都走到 listen 被预加载拦下
     for (const extra of [{ SHORTSCRAPING_NO_LAUNCHD: '1' }, { SHORTSCRAPING_WAIT_PORT: '1' },
-      { XPC_SERVICE_NAME: 'com.shortscraping.sync' }, { PORT: String(port) }]) {
+      { XPC_SERVICE_NAME: 'com.shortscraping.sync' }, { SHORTSCRAPING_PORT: String(port) }]) {
       const passed = runGuarded(extra);
       assert.equal(passed.status, 42, `${JSON.stringify(extra)}\n${passed.stdout}${passed.stderr}`);
     }
+    // 通用 PORT 不再算「自定义端口」：服务仍落在默认端口、与后台服务相撞，照样拒绝另起前台实例
+    const genericPort = runGuarded({ PORT: String(port) });
+    assert.equal(genericPort.status, 1, genericPort.stdout + genericPort.stderr);
+    assert.match(genericPort.stderr, /已设置 macOS 开机自启/);
     fs.rmSync(path.join(fakeBin, 'launchctl'));
     fs.writeFileSync(path.join(fakeBin, 'launchctl'), '#!/bin/sh\nexit 113\n', { mode: 0o755 }); // agent 未加载
     assert.equal(runGuarded({}).status, 42);

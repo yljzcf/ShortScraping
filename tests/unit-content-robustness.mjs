@@ -11,8 +11,13 @@ import './bootstrap.cjs';
 //      （审查 button-style-duplicated-dead-css）。
 //   S  批次 E 清理的源码守卫：卡片骨架、DOMParser、中文判据、与后台共用的采集口径各只剩一份
 //      （审查 skeleton-literal-18x-dead-sourcelisturl / intra-content-duplicate-helpers / cross-file-sync-constants）。
+//   U  订阅判定 UrlMatch.matchSubscription（审查 subscription-prefix-misattribution /
+//      content-subscription-matcher-divergent）：两轮都尾斜杠归一、前缀轮只容忍补斜杠与追加 query/hash、
+//      ?list= 必须相等；纯函数矩阵 + 端到端（只订首页时 ?list=best_choices 页零入库、尾斜杠双向命中）。
+//   H  My Drama 条目本身不是锚点时 url 取规范播放页而不是首页（审查 mydrama-href-null-homepage-url）。
 // 用法：node tests/unit-content-robustness.mjs
 import fs from 'node:fs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const contentSrc = fs.readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 (0, eval)(fs.readFileSync(new URL('../src/shared/site-registry.js', import.meta.url), 'utf8'));
@@ -147,11 +152,11 @@ async function runScenario({ href, subscription = href, document = baseDocument(
   const listeners = [];
   const queried = [];
   globalThis.chrome = {
-    storage: { local: { async get() { await Promise.resolve(); return { dramas: [], urlTags: [{ urlPattern: subscription, tags: ['T'] }] }; } } },
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
       async sendMessage(message) {
         await Promise.resolve();
+        if (message?.action === 'getScrapeContext') return scrapeContextReply([], [{ urlPattern: subscription, tags: ['T'] }]);
         if (message?.action === 'saveDrama') {
           const dup = store.dramas.some(d => d.itemId === message.drama.itemId);
           if (!dup) store.dramas.push(structuredClone(message.drama));
@@ -315,6 +320,92 @@ const dsDocument = baseDocument({
 // ---------- L5：源码守卫——旧的「正则不过就退默认」写法不得回潮 ----------
 check('L5 content.js 不再有 /^[a-z0-9_-]+$/.test(list) ? list : 默认 的静默回退写法，也不再用 /[?&]list=trending/',
   !/\/\^\[a-z0-9_-\]\+\$\/\.test\(list\)/.test(codeOnly) && !/\/\[\?&\]list=trending\//.test(codeOnly), '');
+
+// ---------- U：订阅判定（UrlMatch.matchSubscription 纯函数矩阵） ----------
+{
+  const { matchSubscription } = globalThis.UrlMatch;
+  const sub = (urlPattern, tag = urlPattern) => ({ urlPattern, tags: [tag] });
+  const hit = (page, subs) => matchSubscription(page, subs)?.urlPattern ?? null;
+  const NF = 'https://www.netflix.com/tudum/top10';
+  const cases = [
+    ['U1 精确等值', 'https://dramashorts.io/top-movies', [sub('https://dramashorts.io/top-movies')], 'https://dramashorts.io/top-movies'],
+    ['U2 订阅带尾斜杠、页面不带（站点 301 去斜杠）', 'https://www.reelshort.com/fandom', [sub('https://www.reelshort.com/fandom/')], 'https://www.reelshort.com/fandom/'],
+    ['U3 订阅不带尾斜杠、页面带', 'https://www.shorttv.live/fandom/', [sub('https://www.shorttv.live/fandom')], 'https://www.shorttv.live/fandom'],
+    ['U4 只订首页时 ?list=best_choices 页不命中（list 不相等）', 'https://my-drama.com/?list=best_choices', [sub('https://my-drama.com/')], null],
+    ['U5 只订 /tudum/top10 时 /tudum/top10/tv 不命中（不许新增路径段）', `${NF}/tv`, [sub(NF)], null],
+    ['U6 订阅 ?flavor=a 不命中 ?flavor=ab（不许把参数值续长）', 'https://store.steampowered.com/category/x?flavor=ab', [sub('https://store.steampowered.com/category/x?flavor=a')], null],
+    ['U7 带 query 的页面走前缀轮取最长前缀（tv 而不是 top10）', `${NF}/tv?x=1`, [sub(NF), sub(`${NF}/tv`)], `${NF}/tv`],
+    ['U8 订阅带 query 时可再续 &… 参数', 'https://my-drama.com/?list=best_choices&utm=x', [sub('https://my-drama.com/?list=best_choices')], 'https://my-drama.com/?list=best_choices'],
+    ['U9 追加 hash 仍命中', 'https://dramashorts.io/top-movies#top', [sub('https://dramashorts.io/top-movies')], 'https://dramashorts.io/top-movies'],
+    ['U10 首页订阅 + 追加非 list 参数仍命中', 'https://my-drama.com/?utm=x', [sub('https://my-drama.com/')], 'https://my-drama.com/'],
+    ['U11 精确轮先于前缀轮、不受配置顺序影响', 'https://fandom.my-drama.com/?list=trending',
+      [sub('https://fandom.my-drama.com/'), sub('https://fandom.my-drama.com/?list=trending')], 'https://fandom.my-drama.com/?list=trending'],
+    ['U12 路径只是前缀的另一个词不命中（/fandomx）', 'https://www.shorttv.live/fandomx', [sub('https://www.shorttv.live/fandom')], null],
+    ['U13 缺 tags / urlPattern 的坏配置跳过', 'https://dramashorts.io/top-movies', [{ urlPattern: 'https://dramashorts.io/top-movies' }, null, { tags: ['x'] }], null]
+  ];
+  for (const [name, page, subs, want] of cases) {
+    const got = hit(page, subs);
+    check(name, got === want, show({ page, got, want }));
+  }
+}
+
+// ---------- U：订阅判定端到端（真实 content.js 走 'scrape'） ----------
+{
+  // 审查原场景：只订 my-drama.com/，用户在 /?list=best_choices 上点按钮，那个板块的卡以前会带着
+  // 首页订阅的标签与 sourceListUrl 入库（订阅外清理也清不掉）
+  const bestDocument = baseDocument({
+    querySelectorAll: sel => (sel === '#best_choices [data-testid="series-section-item"]' || sel === DEFAULT_MD ? [mdItem(MD_UUID)] : [])
+  });
+  const { saved, response } = await runScenario({ href: 'https://my-drama.com/?list=best_choices', subscription: 'https://my-drama.com/', document: bestDocument });
+  check('U20 只订首页时 /?list=best_choices 页 → 0 条（不再挂到首页订阅名下）',
+    response?.success === true && saved.length === 0, show(saved.map(d => [d.itemId, d.sourceListUrl])));
+}
+{
+  const TOP = 'https://dramashorts.io/top-movies';
+  const topDocument = baseDocument({
+    querySelector: sel => (sel === 'script#__NEXT_DATA__'
+      ? { textContent: JSON.stringify({ props: { pageProps: { movies: [dsMovie(DS_TOP, 'Top')] } } }) } : null)
+  });
+  const a = await runScenario({ href: TOP, subscription: `${TOP}/`, document: topDocument });
+  check('U21 订阅带尾斜杠、页面不带 → 照常命中，sourceListUrl 写订阅原串',
+    show(ids(a.saved)) === show([`ds${DS_TOP}`]) && a.saved[0]?.sourceListUrl === `${TOP}/`, show(a.saved.map(d => [d.itemId, d.sourceListUrl])));
+  const b = await runScenario({ href: `${TOP}/`, subscription: TOP, document: topDocument });
+  check('U22 订阅不带尾斜杠、页面带 → 照常命中', show(ids(b.saved)) === show([`ds${DS_TOP}`]) && b.saved[0]?.sourceListUrl === TOP,
+    show(b.saved.map(d => [d.itemId, d.sourceListUrl])));
+}
+
+// ---------- H：My Drama 条目本身不是锚点（链接在子 a 上）→ url 取规范播放页，不落到首页 ----------
+{
+  const fetched = [];
+  const anchor = { getAttribute: n => (n === 'href' ? `/video/${MD_UUID}?from=list` : null) };
+  const divItem = {
+    matches: () => false,                       // 条目是外层 div
+    getAttribute: () => null,                   // div 自己没有 href
+    querySelector: sel => {
+      if (sel === '.wp-block-post-title a, a[href]') return anchor;
+      if (sel === 'h3') return { textContent: 'Wild silence' };
+      return null;
+    }
+  };
+  const { saved, response } = await runScenario({
+    href: 'https://my-drama.com/',
+    document: baseDocument({ querySelectorAll: sel => (sel === DEFAULT_MD ? [divItem] : []) }),
+    fetch: async url => { fetched.push(url); return new Response('<html></html>', { status: 200 }); }
+  });
+  check('H1 条目是 div、链接在子 a 上 → url 是规范播放页 /video/<UUID>（不是首页）',
+    response?.success === true && saved[0]?.itemId === `md${MD_UUID}` && saved[0]?.url === `https://my-drama.com/video/${MD_UUID}`,
+    show(saved.map(d => [d.itemId, d.url])));
+  check('H2 详情请求发往播放页，不去取首页（首页 og:description 会被当成简介）',
+    show(fetched) === show([`https://my-drama.com/video/${MD_UUID}`]), show(fetched));
+}
+{
+  // 去重键不是 md+UUID（hex 位数对、连字符位置不对）→ 推不出规范播放页，跳过该条
+  const oddItem = { ...mdItem(MD_UUID), getAttribute: n => (n === 'href' ? 'https://my-drama.com/video/a36a7fe30e89-45ff-a409-f75093c5144f-' : null) };
+  const { saved, response } = await runScenario({
+    href: 'https://my-drama.com/', document: baseDocument({ querySelectorAll: sel => (sel === DEFAULT_MD ? [oddItem] : []) })
+  });
+  check('H3 去重键不是 md+UUID → 该条跳过（零入库、不报错）', response?.success === true && saved.length === 0, show(saved.map(d => d.url)));
+}
 
 // ---------- B：抓取按钮只建节点、改文案，样式全交给 content.css ----------
 {

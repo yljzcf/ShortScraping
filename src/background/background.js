@@ -19,6 +19,13 @@ importScripts('../shared/lark.js');
 // 先结束的一方会提前放行空扫描计数，导致后结束批次的新卡本轮不被翻译）。
 let scrapeQueue = Promise.resolve();
 let activeScrapeCount = 0;
+// 全量轮合并（审查 scrape-queue-no-coalesce / manual-refresh-queued-behind-full-scrape）：
+// pendingFullScrape 是已排队、尚未开跑的那次全量轮（performScrape 返回的 promise），开跑即
+// 置回 null——同一时刻至多「一轮在跑 + 一轮排队」，间隔短于单轮耗时时不再无界堆积。
+// fullScrapeProgress 是正在跑的全量轮的站点进度：pendingSites 为本轮还没开抓任何 URL 的
+// 站点（null＝已开跑但订阅清单还没读出，视同全部站点都还在前头），供弹窗单站刷新判断能否并进本轮
+let pendingFullScrape = null;
+let fullScrapeProgress = null;
 let postScrapeTranslateTimer = null;
 let postScrapeTranslateRunning = false;
 let csvSyncTimer = null;
@@ -38,6 +45,10 @@ let translateManualWaiter = false;
 let translateRunStateMirror = null;
 
 const CSV_SYNC_ENDPOINT = 'http://127.0.0.1:31919/sync';
+// 旧版同步服务（v1.6.18 及以前）请求体上限 20MB、超限直接断开连接：浏览器的 fetch 网络错误
+// 不带原因，扩展这头看到的 TypeError 与「服务没启动」一模一样。推送体到了这个量级又连不上时，
+// 报错里点明「多半是超限被断开」（审查 body-limit-ceiling）；新版超限回 413，走 HTTP 分支
+const CSV_SYNC_LEGACY_BODY_LIMIT_BYTES = 20 * 1024 * 1024;
 // 空时间线跳过推送的告警每个 SW 生命周期只打一次：空库状态下每次 dramas 变化都会走到护栏
 let emptySyncSkipWarned = false;
 // scheduleCsvSync 的调用序号：一次推送结束时序号没变＝推送期间没有新的同步被安排，
@@ -140,14 +151,43 @@ const WATCHDOG_ALARM_NAME = 'watchdog';
 const WATCHDOG_INTERVAL_MINUTES = 60;
 
 /**
+ * 把 storage.local 收成只对扩展页面与 SW 开放（审查 storage-secrets-exposed-to-content）。
+ * 内容脚本已不读写 storage（抓取上下文经 getScrapeContext 消息向后台要），而 local 区里放着
+ * AI Key、飞书 AppSecret 与 webhook：第三方站点的渲染进程一旦被攻破，直连 storage 能读走密钥、
+ * 改写 translateConfig.aiEndpoint 让下一轮翻译把 Bearer Key 发出去、或 set({ dramas: [] }) 清库——
+ * 正是 onMessage 发送方闸门要挡的动作，直连 storage 能绕过它。
+ * 部分 Chrome 版本只允许对 session 区设访问级别，对 local 区会同步抛错或返回 rejected promise：
+ * 两种都只记一条日志，**绝不能挡住后面的初始化**（届时只剩消息层闸门这一道防线）。
+ */
+function restrictStorageToTrustedContexts() {
+  const warn = e => console.warn('[ShortScraping] storage.local 访问级别收窄未生效（内容脚本仍可直连 storage）:', e?.message || e);
+  try {
+    const pending = chrome.storage.local.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' });
+    if (pending && typeof pending.catch === 'function') pending.catch(warn);
+  } catch (e) {
+    warn(e);
+  }
+}
+restrictStorageToTrustedContexts();
+
+/**
  * 初始化：service worker 每次启动（含为分发 onInstalled / onStartup 而启动的那一次）在顶层
  * 恢复一次配置并装定时任务，确保 JSON 是配置源（configAheadOfFile 标记的项例外：本地领先于
  * 文件，改为推回文件，见 loadConfigFromJsonFiles）。两个监听器不再各跑一遍 load + setup：
  * 此前扩展升级 / 浏览器启动时同一实例里两条迁移链并发，标记未置位时 ReelShort / Shortical
  * 迁移的网络阶段各跑一遍（审查 double-init-on-install-startup）。本 promise 不会 reject。
+ *
+ * setupAlarms 经 beforeMigrations 钩子在配置种子落库之后、迁移链之前执行，不再排在整条
+ * 迁移链之后：链里有联网迁移（ReelShort 逐条请求 / Shortical sitemap），请求挂住时 SW 可能
+ * 被空闲回收，每次唤醒从头再卡一遍，看门狗与定时任务永远轮不到安装——碰上扩展更新后闹钟
+ * 丢失，定时抓取/翻译全停（审查 setupalarms-gated-by-network-migrations）。
  */
-const initPromise = loadConfigFromJsonFiles().then(setupAlarms).catch(error => {
+const initPromise = loadConfigFromJsonFiles({ beforeMigrations: setupAlarms }).catch(async error => {
   console.error('[ShortScraping] 从 JSON 恢复配置失败:', error);
+  // 配置种子 set 失败时钩子还没跑到：兜一次，看门狗不能跟着装不上（ensureAlarm 幂等，
+  // 钩子已跑过时再装一遍也不会推迟任何任务）
+  await setupAlarms().catch(e =>
+    console.error('[ShortScraping] 定时任务安装失败（看门狗或下次唤醒重建）:', e?.message || e));
 });
 
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -213,8 +253,10 @@ async function cleanupOrphanTranslateRunState() {
 
 /**
  * 从扩展 config 目录的 tag.json / cron.json / trans.json / lark.json 恢复配置。
+ * options.beforeMigrations：配置种子落库后、订阅外清理与迁移链之前执行的钩子（顶层
+ * initPromise 传 setupAlarms，见其注释）；失败只记日志、不挡后面的迁移。不传则不执行。
  */
-async function loadConfigFromJsonFiles() {
+async function loadConfigFromJsonFiles({ beforeMigrations = null } = {}) {
   const [tagConfigRaw, scheduleConfigRaw, translateConfigRaw, larkConfigRaw, stored] = await Promise.all([
     fetchJsonFile(CONFIG_FILES.tag.file, null),
     fetchJsonFile(CONFIG_FILES.cron.file, null),
@@ -271,6 +313,14 @@ async function loadConfigFromJsonFiles() {
   if (Object.keys(updates).length > 0) {
     await chrome.storage.local.set(updates);
   }
+  // 排在种子 set 之后：setupAlarms 读的 scheduleConfig 须是刚从 cron.json 恢复的值
+  if (beforeMigrations) {
+    try {
+      await beforeMigrations();
+    } catch (error) {
+      console.error('[ShortScraping] 定时任务安装失败（看门狗或下次唤醒重建，迁移照常进行）:', error?.message || error);
+    }
+  }
   if (tag.fromFile) {
     await runGuarded('订阅外历史清理', () =>
       pruneDramasOutsideConfiguredUrls(urlTags, { reason: 'SW 唤醒回读 config/tag.json' }));
@@ -281,9 +331,9 @@ async function loadConfigFromJsonFiles() {
     : null;
 
   // 水位线同步与一次性迁移各自兜底：任一抛错只记日志、下轮唤醒重试（各自的完成标记未置位）。
-  // 它们的失败不能向上冒泡——setupAlarms 挂在本函数之后（顶层 initPromise 先 load 再 setup），
-  // 某迁移确定性抛错＝看门狗与定时任务一起装不上、用户以为在跑其实全停（2026-09-17 审计 H1）。
-  // 配置种子 set 失败仍照旧向上传播：那是「配置没恢复成」。
+  // 它们的失败不能向上冒泡（2026-09-17 审计 H1：当时 setupAlarms 挂在本函数之后，某迁移确定性
+  // 抛错＝看门狗与定时任务一起装不上）。setupAlarms 现已提前到上面的钩子，这里的兜底仍保留：
+  // 后面的迁移不能被前面某一条连坐。配置种子 set 失败仍照旧向上传播：那是「配置没恢复成」。
   await runGuarded('群机器人水位线同步', () => syncBotWatermark(larkConfig));
   for (const [label, step] of [
     ['itemId/标签/未映射 fandom 迁移', runLegacyDramaMigrations],
@@ -550,21 +600,53 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
  * 执行抓取任务（对外入口）。site 给定时只抓该站点的订阅 URL。
  * 所有调用（定时全量 / 手动单站）经同一条串行队列执行，每个调用者拿到
  * 自己那次抓取的结果；排队期间即计入 activeScrapeCount 并预约翻译线。
+ * 全量调用在已有一轮全量排队（尚未开跑）时直接拿那一轮的 promise，不再追加：
+ * 它开跑时才读订阅，与再排一轮抓的是同一批 URL。
  */
 function performScrape(options = {}) {
+  const isFull = !options.site;
+  if (isFull && pendingFullScrape) {
+    console.log('[ShortScraping] 已有一轮全量抓取在排队，本次调用并入该轮');
+    return pendingFullScrape;
+  }
+
   activeScrapeCount++;
   schedulePostScrapeTranslateLoop();
 
-  const run = scrapeQueue.then(() => performScrapeOnce(options));
+  let tracked = null;
+  const run = scrapeQueue.then(() => {
+    if (!isFull) return performScrapeOnce(options);
+    if (pendingFullScrape === tracked) pendingFullScrape = null;
+    const progress = { pendingSites: null };
+    fullScrapeProgress = progress;
+    return performScrapeOnce(options, progress).finally(() => {
+      if (fullScrapeProgress === progress) fullScrapeProgress = null;
+    });
+  });
   scrapeQueue = run.then(() => {}, () => {});
-  return run.finally(() => {
+  tracked = run.finally(() => {
     activeScrapeCount--;
     // 最后一个抓取收尾时翻译线若已提前退出，再安排一次（见 resumePostScrapeTranslateLoop）
     resumePostScrapeTranslateLoop();
   });
+  if (isFull) pendingFullScrape = tracked;
+  return tracked;
 }
 
-async function performScrapeOnce({ site = null } = {}) {
+/**
+ * 弹窗单站刷新能否并进全量轮：有全量轮在排队（开跑时才读订阅，必然涵盖该站），或正在跑的
+ * 全量轮还没开抓该站的任何 URL。已开抓（哪怕只抓了该站的第一个 URL）或本轮清单里没有该站
+ * 时返回 false，照旧排一次单站抓取——半截抓过的站并进来，用户要的「刚刚刷新」就落空了。
+ */
+function fullScrapeWillCoverSite(site) {
+  if (!site) return false;
+  if (pendingFullScrape) return true;
+  if (!fullScrapeProgress) return false;
+  const { pendingSites } = fullScrapeProgress;
+  return pendingSites === null || pendingSites.has(site);
+}
+
+async function performScrapeOnce({ site = null } = {}, progress = null) {
   console.log(site ? `[ShortScraping] 开始站点抓取: ${site}` : '[ShortScraping] 开始全量抓取...');
 
   try {
@@ -573,6 +655,8 @@ async function performScrapeOnce({ site = null } = {}) {
     if (site) {
       scrapeUrls = scrapeUrls.filter(url => siteOfUrl(url) === site);
     }
+    // 全量轮：本轮清单里的站点都还在前头，循环开抓某站第一个 URL 时摘掉（见 fullScrapeWillCoverSite）
+    if (progress) progress.pendingSites = new Set(scrapeUrls.map(siteOfUrl));
 
     if (scrapeUrls.length === 0) {
       console.log('[ShortScraping] 未配置抓取 URL，跳过抓取');
@@ -596,6 +680,7 @@ async function performScrapeOnce({ site = null } = {}) {
     const results = [];
 
     for (const url of scrapeUrls) {
+      progress?.pendingSites.delete(siteOfUrl(url));
       try {
         const response = await scrapeUrlInTab(url);
         if (response?.success) {
@@ -616,9 +701,23 @@ async function performScrapeOnce({ site = null } = {}) {
     await finalizeUrlBaselines(scrapeUrls).catch(e =>
       console.warn('[ShortScraping] 订阅首轮基线收口失败（下轮重试）:', e?.message || e));
 
-    await chrome.storage.local.set({
-      lastScrape: new Date().toISOString()
-    });
+    // 一个都没抓成（断网 / 站点改版）不刷新 lastScrape：否则定时抓取已经停摆，弹窗底栏还是
+    // 「抓取于几分钟前」（审查 lastscrape-set-on-total-failure）。另记 lastScrapeFailure 供弹窗
+    // 提示「最近一轮全部失败」；有成功的轮次在同一次 set 里把它清掉
+    const finishedAt = new Date().toISOString();
+    if (results.some(r => r.success)) {
+      await chrome.storage.local.set({ lastScrape: finishedAt, lastScrapeFailure: null });
+    } else {
+      console.warn(`[ShortScraping] 本轮 ${scrapeUrls.length} 个 URL 全部抓取失败，不更新上次抓取时间`);
+      await chrome.storage.local.set({
+        lastScrapeFailure: {
+          at: finishedAt,
+          failed: results.length,
+          total: scrapeUrls.length,
+          error: String(results[0]?.error || '未知错误')
+        }
+      });
+    }
 
     // 抓取刚结束队列缓存必热：按最新订阅强制过一遍订阅外清理（零 storage 读），关掉
     // 「退订时抓取仍在飞、迟到的 saveDrama 把界外卡写回」的竞态——SW 唤醒的清理受
@@ -654,7 +753,16 @@ function getConfiguredScrapeUrls(urlTags) {
     .map(item => item.urlPattern)
     .filter(pattern => /^https?:\/\//i.test(pattern));
 
-  return Array.from(new Set(urls));
+  // 去重按尾斜杠归一（与 SubscriptionConfig.normalizeUrlTags、归属判定同口径），保留先出现的
+  // 原串：新写入的 urlTags 已不会并存两种写法，这里兜住旧版本写进 storage 的 '…/x' 与 '…/x/'——
+  // 按原串去重时同一页每轮要开两个标签页抓两遍（审查 urltags-dedupe-raw）
+  const seen = new Set();
+  return urls.filter(url => {
+    const key = UrlMatch.normalizeListUrl(url);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function filterDramasByConfiguredUrls(dramas, urlTags) {
@@ -822,13 +930,22 @@ function resetPartialTranslations() {
  * 独立标记理由同 companyFieldDropped——runLegacyDramaMigrations 早已置位。
  */
 function resetNonChineseTitleZh() {
-  return runOnceDramaMigration('nonChineseTitleZhReset', '非中文译名复位', drama => {
-    if (!drama) return drama;
-    const titleZh = String(drama.titleZh || '').trim();
-    if (!titleZh || TranslateConfig.hasChineseChars(titleZh)) return drama;
-    const { translateAttempts, ...rest } = drama;
-    return { ...rest, titleZh: '', status: 'new' };
-  }, count => `已把 ${count} 条非中文译名退回待翻译队列`);
+  return runOnceDramaMigration('nonChineseTitleZhReset', '非中文译名复位', resetNonChineseTitle,
+    count => `已把 ${count} 条非中文译名退回待翻译队列`);
+}
+
+/**
+ * 逐条：titleZh 非空却不含汉字 → 清空译名、退回 new、清重试计数；返回原对象表示无需改动。
+ * 迁移与导入共用（同 clearGarbledTranslations）：现有全部采集路径写 titleZh 前都过
+ * hasChineseChars（内容脚本各适配器、后台 keepChineseTranslation），库外不会再有合法的
+ * 非汉字 titleZh，旧备份里的只能是修复前的旧形态。
+ */
+function resetNonChineseTitle(drama) {
+  if (!drama) return drama;
+  const titleZh = String(drama.titleZh || '').trim();
+  if (!titleZh || TranslateConfig.hasChineseChars(titleZh)) return drama;
+  const { translateAttempts, ...rest } = drama;
+  return { ...rest, titleZh: '', status: 'new' };
 }
 
 /**
@@ -871,12 +988,21 @@ function resetGarbledTranslations() {
  * 幂等：无变化时零写入；写回经 storage.onChanged 自动触发 CSV 同步。
  */
 function migrateLegacyTags() {
-  return mapDramasInQueue('标签迁移', drama => {
-    if (!Array.isArray(drama.tags) || !drama.tags.includes('RR')) return drama;
-    const tags = Array.from(new Set(drama.tags.map(tag => (tag === 'RR' ? 'RoyalRoad' : tag))));
-    return { ...drama, tags };
-  }, count => `已迁移 ${count} 条历史记录的显示标签 RR -> RoyalRoad`);
+  return mapDramasInQueue('标签迁移', renameLegacyRrTag,
+    count => `已迁移 ${count} 条历史记录的显示标签 RR -> RoyalRoad`);
 }
+
+/** 逐条：tags 里的 'RR' 改 'RoyalRoad'（去重）；返回原对象表示无需改动。迁移与导入共用。 */
+function renameLegacyRrTag(drama) {
+  if (!drama || !Array.isArray(drama.tags) || !drama.tags.includes('RR')) return drama;
+  const tags = Array.from(new Set(drama.tags.map(tag => (tag === 'RR' ? 'RoyalRoad' : tag))));
+  return { ...drama, tags };
+}
+
+// 联网迁移（ReelShort 详情页 / Shortical sitemap）单次请求的期限：小于 SW 的 30s 空闲回收
+// 阈值——请求挂住期间不调任何扩展 API，SW 可能被回收，下次唤醒又从头卡一遍。超时即抛：
+// ReelShort 那条退全集页兜底，Shortical 由 runGuarded 兜住、标记不置位、下轮重试
+const MIGRATION_FETCH_TIMEOUT_MS = 20000;
 
 /**
  * 存量 ReelShort 条目 url 一次性迁移到第一集播放页
@@ -901,7 +1027,9 @@ async function migrateReelshortEpisodeUrls() {
     const movieUrl = drama.url.replace('/full-episodes/', '/movie/');
     let nextUrl = movieUrl.replace('/movie/', '/full-episodes/');
     try {
-      const response = await fetch(movieUrl, { headers: { 'Accept': 'text/html' } });
+      const response = await fetch(movieUrl, {
+        headers: { 'Accept': 'text/html' }, signal: AbortSignal.timeout(MIGRATION_FETCH_TIMEOUT_MS)
+      });
       if (response.ok) {
         const html = await response.text();
         const jsonText = (html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/) || [])[1];
@@ -943,7 +1071,9 @@ async function migrateReelshortEpisodeUrls() {
  * （src/shared/scrape-rules.js）；这里只管取数与失败即抛（runGuarded 兜住、下轮重试）。
  */
 async function fetchShorticalCanonicalSlugs() {
-  const response = await fetch('https://shortical.com/sitemaps/series.xml', { headers: { 'Accept': 'application/xml' } });
+  const response = await fetch('https://shortical.com/sitemaps/series.xml', {
+    headers: { 'Accept': 'application/xml' }, signal: AbortSignal.timeout(MIGRATION_FETCH_TIMEOUT_MS)
+  });
   if (!response.ok) throw new Error(`Shortical sitemap HTTP ${response.status}`);
   const map = ScrapeRules.parseShorticalSitemap(await response.text());
   // 站点对未命中路径一律回 200＋9KB 空壳，「拿到响应」不等于「拿到 sitemap」
@@ -1143,7 +1273,7 @@ async function scrapeLoadedTab(tabId, url, page) {
       // 与 manifest content_scripts 的 js 数组保持一致：共享模块先于 content.js
       // （漏一个共享模块＝content.js 在兜底注入路径上直接 ReferenceError，
       //  而这条路径正是后台节流标签页的常态入口。unit-site-registry T4a/T4b 守着）
-      files: ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/shared/scrape-rules.js', 'src/content/content.js']
+      files: ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/shared/scrape-rules.js', 'src/shared/url-match.js', 'src/content/content.js']
     }).catch(err => console.warn(`[ShortScraping] 强制注入失败（继续轮询）: ${err.message}`));
     return await sendScrapeWhenReady(tabId, 40, 3000, page);
   }
@@ -1232,6 +1362,38 @@ function isItemLevelTranslateError(error) {
   return ITEM_LEVEL_TRANSLATE_HTTP_STATUSES.has(Number(error?.status));
 }
 
+// 翻译请求期间的 SW 保活间隔：小于 30s 空闲回收阈值
+const SW_KEEPALIVE_INTERVAL_MS = 20000;
+
+/**
+ * 长请求期间保活 SW，返回停止函数（调用方 finally 里调）。AI 一批实测 9.5~34s、上限 60s
+ * （translate-config.js requestTimeoutSec），请求期间 SW 里没有任何扩展 API 调用或事件，心跳
+ * 每批结束才写一次；独立的 translate-task 轮 / 手动 🌐 / 单卡 🌍 没有抓取标签页的消息陪跑，
+ * 一批超过 30s 就可能被空闲回收：这批作废、整轮中断（审查 sw-long-fetch-termination）。
+ * 调一次扩展 API 会重置空闲计时（Chrome 文档给的做法），getPlatformInfo 最轻。
+ * 用 setTimeout 递归而非 setInterval：tests/background-fixture.mjs 只桩了 setTimeout。
+ */
+function startSwKeepAlive() {
+  let timer = null;
+  let stopped = false;
+  const schedule = () => {
+    timer = setTimeout(() => {
+      if (stopped) return;
+      try {
+        Promise.resolve(chrome.runtime.getPlatformInfo?.()).catch(() => {});
+      } catch (_) {
+        // 保活是尽力而为，任何异常都不能打断翻译
+      }
+      schedule();
+    }, SW_KEEPALIVE_INTERVAL_MS);
+  };
+  schedule();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+}
+
 /**
  * 译文语言守卫：不含汉字的片名/简介译文按空处理（判据复用 TranslateConfig.hasChineseChars，
  * 与 resetNonChineseTitleZh 同口径）。模型把输入原样回显（{"title":"Revenge Bride",…}）时，
@@ -1292,6 +1454,7 @@ async function performTranslateOnce(source) {
   let runError = null;
   let stateWritten = false;
   let lastError = null;
+  let stopKeepAlive = null;
 
   try {
     const { translateConfig, urlTags = [] } = await chrome.storage.local.get(['translateConfig', 'urlTags']);
@@ -1318,6 +1481,8 @@ async function performTranslateOnce(source) {
       processedCount: 0,
       translatedCount: 0
     });
+    // 只保活非空轮（空扫描不发请求）；finally 停止
+    stopKeepAlive = startSwKeepAlive();
 
     // 翻译每条记录。注意：抓取线可能正在并行写入新卡片，
     // 所以不能在这里把开头读取到的 dramas 快照整体写回，否则会覆盖抓取线新增内容。
@@ -1392,14 +1557,17 @@ async function performTranslateOnce(source) {
       failures.push(...streakFailures);
       streakFailures = [];
 
-      const updated = await updateSingleDramaTranslation(drama.id, result, { fillOnly: true });
+      const { done: updated, becameTrans } = await updateSingleDramaTranslation(drama.id, result, { fillOnly: true });
       progressedCount++;
       if (updated) {
         translatedCount++;
         // 触发点①：翻完一条即推（队列外，失败只记日志）。读回落库后的那条，
-        // 卡片里才有刚写进去的译文。
-        const saved = (await getDramasSnapshot()).find(d => d.id === drama.id);
-        await maybeBotPush(saved);
+        // 卡片里才有刚写进去的译文。只在本次把它翻成 trans 时推：请求在飞期间 🌍 抢先
+        // 翻完（已由触发点③推过），这里 fillOnly 落库照样算完成，但不再推第二次
+        if (becameTrans) {
+          const saved = (await getDramasSnapshot()).find(d => d.id === drama.id);
+          await maybeBotPush(saved);
+        }
       } else {
         console.warn(`[ShortScraping] 翻译只补到一半，保持待翻译状态下轮重试: ${drama.title}`);
       }
@@ -1412,11 +1580,13 @@ async function performTranslateOnce(source) {
     // 连同同批邻居永久卡在 new，每次抓取后翻译线都白跑满轮。收口的卡照常过触发点①（与
     // 半成品收口一致，否则它永远不会被推群），但不计入 translatedCount——它一个字都没翻出来。
     const recordTranslateFailure = async (drama) => {
-      const done = await updateSingleDramaTranslation(drama.id, { title: '', desc: '' }, { fillOnly: true });
+      const { done, becameTrans } = await updateSingleDramaTranslation(drama.id, { title: '', desc: '' }, { fillOnly: true });
       if (done) {
         console.warn(`[ShortScraping] 连续 ${MAX_PARTIAL_TRANSLATE_ATTEMPTS} 次没拿到译文，收口不再重试: ${drama.title}`);
-        const saved = (await getDramasSnapshot()).find(d => d.id === drama.id);
-        await maybeBotPush(saved);
+        if (becameTrans) {
+          const saved = (await getDramasSnapshot()).find(d => d.id === drama.id);
+          await maybeBotPush(saved);
+        }
       } else {
         console.warn(`[ShortScraping] 翻译结果为空，保持待翻译状态下轮重试: ${drama.title}`);
       }
@@ -1544,6 +1714,7 @@ async function performTranslateOnce(source) {
     runError = e.message;
     return { pendingCount: pendingCount || null, translatedCount, error: e.message };
   } finally {
+    stopKeepAlive?.();
     // 终态写进 finally，封死中途意外 throw 留下孤儿 running:true 的口。
     // translateManualWaiter：手动触发 join 到本轮（自动空扫描不写终态）时，
     // 也必须写终态给弹窗收尾；标记消费后复位。
@@ -1585,14 +1756,16 @@ const MAX_PARTIAL_TRANSLATE_ATTEMPTS = 3;
  * 让下一轮继续补、translateAttempts 累加，达上限才收口。此前无论多残缺都直接标 trans，
  * 导致「有简介无标题」的条目被永久定格、再也不进翻译队列（全库实测 660 条这样卡死）。
  * 两个写入口（批量线 / translateSingle）共用这一份判据，不由调用方各算。
- * 返回值＝是否收口为 trans（半成品返回 false；卡片不存在也返回 false）。
+ * 返回 { done, becameTrans }：done＝是否收口为 trans（半成品 / 卡片不存在为 false）；
+ * becameTrans＝本次写入把它从非 trans 翻成 trans——群机器人只在这一刻推（见 Lark 群机器人段
+ * 头注释）。在队列内按当前记录判定，批量线与 🌍 同时翻同一张卡时只有先落库的那一方为 true。
  */
 function updateSingleDramaTranslation(dramaId, result, options = {}) {
   return enqueueDramaWrite('翻译更新', async () => {
     const dramas = await getDramasInQueue();
     const index = dramas.findIndex(d => d.id === dramaId);
 
-    if (index === -1) return false;
+    if (index === -1) return { done: false, becameTrans: false };
 
     const current = dramas[index];
     const titleZh = options.fillOnly
@@ -1620,7 +1793,7 @@ function updateSingleDramaTranslation(dramaId, result, options = {}) {
     next[index] = record;
 
     await writeDramasInQueue(next);
-    return done;
+    return { done, becameTrans: done && current.status !== 'trans' };
   });
 }
 
@@ -1631,6 +1804,10 @@ function updateSingleDramaTranslation(dramaId, result, options = {}) {
  * （重译的语义就是要覆盖），完成判据与批量线同口径——该翻的没翻全保持 status='new'、
  * translateAttempts 累加、达上限收口。空结果 / 接口异常一律 success:false 回传文案，
  * 卡片原样不动（与批量线「没回内容不写记录」一致）。
+ *
+ * 触发点③：本次把卡从 new 翻成 trans（becameTrans）时推群——新卡被 🌍 抢在批量线之前翻完后，
+ * 批量线扫不到它，此前这张卡永远不会推。重译本来就是 trans 的卡不推。推送不 await：
+ * 弹窗 ⏳ 不等飞书应答（与触发点② saveDrama 同款旁路），maybeBotPush 自身不会 reject。
  */
 async function handleTranslateSingle(dramaId) {
   const drama = (await getDramasSnapshot()).find(d => d.id === dramaId);
@@ -1638,6 +1815,8 @@ async function handleTranslateSingle(dramaId) {
     return { success: false, error: '未找到该卡片数据' };
   }
 
+  // 单卡请求最长也要等满 requestTimeoutSec（默认 60s），同批量线一样保活
+  const stopKeepAlive = startSwKeepAlive();
   try {
     // 语言守卫与批量线同口径：模型回显英文不得覆盖既有中文译名
     const result = keepChineseTranslation(await Translator.translateTitleAndDesc(drama.title, drama.description));
@@ -1645,12 +1824,19 @@ async function handleTranslateSingle(dramaId) {
       return { success: false, error: '翻译结果为空，请检查翻译接口配置或控制台错误' };
     }
 
-    const done = await updateSingleDramaTranslation(dramaId, result);
+    const { done, becameTrans } = await updateSingleDramaTranslation(dramaId, result);
     console.log(`[ShortScraping] 单卡翻译${done ? '完成' : '只补到一半'}: ${drama.title}`);
+    if (becameTrans) {
+      getDramasSnapshot()
+        .then(dramas => maybeBotPush(dramas.find(d => d.id === dramaId)))
+        .catch(e => console.warn('[ShortScraping] 群机器人推送流程异常（不影响翻译）:', e?.message || e));
+    }
     return { success: true, complete: done };
   } catch (e) {
     console.warn('[ShortScraping] 单卡翻译失败:', e.message);
     return { success: false, error: e.message };
+  } finally {
+    stopKeepAlive();
   }
 }
 
@@ -1705,6 +1891,14 @@ function clearAllDramas() {
  * pruneDramasOutsideConfiguredUrls 会把界外条目静默删除，放进去也活不过下轮。
  * 合并后整表按 scrapedAt 降序重排（缺失排尾）——时间线渲染按数组序分组，
  * 单纯头插会让老条目挂在顶部日期组之后错乱；对头插维持的现库近似 no-op。
+ *
+ * 一次性迁移都挂着完成标记，导入时不会重跑，旧备份会把修复前的旧形态原样带回来、且永远
+ * 不再被修（审查 import-bypasses-oneshot-migrations）。所以导入时补上能逐条安全判定的几道：
+ * fandom 未映射临时键跳过（计入 invalid）、'RR' 标签改名、非中文译名与乱码译文退回重译；
+ * 要联网的 Shortical 规范 id 迁移则在导入了 Shortical 条目时清掉完成标记，下次唤醒重跑
+ * （按最早 scrapedAt 合并重复，幂等；setupAlarms 已排在迁移链之前、sitemap 请求有期限）。
+ * 刻意不做：半成品 trans 复位（分不清是旧形态还是连续失败的合法收口，重置会多烧 API、
+ * 收口时还会再推群）；ReelShort 标记重置（/movie/ 链接可用，重跑要逐条联网）。
  */
 function importDramaRecords(rawDramas) {
   if (!Array.isArray(rawDramas)) {
@@ -1721,6 +1915,8 @@ function importDramaRecords(rawDramas) {
   for (const raw of rawDramas) {
     const normalized = TimelineCsv.validateImportDrama(raw);
     if (!normalized || (normalized.source && !SiteRegistry.CATEGORY_SOURCES.includes(normalized.source))) { invalid++; continue; }
+    // fandom 映射失败的临时键（mdf-/rsf-/smf-）：v1.4.8 起不入库、存量已由迁移清掉
+    if (ScrapeRules.isUnmappedFandomKey(normalized.itemId)) { invalid++; continue; }
     normalized.source ||= 'imdb'; // source 字段出现前只有 IMDB，缺失即按历史归属
     candidates.push(normalized);
   }
@@ -1754,7 +1950,8 @@ function importDramaRecords(rawDramas) {
       seenItemIds.add(normalized.itemId);
       seenIds.add(normalized.id);
       if (hasGarbledSourceFields(normalized)) garbledSourceIds.push(normalized.itemId);
-      added.push(clearGarbledTranslations(normalized)); // 旧备份里的乱码译文退回重译
+      // 与对应一次性迁移共用逐条函数：旧标签改名、非中文 / 乱码译文退回重译
+      added.push(clearGarbledTranslations(resetNonChineseTitle(renameLegacyRrTag(normalized))));
     }
 
     if (garbledSourceIds.length > 0) {
@@ -1769,7 +1966,10 @@ function importDramaRecords(rawDramas) {
         const tb = b.scrapedAt || '';
         return tb < ta ? -1 : tb > ta ? 1 : 0; // ISO 串字典序＝时间序，降序，空串排尾
       });
-      await writeDramasInQueue(merged);
+      // 旧备份里的 Shortical 条目可能还是 href 号那套非规范 id（与库里的规范 id 不相等，会作为
+      // 新卡加入）：与写表同一次 set 清掉完成标记，下次唤醒重跑规范 id 迁移
+      const extra = added.some(drama => drama.source === 'shortical') ? { shorticalCanonicalIdsMigrated: false } : {};
+      await writeDramasInQueue(merged, extra);
     }
 
     return {
@@ -1949,10 +2149,37 @@ function scheduleCsvSync() {
   if (csvSyncTimer) clearTimeout(csvSyncTimer);
   csvSyncTimer = setTimeout(() => {
     csvSyncTimer = null;
+    // 报错文案按失败形态在 syncTimelineToCsv 里定：连不上才提示确认服务已启动，服务端
+    // 回了错误（如 413 超限）就打印它给的原因——/health 正常时再叫人去启动服务只会误导
     syncTimelineToCsv().catch(error => {
-      console.warn('[ShortScraping] CSV 同步失败，请确认本地同步服务已启动:', error.message);
+      console.warn('[ShortScraping] CSV 同步失败:', error.message);
     });
   }, 500);
+}
+
+function formatSyncBodySize(bytes) {
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+/** fetch 本身抛错（连不上 / 连接被断开）时的报错 */
+function csvSyncNetworkError(error, body) {
+  const bytes = new TextEncoder().encode(body).length;
+  const reason = error?.message || String(error);
+  if (bytes >= CSV_SYNC_LEGACY_BODY_LIMIT_BYTES) {
+    return new Error(`连接同步服务失败（${reason}）。本次推送约 ${formatSyncBodySize(bytes)}，已超过旧版同步服务 20MB 的请求体上限：`
+      + '服务若已在运行（弹窗显示在线），多半是超限被断开连接，请更新并重启同步服务；否则请确认本地同步服务已启动');
+  }
+  return new Error(`无法连接本地同步服务（${reason}），请确认服务已启动`);
+}
+
+/** 服务端回了非 2xx：带上它给的原因（sendJson 的 { error }），413 另点明推送体积 */
+function csvSyncHttpError(status, result, body) {
+  const detail = result?.error ? `：${result.error}` : '';
+  if (status === 413) {
+    const bytes = new TextEncoder().encode(body).length;
+    return new Error(`同步服务拒收（HTTP 413，本次推送约 ${formatSyncBodySize(bytes)}，超过服务端请求体上限）${detail}`);
+  }
+  return new Error(`同步服务返回 HTTP ${status}${detail}`);
 }
 
 async function syncTimelineToCsv() {
@@ -1981,12 +2208,18 @@ async function syncTimelineToCsv() {
     return;
   }
 
-  const response = await fetch(CSV_SYNC_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    // 字符串拼接复用 serialized，免对约 1.5MB 的数组做第二次 stringify
-    body: `{"dramas":${serialized}${isEmpty ? ',"allowEmpty":true' : ''},"syncedAt":${JSON.stringify(new Date().toISOString())}}`
-  });
+  // 字符串拼接复用 serialized，免对约 1.5MB 的数组做第二次 stringify
+  const body = `{"dramas":${serialized}${isEmpty ? ',"allowEmpty":true' : ''},"syncedAt":${JSON.stringify(new Date().toISOString())}}`;
+  let response;
+  try {
+    response = await fetch(CSV_SYNC_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body
+    });
+  } catch (error) {
+    throw csvSyncNetworkError(error, body);
+  }
 
   if (response.status === 409) {
     // 服务端拒绝覆盖（如 EMPTY_REJECTED）且什么都没写：同内容重推只会再被拒，记下签名
@@ -1998,7 +2231,8 @@ async function syncTimelineToCsv() {
   }
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+    const result = await Promise.resolve().then(() => response.json()).catch(() => null);
+    throw csvSyncHttpError(response.status, result, body);
   }
 
   // 仅成功后记录签名——失败不记，下次触发照常重试
@@ -2020,9 +2254,15 @@ async function syncTimelineToCsv() {
  * 与 Base 工作流那条并存、互不影响：机器人免费无月度额度，管「实时知道」；
  * 工作流按「1 条记录＝1 次运行」计费，管「写进表」。
  *
- * 两个触发点互斥，所以**不需要持久的「已推送」标记**（沿用单卡推送的 YAGNI 边界）：
- *   ① 翻译线把一条从 new 补成 trans（走 AI 翻译的站点）；
- *   ② 抓取入库时该卡已是 trans（平台自带中文齐全，压根不进翻译线）。
+ * 触发点（每个都只在「这一次写入把卡变成 trans」时推）：
+ *   ① 翻译线把一条从 new 补成 trans（走 AI 翻译的站点；含连续失败收口为 trans）；
+ *   ② 抓取入库时该卡已是 trans（平台自带中文齐全，压根不进翻译线）；
+ *   ③ 弹窗单卡 🌍 把一条从 new 翻成 trans（handleTranslateSingle）。
+ * ①③ 的判据 becameTrans 在 dramas 写队列内按当前记录算（updateSingleDramaTranslation），
+ * 两条线同时翻同一张卡时只有先落库的一方推；② 只推新入库的卡（去重命中不推）。
+ * 所以**不设持久的「已推送」标记**。剩下的重复面只有 trans→new 复位后重译再推：存量机器上
+ * 几个一次性复位迁移早已跑完，眼下只剩导入恢复——导入跳过库里已有的 itemId，只有「删掉后
+ * 再导入、且备份里的译文被判乱码 / 非中文而退回 new」的卡会再推一次，收益低，暂不做标记。
  *
  * **启用水位线是必需品不是优化**：库里几千条存量会陆续走完翻译线（尤其
  * resetPartialTranslations 刚退回队列的那批），没有水位线一开机器人就在群里
@@ -2468,10 +2708,27 @@ function showNotification(message) {
 }
 
 /**
- * 内容脚本可发的消息白名单：content.js 只发这两种（抓取入库、详情页代理取 HTML）。
+ * 内容脚本开轮要的抓取上下文（审查 storage-secrets-exposed-to-content / full-table-read-per-scrape）：
+ * 订阅配置 + 库中已有条目的精简列表 known = [[itemId, 是否已有 genres], ...]。内容脚本只拿它建
+ * 去重集合与「要不要回填 genres」的判断，所以不给整条记录（简介、译文都不出后台）；几千条也只有
+ * 一两百 KB，而以前每个抓取标签页都要把整张 dramas（约 5MB）跨进程反序列化一遍。
+ * dramas 走写队列读（命中 dramasCache 时零 get），排在已入队的写之后，看到的是已提交的最新表。
+ */
+async function scrapeContextForContent() {
+  const dramas = await enqueueDramaWrite('抓取上下文', getDramasInQueue);
+  const { urlTags } = await chrome.storage.local.get('urlTags');
+  const known = [];
+  for (const drama of Array.isArray(dramas) ? dramas : []) {
+    if (drama && drama.itemId) known.push([drama.itemId, Array.isArray(drama.genres) && drama.genres.length > 0]);
+  }
+  return { success: true, urlTags: Array.isArray(urlTags) ? urlTags : [], known };
+}
+
+/**
+ * 内容脚本可发的消息白名单：content.js 只发这三种（取抓取上下文、抓取入库、详情页代理取 HTML）。
  * 新增内容脚本消息时须同步加到这里，否则会被下面的发送方闸门拒掉。
  */
-const CONTENT_SCRIPT_ACTIONS = new Set(['saveDrama', 'fetchDetailHtml']);
+const CONTENT_SCRIPT_ACTIONS = new Set(['getScrapeContext', 'saveDrama', 'fetchDetailHtml']);
 
 /**
  * 发送方是否为本扩展自己的页面（弹窗 / 设置页）。判据是来源 URL 落在本扩展源下；
@@ -2519,6 +2776,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'triggerScrape') {
+    // 全量轮在跑或排队、且还没开抓该站：并进那一轮，立即回 merged，不再排到整轮后面重抓
+    // 一遍（弹窗原先要转圈到全量轮结束再加本站重抓）。新卡随全量轮入库，弹窗经 onChanged 自动出现
+    if (fullScrapeWillCoverSite(request.site)) {
+      console.log(`[ShortScraping] 站点刷新并入进行中的全量抓取: ${request.site}`);
+      sendResponse({ success: true, merged: true });
+      return false;
+    }
     performScrape({ site: request.site }).then((summary) => {
       sendResponse({ success: true, summary });
     }).catch((error) => {
@@ -2544,6 +2808,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       state: translateRunStateMirror
     });
     return false;
+  }
+
+  if (request.action === 'getScrapeContext') {
+    scrapeContextForContent().then(sendResponse).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
   }
 
   if (request.action === 'saveDrama') {

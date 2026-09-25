@@ -24,7 +24,8 @@
  *   - 同键的各条 name 必须一致（unit-site-registry 有守卫），否则显示名取决于遍历顺序；
  *   - CATEGORY_SOURCES 去重——它是「站点键全集」，不去重会渲染出两个一样的标签，
  *     并让 SITE_GROUPS 展平排列与 ADAPTERS 键集两条断言同时 RED；
- *   - hostBySource 取**首条**（弹窗「去抓取」按钮按 host 子串挑订阅 URL，取首条即主域）；
+ *   - hostBySource 取**首条**即主域（保留供外部参考；弹窗「去抓取」已改用 siteOfUrl 按域名归类挑订阅 URL，
+ *     按 host 子串挑会让只订了 dramaboxdb.com 的 DramaBox 挑不中）；
  *   - contentScriptMatches 逐条展开，两个域名都进 manifest。
  *
  * 加载方式：后台 importScripts / 弹窗、设置页、共享页 <script> 标签
@@ -100,7 +101,7 @@
   const hostBySource = {};
   for (const entry of SITES) {
     SOURCE_NAMES[entry.site] = entry.name;
-    // 同键多 host 取首条＝主域（弹窗「去抓取」按 host 子串挑订阅 URL）
+    // 同键多 host 取首条＝主域（保留供外部参考，弹窗「去抓取」已改用 siteOfUrl）
     if (!(entry.site in hostBySource)) hostBySource[entry.site] = entry.host;
   }
 

@@ -4,7 +4,8 @@ import './bootstrap.cjs';
 // sendMessage 永不 resolve，scrapeUrlInTab 的 finally 不执行、后台标签页关不掉，串行
 // scrapeQueue 后面的定时 / 手动抓取全部堵死。修复：scrapeUrlInTab 外层 Promise.race 设
 // 5 分钟整页期限，超时按失败抛出、finally 照常关标签页，performScrapeOnce 把该 URL 记为
-// 失败继续下一个。另验：performScrape 收尾时翻译线已退出则再安排一次（批次 B3 钩子）。
+// 失败继续下一个。另验：performScrape 收尾时翻译线已退出则再安排一次（批次 B3 钩子）；
+// 全量轮合并（T7，scrape-queue-no-coalesce）；全部失败不刷新 lastScrape（T8，契约 C1）。
 // 计时：只把整页期限 / 渲染等待 / 加载超时这几个已知延时缩成毫秒级真定时器，其余延时
 // （抓取后翻译线的 10 秒预约等）一律不触发，与 background-fixture 的默认桩同语义。
 // 用法：node tests/unit-scrape-page-timeout.mjs
@@ -15,6 +16,8 @@ const realClearTimeout = clearTimeout;
 const sleep = ms => new Promise(r => realSetTimeout(r, ms));
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
+// 读后台内部状态：旧代码没有该变量时记为失败而不是整套崩掉
+const peek = (bg, expr) => { try { return bg.run(expr); } catch (e) { return `抛错：${e.message}`; } };
 
 const HANG_URL = 'https://www.imdb.com/search/title/?genres=hang';
 const OK_URL = 'https://www.imdb.com/search/title/?genres=ok';
@@ -145,6 +148,69 @@ async function setup({ completes = true } = {}) {
   await sleep(100);   // 留时间给残余链路（轮询间隔在本测里缩成 1ms）
   check('T6 超时关页后不再强制注入、不再轮询补发 scrape', counts.inject === 0 && counts.send === 1,
     `inject=${counts.inject} send=${counts.send}`);
+}
+
+// ---------- T7 全量轮合并（审查 scrape-queue-no-coalesce）：至多「一轮在跑 + 一轮排队」 ----------
+// 修复前每次全量调用都追加一轮 performScrapeOnce：间隔短于单轮耗时时待跑轮只增不减
+{
+  const { bg, tabs } = await setup();
+  bg.data.urlTags = [{ urlPattern: HANG_URL, tags: ['IMDB'] }];
+  bg.run(`globalThis.onceCalls = 0;
+    { const orig = performScrapeOnce; performScrapeOnce = (...args) => { onceCalls++; return orig(...args); }; }`);
+
+  // T7a 三次同步连发：第一轮尚未开跑，后两次都并入它
+  bg.context.p1 = bg.run('performScrape()');
+  bg.context.p2 = bg.run('performScrape()');
+  bg.context.p3 = bg.run('performScrape()');
+  check('T7a 第一轮尚未开跑时连发三次全量只排一轮（同一 promise、计数 1）',
+    bg.run('p1 === p2 && p2 === p3') && bg.run('activeScrapeCount') === 1, `active=${bg.run('activeScrapeCount')}`);
+  await Promise.race([bg.run('p1'), sleep(2000)]);
+  check('T7b 并入的调用拿到同一轮的结果，只跑一次 performScrapeOnce', bg.run('onceCalls') === 1, `onceCalls=${bg.run('onceCalls')}`);
+
+  // T7c 第一轮已开跑（挂死页面的标签页已开）后再连发两次：得到「一轮在跑 + 一轮排队」
+  tabs.clear();
+  bg.run('onceCalls = 0');
+  bg.context.q1 = bg.run('performScrape()');
+  for (let i = 0; i < 200 && ![...tabs.values()].includes(HANG_URL); i++) await sleep(1);
+  bg.context.q2 = bg.run('performScrape()');
+  bg.context.q3 = bg.run('performScrape()');
+  check('T7c 一轮在跑时后续两次全量合并成一轮排队（计数 2）',
+    bg.run('q1 !== q2 && q2 === q3') && bg.run('activeScrapeCount') === 2, `active=${bg.run('activeScrapeCount')}`);
+  await Promise.race([Promise.all([bg.run('q1'), bg.run('q3')]), sleep(3000)]);
+  check('T7d 连续三次全量调用只跑两次 performScrapeOnce', bg.run('onceCalls') === 2, `onceCalls=${bg.run('onceCalls')}`);
+  check('T7e 收尾后排队标记与计数归零', peek(bg, 'pendingFullScrape === null && fullScrapeProgress === null') === true && bg.run('activeScrapeCount') === 0,
+    `active=${bg.run('activeScrapeCount')}`);
+
+  // T7f 单站手动抓取不参与合并：有全量排队时照常各排一次
+  bg.run('onceCalls = 0');
+  bg.context.r1 = bg.run('performScrape()');
+  bg.context.r2 = bg.run("performScrape({ site: 'imdb' })");
+  bg.context.r3 = bg.run("performScrape({ site: 'imdb' })");
+  check('T7f 单站抓取照常排队（计数 3）', bg.run('activeScrapeCount') === 3, `active=${bg.run('activeScrapeCount')}`);
+  await Promise.race([Promise.all([bg.run('r1'), bg.run('r2'), bg.run('r3')]), sleep(3000)]);
+  check('T7g 三次都实际执行', bg.run('onceCalls') === 3, `onceCalls=${bg.run('onceCalls')}`);
+}
+
+// ---------- T8 一轮全部失败不刷新 lastScrape，另记 lastScrapeFailure（审查 lastscrape-set-on-total-failure，契约 C1） ----------
+{
+  const OLD = '2026-01-01T00:00:00.000Z';
+  const { bg } = await setup();
+  bg.data.lastScrape = OLD;
+  bg.data.urlTags = [{ urlPattern: HANG_URL, tags: ['IMDB'] }];
+  await Promise.race([bg.run('performScrapeOnce()'), sleep(3000)]);
+  const failure = bg.data.lastScrapeFailure;
+  check('T8a 全部失败时 lastScrape 保持原值', bg.data.lastScrape === OLD, String(bg.data.lastScrape));
+  check('T8b 全部失败时写 lastScrapeFailure { at, failed, total, error }',
+    failure && typeof failure.at === 'string' && failure.at > OLD && failure.failed === 1 && failure.total === 1 && /超时/.test(failure.error),
+    JSON.stringify(failure));
+
+  // 有一个成功：lastScrape 刷新，同一次 set 清掉 lastScrapeFailure
+  bg.data.urlTags = [{ urlPattern: HANG_URL, tags: ['IMDB'] }, { urlPattern: OK_URL, tags: ['IMDB'] }];
+  bg.log.length = 0;
+  await Promise.race([bg.run('performScrapeOnce()'), sleep(3000)]);
+  check('T8c 有成功的轮次照常刷新 lastScrape', typeof bg.data.lastScrape === 'string' && bg.data.lastScrape !== OLD, String(bg.data.lastScrape));
+  check('T8d 同一次 set 把 lastScrapeFailure 清成 null', bg.data.lastScrapeFailure === null
+    && bg.log.includes('set:lastScrape,lastScrapeFailure'), `${JSON.stringify(bg.data.lastScrapeFailure)} log=${JSON.stringify(bg.log)}`);
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

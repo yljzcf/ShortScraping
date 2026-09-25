@@ -267,6 +267,9 @@
       scrollLeft: previousOpen.scrollLeft,
       activeSource: previousActive ? previousActive.dataset.source : null
     } : null;
+    // 焦点同理：清空容器会把焦点掉回 body，键盘用户 Tab 到图标按 Enter 选站/刷新后，
+    // 下一次 Tab 又从页面开头开始。只记焦点**在标签条里**的情形，别处的焦点不抢
+    const focused = captureFocus(container);
 
     container.innerHTML = '';
 
@@ -293,10 +296,36 @@
       if (expandable) openGroupEl = group;
     }
 
+    // 拖动监听挂在容器上（跨重建不变），每次都现取展开组，见 attachDragScroll
+    attachDragScroll(container);
     if (openGroupEl) {
-      attachDragScroll(openGroupEl);
       restoreScroll(openGroupEl, previous, layout.activeSource);
     }
+    restoreFocus(container, focused);
+  }
+
+  function captureFocus(container) {
+    const active = typeof document !== 'undefined' ? document.activeElement : null;
+    if (!active || active === container || !container.contains(active)) return null;
+    return { source: active.dataset.source || null, group: active.dataset.group || null };
+  }
+
+  /**
+   * 按 data-source 找回同一个图标（它所在的组被收起了就落到那枚胶囊上）；焦点原在
+   * 收起胶囊上：胶囊还在就回到它，该组已展开（点胶囊即展开并选中代表站点）就落到活动图标上。
+   */
+  function restoreFocus(container, focused) {
+    if (!focused) return;
+    const all = selector => Array.prototype.slice.call(container.querySelectorAll(selector));
+    const chipOf = group => all('.tab-group-chip').find(chip => chip.dataset.group === group) || null;
+    let target = null;
+    if (focused.source) {
+      target = all('.category-tab').find(tab => tab.dataset.source === focused.source)
+        || chipOf(Registry.groupOfSite(focused.source));
+    } else if (focused.group) {
+      target = chipOf(focused.group) || container.querySelector('.category-tab.active');
+    }
+    if (target) target.focus({ preventScroll: true });
   }
 
   /** 还原横向位置；条件不满足则把活动站点滚进视区（首次渲染、切组、切站都走这条）。 */
@@ -313,19 +342,31 @@
   }
 
   /**
-   * 按住即拖。用 setPointerCapture 让手滑出标签栏也照常跟手；捕获阶段拦 click，
-   * 拖动松手那一下不算选站（原地按一下 moved 仍为 false，照常选站/再点刷新）。
+   * 按住即拖；捕获阶段拦 click，拖动松手那一下不算选站（原地按一下 moved 仍为 false，
+   * 照常选站/再点刷新）。
+   *
+   * 监听挂在**容器**上且每个容器只挂一次（__siteTabsDrag 幂等标记），拖动状态也跟着容器走：
+   * 抓取期间 render 每秒可能重建一次整条标签栏，若把状态和监听挂在展开组节点上，重建后
+   * 正在进行的拖动只会去改已脱离 DOM 的旧节点，条子不跟手，拖完那一下的 click 也拦不住。
+   * 所以每一步都现取当前的展开组。
    */
-  function attachDragScroll(groupEl) {
+  function attachDragScroll(container) {
+    if (container.__siteTabsDrag) return;
+    container.__siteTabsDrag = true;
+
     let state = null;
     let suppressClick = false;
+    const openGroup = () => container.querySelector('.tab-group.is-open');
 
     const onMove = (event) => {
       if (!state || !state.active) return;
       state = moveDrag(state, event.clientX);
       if (!state.moved) return;
-      groupEl.classList.add('is-dragging');
-      groupEl.scrollLeft = state.scrollLeft;
+      const groupEl = openGroup();
+      if (groupEl) {
+        groupEl.classList.add('is-dragging');
+        groupEl.scrollLeft = state.scrollLeft;
+      }
       event.preventDefault();                      // 拖动期间不选中图标
     };
 
@@ -336,12 +377,18 @@
       if (!state) return;
       suppressClick = endDrag(state).suppressClick;
       state = null;
-      groupEl.classList.remove('is-dragging');
+      const groupEl = openGroup();
+      if (groupEl) groupEl.classList.remove('is-dragging');
     };
 
-    groupEl.addEventListener('pointerdown', (event) => {
+    container.addEventListener('pointerdown', (event) => {
       if (event.button !== 0 && event.pointerType === 'mouse') return;
-      suppressClick = false;                       // 上一次拖动若在组外松手就没 click 可吞，这里兜底清掉
+      // 上一次拖动若在组外松手就没 click 可吞，这里兜底清掉。拦截器挂在整条容器上，
+      // 必须在「是否按在展开组里」之前清，否则残留的标记会吞掉随后点胶囊的那一下
+      suppressClick = false;
+      const groupEl = openGroup();
+      // 只有按在展开组里才起拖（收起胶囊、单站点组照常只是点击）
+      if (!groupEl || !groupEl.contains(event.target)) return;
       state = beginDrag(event.clientX, groupEl.scrollLeft);
       // **绝不能用 setPointerCapture**（2026-09-18 用户报「能拖但点不动」的真凶）：指针被捕获后
       // Chrome 会把随后的 click 改派到捕获元素上，图标自己的 click 监听器再也收不到 → 单击失效。
@@ -352,15 +399,18 @@
       window.addEventListener('pointercancel', finish);
     });
 
-    groupEl.addEventListener('click', (event) => {
+    // 键盘 Enter / 空格合成的 click（detail 为 0）不是拖完松手那一下：拖到条外松手留下的残留
+    // 标记不能吞掉键盘选站——拦截器挂在整条容器上后，胶囊与图标的键盘操作都会撞上它
+    container.addEventListener('click', (event) => {
       if (!suppressClick) return;
       suppressClick = false;
+      if (event.detail === 0) return;
       event.stopPropagation();
       event.preventDefault();
     }, true);
 
     // 图标是 <img>，不拦的话按住拖会变成浏览器原生的「拖拽图片」
-    groupEl.addEventListener('dragstart', event => event.preventDefault());
+    container.addEventListener('dragstart', event => event.preventDefault());
   }
 
   const api = {

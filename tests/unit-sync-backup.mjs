@@ -42,7 +42,7 @@ let serverOut = '';
 function startServer() {
   const proc = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
     cwd: tmpRoot,
-    env: { ...process.env, PORT: String(PORT) },
+    env: { ...process.env, SHORTSCRAPING_PORT: String(PORT) },
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe']
   });

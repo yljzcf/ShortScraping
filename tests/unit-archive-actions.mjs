@@ -149,6 +149,41 @@ await send({ action: 'saveDrama', drama: mk(2, { scrapedAt: iso(15), source: 'st
   check('T4 交错执行不丢卡', ri.added === 2 && rs.saved === true && rawStore.dramas.length === before + 3, `len=${rawStore.dramas.length}`);
 }
 
+// ---------- T5 导入补上逐条可判定的一次性迁移（审查 import-bypasses-oneshot-migrations） ----------
+// 一次性迁移都挂完成标记，导入时不会重跑：旧备份里修复前的形态原样入库、且永远不再被修。
+{
+  const before = rawStore.dramas.length;
+  rawStore.shorticalCanonicalIdsMigrated = true;
+  const r = await send({ action: 'importDramas', dramas: [
+    mk(20, { itemId: 'rr20', source: 'royalroad', tags: ['T', 'RR'] }),                     // 旧显示标签
+    mk(21, { itemId: 'mdf-orphan-slug', source: 'mydrama' }),                               // fandom 未映射临时键
+    mk(22, { itemId: 'rsf-some-title', source: 'reelshort' }),
+    mk(23, { itemId: 'st23', source: 'steam', titleZh: '탈출! 인연의 집', descriptionZh: '中文简介' }), // 非中文译名
+    mk(24, { itemId: 'st24', source: 'steam', titleZh: '官方中文名' })                        // 正常中文译名
+  ] });
+  const byItem = Object.fromEntries(rawStore.dramas.map(d => [d.itemId, d]));
+  check('T5a fandom 未映射临时键跳过并计入 invalid',
+    r.success === true && r.added === 3 && r.invalid === 2 && !byItem['mdf-orphan-slug'] && !byItem['rsf-some-title']
+    && rawStore.dramas.length === before + 3, JSON.stringify(r));
+  check('T5b RR 显示标签改为 RoyalRoad（与 migrateLegacyTags 同口径）',
+    JSON.stringify(byItem.rr20?.tags) === JSON.stringify(['T', 'RoyalRoad']), JSON.stringify(byItem.rr20?.tags));
+  check('T5c 不含汉字的 titleZh 清空并退回 new（简介保留）',
+    byItem.st23?.status === 'new' && byItem.st23?.titleZh === '' && byItem.st23?.descriptionZh === '中文简介',
+    JSON.stringify(byItem.st23));
+  check('T5d 正常中文译名不被误动', byItem.st24?.status === 'trans' && byItem.st24?.titleZh === '官方中文名',
+    JSON.stringify(byItem.st24));
+  check('T5e 没导入 Shortical 条目时不碰其迁移标记', rawStore.shorticalCanonicalIdsMigrated === true,
+    String(rawStore.shorticalCanonicalIdsMigrated));
+
+  // 旧 Shortical 条目的 href 号 id 与库里的规范 id 不相等，会作为新卡加入：清完成标记，下次唤醒重跑规范 id 迁移
+  const rs = await send({ action: 'importDramas', dramas: [
+    mk(25, { itemId: 'sc2200', source: 'shortical', url: 'https://shortical.com/drama/bound-by-fire-2200' })
+  ] });
+  check('T5f 导入 Shortical 条目 → shorticalCanonicalIdsMigrated 清为 false（下次唤醒重跑迁移）',
+    rs.added === 1 && rawStore.shorticalCanonicalIdsMigrated === false
+    && rawStore.dramas.some(d => d.itemId === 'sc2200'), JSON.stringify({ rs, flag: rawStore.shorticalCanonicalIdsMigrated }));
+}
+
 console.log = origLog; console.warn = origWarn; console.error = origError;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

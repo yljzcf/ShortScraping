@@ -1,7 +1,7 @@
 import './bootstrap.cjs';
 // SiteTabs 折叠标签条回归测试（v1.5.11）：分组划分完备性、代表站点三级优先级、
 // 活动站点回退链、布局折叠规则；v1.6.9 加横向拖动判据（D/E 组）与两份 CSS 同步（F 组）。
-// 逻辑断言全部走纯函数、零 DOM；CSS 只做文本断言。
+// 逻辑断言走纯函数、零 DOM；CSS 只做文本断言；H 组（render 跨重建保焦点与拖动）用文末的极小假 DOM。
 // 用法：node tests/unit-site-tabs.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -255,6 +255,212 @@ check('F9 拖动的 move/up 挂在 window 上（手滑出标签栏仍跟手，�
   /window\.addEventListener\('pointermove'/.test(tabsSrc)
   && /window\.addEventListener\('pointerup'/.test(tabsSrc)
   && /window\.removeEventListener\('pointermove'/.test(tabsSrc), '');
+
+// ---------- H render 跨重建：焦点与进行中的拖动（2026-09-25 审计 tabbar-rebuild-focus-drag） ----------
+// render 每次整条重建（抓取期间弹窗 ≤1 次/秒）。修复前：① 清空容器把焦点掉回 body，键盘用户
+// Tab 到图标按 Enter 后下一次 Tab 从页面开头开始；② 拖动状态和监听挂在展开组节点的闭包里，
+// 重建后正在进行的拖动只改脱离 DOM 的旧节点，条子不跟手、拖完那一下的 click 也拦不住（误切站点）。
+// 这里给一棵极小的假 DOM（只覆盖 render 用到的那点 API：类/data-* 复合选择器、捕获+冒泡派发、
+// 焦点随节点移除掉回 body），真跑 SiteTabs.render。
+{
+  class FakeNode {
+    constructor(tagName) {
+      this.tagName = String(tagName).toUpperCase();
+      this.children = [];
+      this.parentNode = null;
+      this.dataset = {};
+      this.attrs = {};
+      this.listeners = [];
+      this.classSet = new Set();
+      this.scrollLeft = 0;
+      this.offsetLeft = 0;
+      this.offsetWidth = 44;
+      this.clientWidth = 200;
+      this.focusCalls = [];
+      const node = this;
+      this.classList = {
+        add: (...names) => names.forEach(n => node.classSet.add(n)),
+        remove: (...names) => names.forEach(n => node.classSet.delete(n)),
+        contains: name => node.classSet.has(name),
+        toggle: (name, force) => {
+          const on = force === undefined ? !node.classSet.has(name) : Boolean(force);
+          if (on) node.classSet.add(name); else node.classSet.delete(name);
+          return on;
+        }
+      };
+    }
+    get className() { return [...this.classSet].join(' '); }
+    set className(value) { this.classSet = new Set(String(value).split(/\s+/).filter(Boolean)); }
+    setAttribute(name, value) { this.attrs[name] = String(value); }
+    getAttribute(name) { return name in this.attrs ? this.attrs[name] : null; }
+    appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+    set innerHTML(value) {
+      if (value !== '') throw new Error('假 DOM 只支持 innerHTML = \'\'');
+      const doc = globalThis.document;
+      for (const child of this.children) {
+        if (doc.activeElement && child.contains(doc.activeElement)) doc.activeElement = doc.body; // 浏览器语义
+        child.parentNode = null;
+      }
+      this.children = [];
+    }
+    contains(node) { for (let n = node; n; n = n.parentNode) if (n === this) return true; return false; }
+    descendants() { return this.children.flatMap(c => [c, ...c.descendants()]); }
+    matches(selector) {
+      const m = String(selector).match(/^((?:\.[\w-]+)*)((?:\[[\w-]+="[^"]*"\])*)$/);
+      if (!m) throw new Error(`假 DOM 不支持选择器 ${selector}`);
+      const classes = (m[1].match(/\.[\w-]+/g) || []).map(c => c.slice(1));
+      const attrs = [...m[2].matchAll(/\[([\w-]+)="([^"]*)"\]/g)];
+      return classes.every(c => this.classSet.has(c)) && attrs.every(([, name, value]) =>
+        (name.startsWith('data-') ? this.dataset[name.slice(5)] : this.attrs[name]) === value);
+    }
+    querySelectorAll(selector) { return this.descendants().filter(n => n.matches(selector)); }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    addEventListener(type, fn, options) {
+      const capture = options === true || Boolean(options && options.capture);
+      this.listeners.push({ type, fn, capture });
+    }
+    focus(options) { this.focusCalls.push(options); globalThis.document.activeElement = this; }
+  }
+
+  const windowListeners = new Map();
+  globalThis.window = {
+    addEventListener(type, fn) { (windowListeners.get(type) || windowListeners.set(type, new Set()).get(type)).add(fn); },
+    removeEventListener(type, fn) { windowListeners.get(type)?.delete(fn); }
+  };
+  const body = new FakeNode('body');
+  globalThis.document = { createElement: tag => new FakeNode(tag), body, activeElement: body };
+  const fireWindow = (type, init) => {
+    const event = { type, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...init };
+    for (const fn of [...(windowListeners.get(type) || [])]) fn(event);
+    return event;
+  };
+  /** 捕获（根→目标）+ 冒泡（目标→根），尊重 stopPropagation。 */
+  const dispatch = (target, type, init = {}) => {
+    const event = {
+      type, target, defaultPrevented: false, stopped: false, ...init,
+      preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() { this.stopped = true; }
+    };
+    const path = [];
+    for (let n = target; n; n = n.parentNode) path.push(n);
+    for (const node of [...path].reverse()) {
+      for (const l of node.listeners) if (l.type === type && l.capture && !event.stopped) l.fn(event);
+    }
+    for (const node of path) {
+      for (const l of node.listeners) if (l.type === type && !l.capture && !event.stopped) l.fn(event);
+    }
+    return event;
+  };
+
+  const selected = [];
+  const expanded = [];
+  const container = new FakeNode('div');
+  body.appendChild(container);
+  const renderWith = (activeSource) => SiteTabs.render(container,
+    SiteTabs.resolveLayout({ visibleSites: allVisible, activeSource, latestBySite: {} }), {
+      assetsBase: '/icons',
+      onSelectSite: site => selected.push(site),
+      onExpandGroup: (group, rep) => expanded.push([group, rep])
+    });
+  const tabOf = source => container.querySelector(`.category-tab[data-source="${source}"]`);
+  const chipOf = group => container.querySelector(`.tab-group-chip[data-group="${group}"]`);
+  const openGroup = () => container.querySelector('.tab-group.is-open');
+
+  // —— 焦点 ——
+  renderWith('mydrama');
+  const before = tabOf('netshort');
+  before.focus();
+  renderWith('mydrama');
+  const after = tabOf('netshort');
+  check('H1 焦点在组内图标上：重建后回到同一站点的新按钮',
+    after !== before && document.activeElement === after, `active=${document.activeElement?.dataset?.source || document.activeElement?.tagName}`);
+  check('H1b 找回焦点不滚动页面（preventScroll）', after.focusCalls.at(-1)?.preventScroll === true, JSON.stringify(after.focusCalls));
+
+  chipOf('video').focus();
+  renderWith('mydrama');
+  check('H2 焦点在收起胶囊上、重建后仍收起：回到同组的新胶囊',
+    document.activeElement === chipOf('video'), `active=${document.activeElement?.dataset?.group}`);
+
+  chipOf('video').focus();
+  renderWith('imdb');   // 点胶囊＝展开该组并选中代表站点
+  check('H3 焦点在胶囊上、该组已展开：落到活动图标上',
+    document.activeElement === tabOf('imdb') && tabOf('imdb').classList.contains('active'),
+    `active=${document.activeElement?.dataset?.source}`);
+
+  const outside = new FakeNode('input');
+  body.appendChild(outside);
+  outside.focus();
+  renderWith('imdb');
+  check('H4 焦点不在标签条里：重建不抢焦点', document.activeElement === outside, '');
+
+  // —— 拖动跨重建 ——
+  renderWith('mydrama');
+  const pointerdownListeners = () => container.listeners.filter(l => l.type === 'pointerdown').length;
+  const clickCaptureListeners = () => container.listeners.filter(l => l.type === 'click' && l.capture).length;
+  check('H5 拖动监听挂在容器上且只挂一次（多次重建不累积）',
+    pointerdownListeners() === 1 && clickCaptureListeners() === 1, `pointerdown=${pointerdownListeners()} click=${clickCaptureListeners()}`);
+
+  const firstGroup = openGroup();
+  dispatch(tabOf('reelshort'), 'pointerdown', { clientX: 100, button: 0, pointerType: 'mouse' });
+  fireWindow('pointermove', { clientX: 80 });             // 位移 20px ＞ 阈值：锁定为拖动
+  check('H6 前提：拖动中展开组跟手（scrollLeft = 起点 + 20）并加 is-dragging',
+    firstGroup.scrollLeft === 20 && firstGroup.classList.contains('is-dragging'), `scrollLeft=${firstGroup.scrollLeft}`);
+
+  renderWith('mydrama');                                  // 抓取期间的去抖重渲染
+  const rebuilt = openGroup();
+  check('H7 前提：重建换了新的展开组节点，横向位置原样保住', rebuilt !== firstGroup && rebuilt.scrollLeft === 20,
+    `same=${rebuilt === firstGroup} scrollLeft=${rebuilt.scrollLeft}`);
+  fireWindow('pointermove', { clientX: 60 });
+  check('H8 重建后继续拖：写到当前（新）展开组上，条子仍跟手',
+    rebuilt.scrollLeft === 40 && rebuilt.classList.contains('is-dragging'), `new=${rebuilt.scrollLeft} old=${firstGroup.scrollLeft}`);
+
+  fireWindow('pointerup', {});
+  check('H9 松手后当前展开组去掉 is-dragging、window 监听全部卸掉',
+    !rebuilt.classList.contains('is-dragging') && ['pointermove', 'pointerup', 'pointercancel'].every(t => !windowListeners.get(t)?.size), '');
+  selected.length = 0;
+  const swallowed = dispatch(tabOf('reelshort'), 'click');
+  check('H10 重建后拖完那一下的 click 仍被吞掉（不误切站点）', selected.length === 0 && swallowed.defaultPrevented,
+    JSON.stringify(selected));
+
+  dispatch(tabOf('netshort'), 'pointerdown', { clientX: 50, button: 0, pointerType: 'mouse' });
+  fireWindow('pointermove', { clientX: 52 });              // 不足阈值
+  fireWindow('pointerup', {});
+  dispatch(tabOf('netshort'), 'click');
+  check('H11 原地点一下仍是选站', JSON.stringify(selected) === '["netshort"]', JSON.stringify(selected));
+
+  selected.length = 0;
+  dispatch(chipOf('video'), 'pointerdown', { clientX: 10, button: 0, pointerType: 'mouse' });
+  fireWindow('pointermove', { clientX: 90 });
+  check('H12 在收起胶囊上按住拖不起拖（只有展开组可拖）',
+    !windowListeners.get('pointermove')?.size && openGroup().scrollLeft === 40, `scrollLeft=${openGroup().scrollLeft}`);
+  dispatch(chipOf('video'), 'click');
+  check('H12b 胶囊点击照常展开', JSON.stringify(expanded.at(-1)) === '["video","imdb"]', JSON.stringify(expanded));
+
+  // 拖到标签条外松手：没有 click 可吞，拦截标记残留。拦截器现在挂在整条容器上，
+  // 接下来点胶囊（不在展开组里、不起拖）也必须先清掉它，否则这一下被吞
+  expanded.length = 0;
+  dispatch(tabOf('reelshort'), 'pointerdown', { clientX: 100, button: 0, pointerType: 'mouse' });
+  fireWindow('pointermove', { clientX: 20 });
+  fireWindow('pointerup', {});
+  dispatch(chipOf('video'), 'pointerdown', { clientX: 10, button: 0, pointerType: 'mouse' });
+  fireWindow('pointerup', {});
+  dispatch(chipOf('video'), 'click');
+  check('H13 拖到条外松手后再点胶囊：不被残留的拦截标记吞掉', JSON.stringify(expanded) === '[["video","imdb"]]',
+    JSON.stringify(expanded));
+
+  // 同样拖到条外松手，接着用键盘（Tab 到图标按 Enter）选站：键盘合成的 click 没有 pointerdown
+  // 先清标记，detail 为 0，不能被当成「拖完松手那一下」吞掉
+  selected.length = 0;
+  dispatch(tabOf('reelshort'), 'pointerdown', { clientX: 100, button: 0, pointerType: 'mouse' });
+  fireWindow('pointermove', { clientX: 20 });
+  fireWindow('pointerup', {});
+  const keyboardClick = dispatch(tabOf('netshort'), 'click', { detail: 0 });
+  check('H14 拖到条外松手后键盘 Enter 选站：不被残留的拦截标记吞掉',
+    JSON.stringify(selected) === '["netshort"]' && !keyboardClick.defaultPrevented, JSON.stringify(selected));
+
+  delete globalThis.document;
+  delete globalThis.window;
+}
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

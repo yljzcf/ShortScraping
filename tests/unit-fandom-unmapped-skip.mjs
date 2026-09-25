@@ -7,8 +7,10 @@ import './bootstrap.cjs';
 // /movie/ 页 fixture 内嵌（原 tmp/rs-movie.html 真实存档已丢失，2026-08-02 按
 // 其关键结构重建；fixture 一律内嵌，不再依赖外部文件）。
 // F5–F7 守临时键前缀的单一真源 src/shared/scrape-rules.js（内容侧闸门与后台存量清理共用）。
+// F8–F10 守映射后命中存量（审查 fandom-refetch-every-run）与主站页跳转校验（reelshort-redirect-overwrites-url）。
 // 用法：node tests/unit-fandom-unmapped-skip.mjs
 import fs from 'node:fs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const FANDOM_URL = 'https://www.reelshort.com/fandom/';
 const BOOK_ID = 'abcdefabcdefabcdefabcdef';
@@ -34,24 +36,18 @@ const ARTICLES = [
 // ---------- chrome / window / document / fetch / DOMParser 桩 ----------
 const rawStore = { dramas: [] };
 const listeners = [];
+const saveCalls = [];
+const movieFetches = [];
+let movieRedirect = null;   // 非 null 时 /movie/ 请求「跳到」这个地址（200）
 
 globalThis.chrome = {
-  storage: {
-    local: {
-      async get() {
-        await Promise.resolve();
-        return {
-          dramas: structuredClone(rawStore.dramas),
-          urlTags: [{ urlPattern: FANDOM_URL, tags: ['ReelShort', 'fandom'] }]
-        };
-      }
-    }
-  },
   runtime: {
     onMessage: { addListener(fn) { listeners.push(fn); } },
     async sendMessage(message) {
       await Promise.resolve();
+      if (message?.action === 'getScrapeContext') return scrapeContextReply(rawStore.dramas, [{ urlPattern: FANDOM_URL, tags: ['ReelShort', 'fandom'] }]);
       if (message?.action === 'saveDrama') {
+        saveCalls.push(structuredClone(message.drama));
         const dup = rawStore.dramas.some(d => d.itemId === message.drama.itemId);
         if (!dup) rawStore.dramas.push(structuredClone(message.drama));
         return { success: true, saved: !dup };
@@ -113,7 +109,10 @@ globalThis.DOMParser = class {
 
 globalThis.fetch = async (url) => {
   // 映射成功后适配器会二次请求 /movie/ 页取 chapter_id：回真实 movie 页 HTML
-  if (url.includes('/movie/')) return { ok: true, url, text: async () => MOVIE_HTML };
+  if (url.includes('/movie/')) {
+    movieFetches.push(url);
+    return { ok: true, url: movieRedirect || url, text: async () => MOVIE_HTML };
+  }
   const marker = url.includes('unmapped-article') ? 'MAPPED-NO' : 'MAPPED-YES';
   return { ok: true, url, text: async () => `<html>${marker}</html>` };
 };
@@ -151,6 +150,49 @@ check('F3 未映射条目被闸门跳过（库中无 rsf- 临时键）',
 check('F4 映射条目 genres 取 /movie/ 页 tag_list（v1.5.3，与取 chapter_id 同一请求）',
   JSON.stringify(saved[0]?.genres) === JSON.stringify(['Fantasy', 'Secret Identity']),
   JSON.stringify(saved[0]?.genres));
+
+// ---------- F8–F10：映射后命中存量不再当新卡处理；主站页跳到别处不采 ----------
+// 重跑一轮：换一个新 window 让防重注入护栏放行，清掉上一轮的监听器与计数
+async function rerun({ dramas, redirect = null }) {
+  rawStore.dramas = structuredClone(dramas);
+  listeners.length = 0;
+  saveCalls.length = 0;
+  movieFetches.length = 0;
+  movieRedirect = redirect;
+  globalThis.window = { location: { href: FANDOM_URL, hostname: 'www.reelshort.com', pathname: '/fandom/', search: '', origin: 'https://www.reelshort.com' } };
+  console.log = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origLog(...a); };
+  console.warn = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origWarn(...a); };
+  (0, eval)(contentSrc);
+  const response = await new Promise(resolve => {
+    for (const fn of listeners) fn({ action: 'scrape' }, { tab: { id: 1 } }, resolve);
+  });
+  console.log = origLog; console.warn = origWarn;
+  return response;
+}
+const EXISTING = { id: 'old', itemId: `rs${BOOK_ID}`, title: 'Mapped Drama', source: 'reelshort', tags: ['ReelShort', 'TOP'], status: 'trans', genres: ['Old'] };
+{
+  const response = await rerun({ dramas: [EXISTING] });
+  check('F8 映射到已有 genres 的存量 → 主站 /movie/ 零请求、零 saveDrama，库里原记录不动',
+    response?.success === true && movieFetches.length === 0 && saveCalls.length === 0
+      && rawStore.dramas.length === 1 && JSON.stringify(rawStore.dramas[0]) === JSON.stringify(EXISTING),
+    JSON.stringify({ movieFetches, saveCalls: saveCalls.map(d => d.itemId), n: rawStore.dramas.length }));
+}
+{
+  const response = await rerun({ dramas: [{ ...EXISTING, genres: [] }] });
+  check('F9 映射到缺 genres 的存量 → 一次 /movie/ 请求、一次带 tag_list 的 saveDrama（后台只合并 genres）',
+    response?.success === true && movieFetches.length === 1 && saveCalls.length === 1
+      && saveCalls[0].itemId === `rs${BOOK_ID}` && JSON.stringify(saveCalls[0].genres) === JSON.stringify(['Fantasy', 'Secret Identity']),
+    JSON.stringify({ movieFetches, saveCalls: saveCalls.map(d => [d.itemId, d.genres]) }));
+}
+{
+  // 下架 / 地区不可用的剧被 302 到首页（200）：chapter_id 与 tag_list 都不是这部剧的，不采
+  const response = await rerun({ dramas: [], redirect: 'https://www.reelshort.com/' });
+  const mapped = rawStore.dramas.find(d => d.itemId === `rs${BOOK_ID}`);
+  check('F10 主站 /movie/ 页跳到首页 → url 保留 /full-episodes/ 全集页兜底，genres 不取跳转页的',
+    response?.success === true && mapped?.url === `https://www.reelshort.com/full-episodes/mapped-drama-${BOOK_ID}`
+      && JSON.stringify(mapped?.genres) === '[]',
+    JSON.stringify({ url: mapped?.url, genres: mapped?.genres }));
+}
 
 // ---------- F5–F7：临时键前缀单一真源 ScrapeRules（审查 cross-file-sync-constants） ----------
 // 内容侧闸门与后台存量清理以前各写一份前缀、靠注释提醒同步；现在都经 ScrapeRules.isUnmappedFandomKey

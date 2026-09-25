@@ -516,17 +516,18 @@
       <button class="btn btn-primary" id="btnReloadTop">重新读取配置</button>
     </header>
 
-    <nav class="tabs" aria-label="设置分类">
-      <button class="tab-btn active" data-tab="config">📄 配置文件</button>
-      <button class="tab-btn" data-tab="subscriptions">🌐 网页订阅</button>
-      <button class="tab-btn" data-tab="schedule">⏰ 定时任务</button>
-      <button class="tab-btn" data-tab="translate">🌍 翻译接口</button>
-      <button class="tab-btn" data-tab="lark">🕊️ Lark 推送</button>
-      <button class="tab-btn" data-tab="archive">💾 数据存档</button>
+    <!-- 选中态由 settings.js 的 switchTab 同步 class 与 aria-selected -->
+    <nav class="tabs" role="tablist" aria-label="设置分类">
+      <button class="tab-btn active" data-tab="config" id="tabBtn-config" role="tab" aria-controls="tab-config" aria-selected="true">📄 配置文件</button>
+      <button class="tab-btn" data-tab="subscriptions" id="tabBtn-subscriptions" role="tab" aria-controls="tab-subscriptions" aria-selected="false">🌐 网页订阅</button>
+      <button class="tab-btn" data-tab="schedule" id="tabBtn-schedule" role="tab" aria-controls="tab-schedule" aria-selected="false">⏰ 定时任务</button>
+      <button class="tab-btn" data-tab="translate" id="tabBtn-translate" role="tab" aria-controls="tab-translate" aria-selected="false">🌍 翻译接口</button>
+      <button class="tab-btn" data-tab="lark" id="tabBtn-lark" role="tab" aria-controls="tab-lark" aria-selected="false">🕊️ Lark 推送</button>
+      <button class="tab-btn" data-tab="archive" id="tabBtn-archive" role="tab" aria-controls="tab-archive" aria-selected="false">💾 数据存档</button>
     </nav>
 
     <main>
-      <section class="tab-panel active" id="tab-config">
+      <section class="tab-panel active" id="tab-config" role="tabpanel" aria-labelledby="tabBtn-config">
         <div class="section">
           <div class="section-header">
             <div class="section-title"><span>📄</span> 配置文件</div>
@@ -553,7 +554,7 @@
         </div>
       </section>
 
-      <section class="tab-panel" id="tab-subscriptions">
+      <section class="tab-panel" id="tab-subscriptions" role="tabpanel" aria-labelledby="tabBtn-subscriptions">
         <div class="section">
           <div class="section-header">
             <div>
@@ -587,7 +588,7 @@
         </div>
       </section>
 
-      <section class="tab-panel" id="tab-schedule">
+      <section class="tab-panel" id="tab-schedule" role="tabpanel" aria-labelledby="tabBtn-schedule">
         <div class="section">
           <div class="section-header">
             <div>
@@ -642,7 +643,7 @@
         </div>
       </section>
 
-      <section class="tab-panel" id="tab-translate">
+      <section class="tab-panel" id="tab-translate" role="tabpanel" aria-labelledby="tabBtn-translate">
         <div class="section">
           <div class="section-header">
             <div>
@@ -657,18 +658,18 @@
 
           <div class="grid">
             <div class="form-field">
-              <label>翻译模式</label>
+              <label for="translateMode">翻译模式</label>
               <select id="translateMode">
                 <option value="api">API 翻译</option>
                 <option value="ai">AI 翻译</option>
               </select>
             </div>
             <div class="form-field">
-              <label>每批条数上限</label>
+              <label for="batchSize">每批条数上限</label>
               <input type="number" id="batchSize" min="1" max="10" step="1" placeholder="10">
             </div>
             <div class="form-field">
-              <label>请求超时（秒）</label>
+              <label for="requestTimeoutSec">请求超时（秒）</label>
               <input type="number" id="requestTimeoutSec" min="1" step="1" placeholder="10">
             </div>
           </div>
@@ -677,7 +678,7 @@
             <div class="section-title"><span>🔌</span> API 模式</div>
             <p class="help-text">免费 API 或兼容翻译接口。</p>
             <div class="form-field">
-              <label>API Endpoint</label>
+              <label for="apiEndpoint">API Endpoint</label>
               <input type="url" id="apiEndpoint" placeholder="https://api.mymemory.translated.net/get">
             </div>
           </div>
@@ -687,20 +688,20 @@
             <p class="help-text">AI 接口按 OpenAI 兼容 Chat Completions 格式调用，请妥善保管 API Key，避免提交真实密钥。</p>
             <div class="grid">
               <div class="form-field">
-                <label>AI Endpoint</label>
+                <label for="aiEndpoint">AI Endpoint</label>
                 <input type="url" id="aiEndpoint" placeholder="https://api.example.com/chat/completions">
               </div>
               <div class="form-field">
-                <label>AI API Key</label>
+                <label for="aiApiKey">AI API Key</label>
                 <input type="password" id="aiApiKey" placeholder="sk-xxxx">
               </div>
               <div class="form-field">
-                <label>AI Model</label>
+                <label for="aiModel">AI Model</label>
                 <input type="text" id="aiModel" placeholder="deepseek-v4-pro">
               </div>
             </div>
             <div class="form-field" style="margin-top: 12px;">
-              <label>前置提示词</label>
+              <label for="aiPrefixPrompt">前置提示词</label>
               <textarea id="aiPrefixPrompt" rows="5" placeholder="请输入发送给 AI 的翻译前置提示词"></textarea>
               <p class="help-text">只需描述翻译风格/人设；翻译的输入输出 JSON 格式与批量对应关系由程序自动处理，无需在此约定格式。</p>
             </div>
@@ -709,7 +710,7 @@
           <div class="section" style="margin-top: 14px; margin-bottom: 0;">
             <div class="section-title"><span>⚙️</span> 执行参数</div>
             <div class="form-field">
-              <label>单条延迟（毫秒）</label>
+              <label for="delayMs">单条延迟（毫秒）</label>
               <input type="number" id="delayMs" min="0" step="50" placeholder="200">
             </div>
           </div>
@@ -721,7 +722,7 @@
         </div>
       </section>
 
-      <section class="tab-panel" id="tab-lark">
+      <section class="tab-panel" id="tab-lark" role="tabpanel" aria-labelledby="tabBtn-lark">
         <div class="section">
           <div class="section-header">
             <div>
@@ -735,12 +736,12 @@
           </div>
 
           <div class="form-field">
-            <label>Webhook 地址</label>
+            <label for="larkWebhookUrl">Webhook 地址</label>
             <input type="url" id="larkWebhookUrl" placeholder="多维表格工作流 →「接收到 webhook 时」触发器提供的地址">
           </div>
           <div class="grid" style="margin-top: 12px;">
             <div class="form-field">
-              <label>请求超时（秒）</label>
+              <label for="larkRequestTimeoutSec">请求超时（秒）</label>
               <input type="number" id="larkRequestTimeoutSec" min="1" step="1" placeholder="15">
             </div>
           </div>
@@ -771,7 +772,7 @@
           </div>
 
           <div class="form-field">
-            <label>群机器人 Webhook 地址</label>
+            <label for="larkBotWebhookUrl">群机器人 Webhook 地址</label>
             <input type="url" id="larkBotWebhookUrl" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/… 或 open.larksuite.com/…">
           </div>
           <label class="subscription-option" style="margin-top: 12px; max-width: 420px;">
@@ -785,11 +786,11 @@
             <p class="help-text">卡片里的图必须是 <code>img_key</code>，外链 URL 塞不进去（会被整条拒收，<code>ErrCode 11310</code>）。填入<strong>飞书自建应用</strong>的凭据后，扩展会在推送前把封面上传到飞书换取 <code>img_key</code>，卡片即可带真封面图（满宽原样，不裁不缩）。<br><strong>这不是第二条推送通道</strong>——推送目标仍由上面的 Webhook 地址决定；<strong>img_key 跨云可用</strong>，在飞书租户上传的图推到 Lark 国际版群里也能正常显示（2026-09-12 实测）。<br>两个字段都填才带图，留空就发无图卡。应用需在<a href="https://open.feishu.cn/app" target="_blank" rel="noopener">开放平台</a>创建并开通 <code>im:resource</code>（上传图片）权限后发布版本。上传失败会自动降级发无图卡，不会因此丢掉推送。</p>
             <div class="grid" style="margin-top: 10px;">
               <div class="form-field">
-                <label>App ID</label>
+                <label for="larkFeishuAppId">App ID</label>
                 <input type="text" id="larkFeishuAppId" placeholder="cli_…">
               </div>
               <div class="form-field">
-                <label>App Secret</label>
+                <label for="larkFeishuAppSecret">App Secret</label>
                 <input type="password" id="larkFeishuAppSecret" placeholder="留空则不带封面图">
               </div>
             </div>
@@ -802,7 +803,7 @@
         </div>
       </section>
 
-      <section class="tab-panel" id="tab-archive">
+      <section class="tab-panel" id="tab-archive" role="tabpanel" aria-labelledby="tabBtn-archive">
         <div class="section">
           <div class="section-header">
             <div>
@@ -874,7 +875,7 @@
       </section>
     </main>
 
-    <div class="status" id="statusMsg"></div>
+    <div class="status" id="statusMsg" role="status" aria-live="polite"></div>
   </div>
 
   <script src="../shared/site-registry.js"></script>

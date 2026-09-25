@@ -8,6 +8,10 @@ import './bootstrap.cjs';
 //   S4    「从配置文件重载」＝以文件为准，同一次写清掉对应标记；tag.json 读失败时 tag 标记保留；
 //   S5-S7 自动清理回收站 pruneTrash：空时按钮隐藏；导出文件是「导入恢复」原样能吃的
 //         shortscraping-backup 形态（真跑一遍 handleImportFile 验证）；onChanged 跟随刷新。
+//   S10   提示条 last-write-wins：新消息清掉旧计时器，错误提示停留更久（settings-status-timer）；
+//   S11   无障碍：label 都关联到控件、分页是 tablist/tab/tabpanel 且 switchTab 同步 aria-selected、
+//         #statusMsg 是 role=status（settings-a11y-labels）；
+//   S12   fetchJsonFile 失败一律回落 fallback（原 throw 分支是死代码：调用点全都传了 fallback）。
 // 用法：node tests/unit-settings-guards.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -406,6 +410,126 @@ check('S7e 非 local 区域的变更忽略', externalUrlTagsCalls.length === 1, 
   check('S9i 四个保存入口都走 trySyncConfig，旧的 trySync*Config 已删除',
     ['/config/tag', '/config/trans', '/config/lark', '/config/cron'].every(route => src.includes(`trySyncConfig('${route}'`))
     && !/trySync(Tag|Trans|Lark|Cron)Config/.test(src), '');
+}
+
+// ---------- S10-S12：vm 跑真实 settings.js（只把 DOMContentLoaded 注册行换成导出内部函数） ----------
+async function settingsVm({ fetchImpl } = {}) {
+  const vm = await import('node:vm');
+  let now = 0;
+  let seq = 0;
+  const timers = new Map();
+  const context = vm.createContext({
+    SiteRegistry: require(path.join(root, 'src/shared/site-registry.js')),
+    TranslateConfig, ScheduleConfig, Lark, SubscriptionConfig,
+    UrlMatch: require(path.join(root, 'src/shared/url-match.js')),
+    console: { log() {}, warn() {}, error() {} },
+    document: { addEventListener() {} },
+    chrome: { runtime: { getURL: p => `chrome-extension://unit-test/${p}` } },
+    fetch: fetchImpl || (async () => { throw new TypeError('Failed to fetch'); }),
+    setTimeout(fn, ms = 0) { const id = ++seq; timers.set(id, { due: now + ms, fn }); return id; },
+    clearTimeout(id) { timers.delete(id); }
+  });
+  const marker = "document.addEventListener('DOMContentLoaded', init);";
+  if (!src.includes(marker)) throw new Error('settings.js 的 DOMContentLoaded 注册行已变，夹具需同步');
+  vm.runInContext(src.replace(marker, 'globalThis.fixture = { elements, showStatus, switchTab, fetchJsonFile };'), context);
+  /** 虚拟时钟推进到 t，按到期先后触发。 */
+  const advanceTo = (t) => {
+    for (;;) {
+      let next = null;
+      for (const entry of timers) if (entry[1].due <= t && (!next || entry[1].due < next[1].due)) next = entry;
+      if (!next) break;
+      timers.delete(next[0]);
+      now = next[1].due;
+      next[1].fn();
+    }
+    now = t;
+  };
+  return { fx: context.fixture, advanceTo };
+}
+
+{
+  const { fx, advanceTo } = await settingsVm();
+  const status = { textContent: '', className: 'status' };
+  fx.elements.status = status;
+  const shown = () => status.className.includes('show');
+
+  fx.showStatus('读取配置失败：config/trans.json 解析失败', false);
+  advanceTo(3000);
+  fx.showStatus('已保存翻译接口配置，并写回 config/trans.json', true);
+  advanceTo(4600);   // 第一条的 4.5s（旧实现唯一的时长）已过
+  check('S10a 4.5 秒内连发两条：后一条不被前一条的计时器提前收掉（last-write-wins）',
+    shown() && status.textContent.includes('已保存翻译接口配置') && status.className.includes('success'), status.className);
+  advanceTo(3000 + 4500);
+  check('S10b 成功提示按自己的时长（4.5 秒）收起', !shown(), status.className);
+
+  fx.showStatus('未取消订阅：写回 config/tag.json 失败（服务未启动）', false);
+  advanceTo(7500 + 6000);
+  check('S10c 错误提示停留更久（6 秒时仍在，给长原因留出读完的时间）', shown() && status.className.includes('error'), status.className);
+  advanceTo(7500 + 8000);
+  check('S10d 错误提示最终也会收起', !shown(), status.className);
+}
+
+// ---------- S11 无障碍 ----------
+{
+  const html = fs.readFileSync(path.join(root, 'src/settings/settings.html'), 'utf8');
+  const labels = [...html.matchAll(/<label\b([^>]*)>([\s\S]*?)<\/label>/g)];
+  const controlIds = new Set([...html.matchAll(/<(?:input|select|textarea)\b[^>]*\bid="([^"]+)"/g)].map(m => m[1]));
+  const orphan = labels.filter(([, attrs, inner]) => {
+    const target = attrs.match(/\bfor="([^"]+)"/)?.[1];
+    if (target) return !controlIds.has(target);
+    return !/<(?:input|select|textarea)\b/.test(inner);   // 包裹式写法
+  }).map(([whole]) => whole.replace(/\s+/g, ' ').slice(0, 60));
+  check('S11a 每个 <label> 都关联到控件（for 指向存在的 input/select/textarea，或包裹控件）',
+    labels.length >= 20 && orphan.length === 0, `labels=${labels.length} orphan=${JSON.stringify(orphan)}`);
+  for (const id of ['aiApiKey', 'larkFeishuAppSecret', 'larkWebhookUrl', 'larkBotWebhookUrl', 'translateMode']) {
+    check(`S11b 敏感/关键输入框 #${id} 有 label[for]`, html.includes(`<label for="${id}">`), '');
+  }
+
+  const nav = html.match(/<nav\b[^>]*class="tabs"[^>]*>([\s\S]*?)<\/nav>/);
+  const buttons = [...(nav?.[1] || '').matchAll(/<button\b([^>]*)>/g)].map(m => m[1]);
+  const attr = (attrs, name) => attrs.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
+  const badTabs = buttons.filter(a => {
+    const tab = attr(a, 'data-tab');
+    const panel = html.match(new RegExp(`<section\\b[^>]*\\bid="tab-${tab}"[^>]*>`))?.[0] || '';
+    return attr(a, 'role') !== 'tab' || attr(a, 'aria-controls') !== `tab-${tab}`
+      || !/\brole="tabpanel"/.test(panel) || attr(panel, 'aria-labelledby') !== attr(a, 'id')
+      || attr(a, 'aria-selected') !== String(/\bactive\b/.test(attr(a, 'class')));
+  });
+  check('S11c nav 是 role=tablist；每个分页按钮 role=tab、aria-controls 指向 role=tabpanel 的面板、初始 aria-selected 与 active 一致',
+    /role="tablist"/.test(nav?.[0] || '') && buttons.length === 6 && badTabs.length === 0, JSON.stringify(badTabs));
+  const statusDiv = html.match(/<div\b[^>]*id="statusMsg"[^>]*>/)?.[0] || '';
+  check('S11d #statusMsg 是 role=status + aria-live=polite（读屏播报保存结果）',
+    /role="status"/.test(statusDiv) && /aria-live="polite"/.test(statusDiv), statusDiv);
+
+  const { fx } = await settingsVm();
+  const fakeButton = tab => {
+    const attrs = {};
+    const classes = new Set();
+    return {
+      dataset: { tab }, attrs,
+      setAttribute: (k, v) => { attrs[k] = String(v); },
+      classList: { toggle: (n, on) => { if (on) classes.add(n); else classes.delete(n); } },
+      classes
+    };
+  };
+  fx.elements.tabs = ['config', 'lark', 'archive'].map(fakeButton);
+  fx.elements.panels = ['config', 'lark', 'archive'].map(t => ({ id: `tab-${t}`, classList: fakeButton(t).classList }));
+  fx.switchTab('lark');
+  check('S11e switchTab 同步 aria-selected（只有当前分页为 true）',
+    JSON.stringify(fx.elements.tabs.map(b => b.attrs['aria-selected'])) === '["false","true","false"]'
+    && fx.elements.tabs[1].classes.has('active'), JSON.stringify(fx.elements.tabs.map(b => b.attrs)));
+}
+
+// ---------- S12 fetchJsonFile ----------
+{
+  const { fx } = await settingsVm({ fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({}) }) });
+  let outcome;
+  try { outcome = { value: await fx.fetchJsonFile('config/nope.json') }; } catch (e) { outcome = { error: e.message }; }
+  check('S12a 读取失败一律回落 fallback（未传即 undefined），不再有抛错分支', 'value' in outcome && outcome.value === undefined,
+    JSON.stringify(outcome));
+  check('S12b 读取失败且传了 null：返回 null（「重新读取」据此判定该文件失败）', await fx.fetchJsonFile('config/nope.json', null) === null, '');
+  const calls = [...src.matchAll(/fetchJsonFile\(([^)]*)\)/g)].map(m => m[1]).filter(args => !/^fileName/.test(args));
+  check('S12c 调用点都显式传了 fallback', calls.length >= 9 && calls.every(args => args.split(',').length === 2), JSON.stringify(calls));
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

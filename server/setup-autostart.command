@@ -22,6 +22,20 @@ if [ -z "$NODE" ]; then
   echo "[ShortScraping] 未找到 Node.js，请先安装（brew install node）后重试。"
   exit 1
 fi
+# plist 原样记下这个路径，launchd 拉起失败（exec 不到文件）时 sync.log 里什么都没有，所以这里先把路径定稳：
+#   fnm 给的是会话级临时软链（fnm_multishells/<pid>_<ts>/bin/node），关掉终端就失效，解析到它指向的版本目录；
+#   Homebrew 的 /opt/homebrew/bin/node 是稳定软链，不能 realpath——解析到 Cellar/node/<版本> 反而在
+#   brew upgrade + cleanup 后失效；系统路径同样保持原样。
+case "$NODE" in
+  */fnm_multishells/*)
+    RESOLVED="$("$NODE" -e 'process.stdout.write(require("fs").realpathSync(process.argv[1]))' "$NODE" 2>/dev/null)"
+    [ -n "$RESOLVED" ] && NODE="$RESOLVED" ;;
+esac
+echo "[ShortScraping] 使用 Node.js：$NODE（$("$NODE" -v 2>/dev/null)）"
+case "$NODE" in
+  */.nvm/versions/*|*/fnm/*|*/fnm_multishells/*)
+    echo "[ShortScraping] 提示：plist 记录的是带版本号的 Node 路径，升级、切换或卸载该版本后请重新运行本脚本，否则开机自启会悄悄失效。" ;;
+esac
 
 xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
@@ -97,12 +111,23 @@ else
 fi
 rm -rf "$BUILD_DIR"
 
-# 先停掉前台运行的实例（否则端口被占），再以 LaunchAgent 重新加载（重复运行本脚本也安全）
-"$NODE" server/tools/stop.js >/dev/null 2>&1
+# 先停掉前台运行的实例（否则端口被占），再以 LaunchAgent 重新加载（重复运行本脚本也安全）。
+# 清空 SHORTSCRAPING_PORT：plist 不带它，后台服务固定在 31919，要腾的就是这个端口
+SHORTSCRAPING_PORT= "$NODE" server/tools/stop.js >/dev/null 2>&1
+# bootout 是异步收尾的：job 还没卸干净就 bootstrap 会报「Bootstrap failed: 5: Input/output error」，
+# 而服务已被上面停掉，用户手上一个服务都没有。等 launchctl print 查不到它（最多约 2.5 秒）再注册，
+# 仍失败则隔 1 秒重试一次
 launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1
+for _ in 1 2 3 4 5; do
+  launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break
+  sleep 0.5
+done
 if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
-  echo "[ShortScraping] 注册失败：launchctl bootstrap 返回错误。"
-  exit 1
+  sleep 1
+  if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
+    echo "[ShortScraping] 注册失败：launchctl bootstrap 返回错误（多为上一个后台服务尚未完全卸载），可再运行一次本脚本。"
+    exit 1
+  fi
 fi
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do

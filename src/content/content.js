@@ -12,7 +12,8 @@
   window.__dramamoContentLoaded = true;
 
   // 与后台共用的采集口径（src/shared/scrape-rules.js，manifest 与后台强制注入都排在本文件之前）：
-  // fandom 临时键前缀、类型标签清洗、Shortical sitemap 解析，两边不再各写一份
+  // fandom 临时键前缀、类型标签清洗、Shortical sitemap 解析，两边不再各写一份。
+  // 订阅判定 UrlMatch.matchSubscription 同理来自 src/shared/url-match.js（见 findSubscriptionForUrl）
   const { cleanGenres, isUnmappedFandomKey, parseShorticalSitemap } = ScrapeRules;
 
   // 抓取进行中护栏：后台兜底路径（waitForTabComplete 超时 → 强制注入 →
@@ -24,6 +25,18 @@
   let scrapeInFlight = null;
 
   /**
+   * 抓取唯一入口：'scrape' 消息与页面上的抓取按钮都走这里。按钮以前直接调 scrapePage，
+   * 用户在后台抓取标签页里恰好抓取进行中点一下，就会两轮并跑、互相分走新增卡、计数失真，
+   * 模块级的存量快照也会被另一轮整个换掉（审查 button-bypasses-inflight-guard）。
+   */
+  function runScrape() {
+    if (!scrapeInFlight) {
+      scrapeInFlight = scrapePage().finally(() => { scrapeInFlight = null; });
+    }
+    return scrapeInFlight;
+  }
+
+  /**
    * 初始化
    */
   function init() {
@@ -31,11 +44,8 @@
 
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       if (request.action === 'scrape') {
-        if (!scrapeInFlight) {
-          scrapeInFlight = scrapePage().finally(() => { scrapeInFlight = null; });
-        }
-        scrapeInFlight.then(data => {
-          sendResponse({ success: true, data: data });
+        runScrape().then(result => {
+          sendResponse({ success: true, data: result.dramas });
         }).catch(e => {
           console.error('[ShortScraping] 抓取出错:', e);
           sendResponse({ success: false, error: e.message });
@@ -223,12 +233,15 @@
   }
 
   /**
-   * 取单个 appId 的 appdetails 数据（指定语言）。失败/无数据返回 null。
+   * 取单个 appId 的 appdetails 数据（指定语言）。该语言无数据（success:false）返回 null；
+   * **HTTP 非 2xx 抛错**（429 限流 / 5xx），由 fetchSteamDetail 的 catch 收口成整卡本轮跳过、
+   * 下轮重试。以前两者都返回 null：中文档一被 429 就当成「无官方中文」，卡片以 new 入库交
+   * AI 翻译，之后去重命中只回填 genres，官方中文名与简介再也补不回来（审查 steam-zh-429-permanent-loss）。
    */
   async function fetchSteamAppDetails(appId, lang) {
     const api = `https://store.steampowered.com/api/appdetails?appids=${appId}&l=${lang}&cc=us`;
     const response = await fetchWithTimeout(api, { headers: { 'Accept': 'application/json' } });
-    if (!response.ok) return null;
+    if (!response.ok) throw new Error(`Steam appdetails HTTP ${response.status}（l=${lang}）`);
     const json = await response.json();
     const entry = json && json[appId];
     return (entry && entry.success && entry.data) ? entry.data : null;
@@ -236,16 +249,26 @@
 
   /**
    * 用 Steam 官方 appdetails 取英文原名/简介 + 官方简体中文名/简介（同源，绕开年龄门）。
-   * 英文取不到（成人专属/受限/不可用）→ 返回 null 跳过。
+   * 英文取不到（成人专属/受限/不可用）→ 返回 null 跳过；任一语言档 HTTP 失败 → 整卡本轮跳过。
    * 有官方中文则直接采用并标记已翻译；完全无中文则保持 new，交给翻译线 AI 兜底。
+   * opts.genresOnly（存量 genres 回填用）：英文档填好 genres 即返回，不再请求中文档——
+   * 后台对去重命中的存量只合并 genres，那次请求的结果用不上，还白白叠加限流压力
+   * （审查 steam-backfill-extra-request）。
    */
-  async function fetchSteamDetail(drama) {
+  async function fetchSteamDetail(drama, opts = {}) {
     const appId = drama.itemId; // Steam 项的 appId 存在 itemId 字段
     try {
       const en = await fetchSteamAppDetails(appId, 'english');
       if (!en) {
         console.log(`[ShortScraping] Steam appdetails 无数据，跳过: ${drama.title} (${appId})`);
         return null;
+      }
+      // 官方内容类型标签（Action/Adventure/RPG…宽门类）。更细的商店用户标签在
+      // 有年龄门的商店页里，appdetails 拿不到，不碰。
+      const genres = cleanGenres((en.genres || []).map(g => g && g.description));
+      if (opts.genresOnly) {
+        drama.genres = genres;
+        return drama;
       }
 
       const enName = (en.name || '').trim();
@@ -268,9 +291,7 @@
 
       if (enName) drama.title = enName;        // 英文原名（弹窗里的“（原名）”）
       drama.description = enDesc;
-      // 官方内容类型标签（Action/Adventure/RPG…宽门类）。更细的商店用户标签在
-      // 有年龄门的商店页里，appdetails 拿不到，不碰。
-      drama.genres = cleanGenres((en.genres || []).map(g => g && g.description));
+      drama.genres = genres;
       if (en.header_image) drama.poster = en.header_image;
 
       // 采用 Steam 官方中文。**官方中文齐全才跳过 AI 翻译**：只有一半时（商店有
@@ -326,8 +347,9 @@
       return buildSteamDramaSkeleton(id, index, tags);
     },
     genresFromDetail: true,    // genres 权威源在 appdetails 接口（回填路径需请求详情）
-    async fetchDetail(drama) {
-      return await fetchSteamDetail(drama);
+    async fetchDetail(drama, opts) {
+      // opts 只有回填路径会传（{ genresOnly: true }），其余适配器都不认第二个参数
+      return await fetchSteamDetail(drama, opts);
     }
   };
 
@@ -940,12 +962,11 @@
       btn.disabled = true;
 
       try {
-        const data = await scrapePage();
-        // scrapePage 返回的就是本轮实际入库的新卡；再按 status 过滤会把平台自带
-        // 中文（Steam/MyDrama 直接 trans）的新卡漏计，与后台通知/弹窗 toast 口径不一致
-        const newCount = data.length;
-
-        btn.textContent = `✅ 新增 ${newCount} 部`;
+        const { subscribed, dramas } = await runScrape();
+        // dramas 就是本轮实际入库的新卡；再按 status 过滤会把平台自带
+        // 中文（Steam/MyDrama 直接 trans）的新卡漏计，与后台通知/弹窗 toast 口径不一致。
+        // 当前页不在订阅里时明说，不再显示一个误导的「新增 0 部」
+        btn.textContent = subscribed ? `✅ 新增 ${dramas.length} 部` : '⚠️ 当前页不在订阅中';
       } catch (e) {
         console.error('[ShortScraping] 抓取失败:', e);
         btn.textContent = '❌ 抓取失败';
@@ -956,34 +977,58 @@
     document.body.appendChild(btn);
   }
 
-  // 本轮抓取的存量条目快照（itemId → 记录），scrapePage 开轮时刷新；fandom 详情
-  // 路径用它判断「库中已有 genres」以跳过代理请求（adapter.fetchDetail 签名不带
-  // 上下文，走模块级快照传递）
+  // 本轮抓取的存量快照（itemId → 库中是否已有 genres），scrapePage 开轮时换成后台给的
+  // 那份、本轮新存的卡也记进来；fandom 详情路径用它判断「库中已有 genres」以跳过
+  // 主站 / 代理请求（adapter.fetchDetail 签名不带上下文，走模块级快照传递）。
+  // 一次只跑一轮（runScrape），不会被并发轮整个换掉
   let existingDramaSnapshot = new Map();
+
+  const hasGenreTags = drama => Array.isArray(drama.genres) && drama.genres.length > 0;
+
+  /**
+   * 抓取上下文向后台要（审查 storage-secrets-exposed-to-content / full-table-read-per-scrape）：
+   * 订阅配置 + 库中已有条目的精简列表 [[itemId, 是否已有 genres], ...]，由后台从 dramas 缓存
+   * 算出。内容脚本跑在第三方站点的渲染进程里，**不再读写扩展的 storage**——那里同时放着
+   * AI Key、飞书 AppSecret 与 webhook，直连 storage 还能绕过后台 onMessage 的发送方闸门；
+   * 以前每个抓取标签页开轮还要把整张 dramas（含全部简介与译文）跨进程反序列化一遍，
+   * 却只用到 itemId 和「有没有 genres」。后台没应答或应答失败即本轮失败（抛出，由调用方收口）。
+   */
+  async function requestScrapeContext() {
+    const response = await chrome.runtime.sendMessage({ action: 'getScrapeContext' });
+    if (!response?.success) {
+      throw new Error(response?.error || '后台未返回抓取上下文');
+    }
+    const known = new Map();
+    for (const entry of Array.isArray(response.known) ? response.known : []) {
+      if (Array.isArray(entry) && entry[0]) known.set(String(entry[0]), entry[1] === true);
+    }
+    return { urlTags: Array.isArray(response.urlTags) ? response.urlTags : [], known };
+  }
 
   /**
    * 存量条目 genres 回填（v1.5.3）：去重命中的在榜条目若库中还没有类型标签，
    * 用与新条目完全相同的提取路径补一份，经 saveDrama 消息在后台队列内只合并
    * genres 一个键（其余字段一律不动，见 background saveDramaRecord）。
-   * 成本闸门：库中已有 genres → 零成本返回；列表提取失败 → 返回；适配器标
+   * 成本闸门：库中已有 genres（hasGenres 为 true）→ 零成本返回；列表提取失败 → 返回；适配器标
    * genresFromDetail（genres 权威源在详情页）才发详情请求（带与新条目同款
-   * 200ms 节流）；最终仍为空 → 不发消息（站点确无标签的条目零消息、下轮重试）。
+   * 200ms 节流，并传 { genresOnly: true }：后台只合并 genres，Steam 据此省掉中文档那次请求）；
+   * 最终仍为空 → 不发消息（站点确无标签的条目零消息、下轮重试）。
    * 详情失败时与新条目路径同语义：有列表级兜底值（如 ReelShort theme）就用，
    * 彻底为空则本轮放弃、不落任何标记，下轮抓取自动重试，自愈。
    */
-  async function maybeBackfillGenres(adapter, item, tags, id, index, existingDrama) {
+  async function maybeBackfillGenres(adapter, item, tags, id, index, hasGenres) {
     try {
-      if (!existingDrama || (Array.isArray(existingDrama.genres) && existingDrama.genres.length > 0)) return;
+      if (hasGenres !== false) return;
 
       const drama = adapter.extractBasic(item, tags, id, index);
       if (!drama) return;
 
       if (adapter.genresFromDetail) {
-        await adapter.fetchDetail(drama);
+        await adapter.fetchDetail(drama, { genresOnly: true });
         await new Promise(r => setTimeout(r, 200));
       }
 
-      if (Array.isArray(drama.genres) && drama.genres.length > 0) {
+      if (hasGenreTags(drama)) {
         await saveSingleDrama(drama);
         console.log(`[ShortScraping] ♻️ 已回填类型标签: ${drama.title}（${drama.genres.join(', ')}）`);
       }
@@ -993,19 +1038,20 @@
   }
 
   /**
-   * 抓取当前页面 - 站点无关骨架，逐条保存。
+   * 抓取当前页面 - 站点无关骨架，逐条保存。返回 { subscribed, dramas }：dramas 是本轮
+   * 实际入库的新卡（'scrape' 消息只回它）；subscribed 为 false 表示当前页不在订阅里，
+   * 按钮据此提示，而不是显示「新增 0 部」。
    */
   async function scrapePage() {
     console.log('[ShortScraping] 开始抓取页面...');
 
-    const { dramas: existing = [], urlTags } = await chrome.storage.local.get(['dramas', 'urlTags']);
-    const finalUrlTags = Array.isArray(urlTags) ? urlTags : [];
+    const { urlTags, known } = await requestScrapeContext();
 
     const currentUrl = window.location.href;
-    const subscription = findSubscriptionForUrl(currentUrl, finalUrlTags);
+    const subscription = findSubscriptionForUrl(currentUrl, urlTags);
     if (!subscription) {
       console.log('[ShortScraping] 当前页面不在用户订阅配置中，跳过保存');
-      return [];
+      return { subscribed: false, dramas: [] };
     }
     const tags = subscription.tags;
 
@@ -1013,14 +1059,13 @@
     const adapter = site ? ADAPTERS[site] : null;
     if (!adapter || !adapter.matches(currentUrl)) {
       console.log('[ShortScraping] 当前站点无对应适配器，跳过');
-      return [];
+      return { subscribed: true, dramas: [] };
     }
     console.log(`[ShortScraping] 站点=${site}，标签: ${tags.join(', ')}`);
 
-    // 去重键统一用 itemId 字段（各站前缀见对应适配器的 extractId）；过滤空值避免塌缩。
-    const existingIds = new Set(existing.map(d => d.itemId).filter(Boolean));
-    const existingByItemId = new Map(existing.filter(d => d.itemId).map(d => [d.itemId, d]));
-    existingDramaSnapshot = existingByItemId;
+    // 去重键统一用 itemId 字段（各站前缀见对应适配器的 extractId）；known 是后台给的
+    // itemId → 是否已有 genres，本轮新存的卡也记进去（同批后到的重复条目照样命中）
+    existingDramaSnapshot = known;
     const allNewDramas = [];
 
     const listItems = await adapter.getListItems();
@@ -1034,10 +1079,10 @@
           console.log(`[ShortScraping] 第 ${index + 1} 项未找到 id，跳过`);
           continue;
         }
-        if (existingIds.has(id)) {
+        if (known.has(id)) {
           console.log(`[ShortScraping] 跳过已存在: ${id}`);
           // 在榜存量条目缺类型标签时顺路回填（v1.5.3），照旧不入新卡
-          await maybeBackfillGenres(adapter, item, tags, id, index, existingByItemId.get(id));
+          await maybeBackfillGenres(adapter, item, tags, id, index, known.get(id));
           continue;
         }
 
@@ -1062,13 +1107,35 @@
           continue;
         }
 
-        const saved = await saveSingleDrama(detailed);
-        if (!saved) {
-          console.log(`[ShortScraping] 跳过重复内容: ${detailed.title}`);
+        // fandom 条目进循环时还是临时键，映射回主站后才知道真实去重键：命中存量（或本轮已存的）
+        // 就不是新卡（审查 fandom-refetch-every-run）。库里缺 genres 而这次拿到了，才提交一次
+        // 让后台只合并 genres（同 maybeBackfillGenres）；其余零消息。以前照发 saveDrama 靠后台
+        // 拒收——详情路径对存量短路返回的对象（ShortMax 那份没有简介）碰上存量恰好被删，
+        // 就会被当新卡存下
+        if (known.has(detailed.itemId)) {
+          if (known.get(detailed.itemId) === false && hasGenreTags(detailed)) {
+            await saveSingleDrama(detailed);
+            known.set(detailed.itemId, true);
+            console.log(`[ShortScraping] ♻️ 已回填类型标签: ${detailed.title}（${detailed.genres.join(', ')}）`);
+          } else {
+            console.log(`[ShortScraping] 映射后命中存量，跳过: ${detailed.itemId}`);
+          }
+          await new Promise(r => setTimeout(r, 200));
           continue;
         }
 
-        existingIds.add(detailed.itemId);
+        const saved = await saveSingleDrama(detailed);
+        if (!saved) {
+          console.log(`[ShortScraping] 跳过重复内容: ${detailed.title}`);
+          // 详情请求照样发过了，节流同样要有：连着几条重复时不能连发
+          await new Promise(r => setTimeout(r, 200));
+          continue;
+        }
+
+        // 本轮刚存的卡一律记「已有 genres」：同轮后到的重复条目只需去重，不再走回填——详情刚请求
+        // 过，同一轮再请求一次拿到的还是这份（与改走消息之前「本轮新卡不进存量快照、不回填」同口径）；
+        // 真缺 genres 的，下一轮后台给的 known 里是 false，照常回填
+        known.set(detailed.itemId, true);
         allNewDramas.push(detailed);
         console.log(`[ShortScraping] ✅ 已保存: ${detailed.title} (${index + 1}/${listItems.length})`);
 
@@ -1079,51 +1146,32 @@
     }
 
     console.log(`[ShortScraping] 抓取完成，新增 ${allNewDramas.length} 部`);
-    return allNewDramas;
+    return { subscribed: true, dramas: allNewDramas };
   }
 
   /**
    * 根据当前页面 URL 找到命中的订阅项，返回 { urlPattern, tags }；无匹配返回 null。
    * urlPattern 会被写进卡片的 sourceListUrl（归属 canonical 化），使弹窗/后台/CSV
    * 的精确等值过滤天然成立。
+   * 判定本身在 src/shared/url-match.js 的 matchSubscription（精确轮 + 收紧的前缀轮，两轮都
+   * 尾斜杠归一），与弹窗 / 后台 / 同步服务的归属过滤共用同一个 url-match.js。
    */
   function findSubscriptionForUrl(url, urlTags) {
     console.log('[ShortScraping] 查找订阅，URL:', url);
     console.log('[ShortScraping] 标签配置:', JSON.stringify(urlTags));
 
-    // 确保 urlTags 是数组
     if (!Array.isArray(urlTags) || urlTags.length === 0) {
       console.log('[ShortScraping] 标签配置为空，跳过当前页面');
       return null;
     }
 
-    // 查找匹配的配置：先精确等值、再前缀匹配（容忍跳转/补斜杠导致的 href 尾部差异）。
-    // 两轮分开是为了支持互为前缀的订阅 URL（如 fandom 首页与 fandom/?list=trending），
-    // 不受配置顺序影响；前缀轮取最长匹配前缀（Netflix 六个榜单页互为前缀，带 query/
-    // 尾斜杠的 href 若按配置顺序取首个会误标到 /tudum/top10）。原第三轮 url.includes()
-    // 模糊匹配因匹配面过宽、易误标已移除。
-    for (const config of urlTags) {
-      if (!config.urlPattern || !config.tags) continue;
-      if (url === config.urlPattern) {
-        console.log(`[ShortScraping] ✓ 精确匹配! 标签: ${config.tags.join(', ')}`);
-        return { urlPattern: config.urlPattern, tags: config.tags.slice(0, 3) };
-      }
+    const config = UrlMatch.matchSubscription(url, urlTags);
+    if (!config) {
+      console.log('[ShortScraping] 无匹配订阅配置，跳过当前页面');
+      return null;
     }
-    let longest = null;
-    for (const config of urlTags) {
-      if (!config.urlPattern || !config.tags) continue;
-      if (url.startsWith(config.urlPattern) && (!longest || config.urlPattern.length > longest.urlPattern.length)) {
-        longest = config;
-      }
-    }
-    if (longest) {
-      console.log(`[ShortScraping] ✓ 前缀匹配! 标签: ${longest.tags.join(', ')}`);
-      return { urlPattern: longest.urlPattern, tags: longest.tags.slice(0, 3) }; // 最多3个标签
-    }
-
-    // 没有匹配，跳过当前页面
-    console.log('[ShortScraping] 无匹配订阅配置，跳过当前页面');
-    return null;
+    console.log(`[ShortScraping] ✓ 命中订阅 ${config.urlPattern}，标签: ${config.tags.join(', ')}`);
+    return { urlPattern: config.urlPattern, tags: config.tags.slice(0, 3) }; // 最多3个标签
   }
 
   /**
@@ -1356,18 +1404,28 @@
   }
 
   /**
+   * My Drama 主站去重键 md+UUID → 规范播放页 https://my-drama.com/video/<UUID>（无 query、无尾斜杠）。
+   * 与 fetchFandomDetail 映射出的地址、后台代理白名单（background DETAIL_HTML_PROXY_RULES）
+   * 同一形态；不是 md+UUID（如 fandom 文章的 mdf- 临时键）返回 null。
+   */
+  function myDramaVideoUrl(itemId) {
+    const match = String(itemId || '').match(/^md([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/);
+    return match ? `https://my-drama.com/video/${match[1]}` : null;
+  }
+
+  /**
    * 从 My Drama「最流行」轮播条目提取基础信息。
    * 列表 h3 标题会随界面语言本地化，英文原名优先从封面 URL 还原、h3 兜底；
    * h3 为平台自带中文名时直接存 titleZh。悬停层简介覆盖率低，主要靠详情页补。
+   * url 由去重键推出规范播放页，不读条目的 href：extractId 兼容「条目本身不是锚点、链接在
+   * 子 a 上」的写法，这里以前却只读 item 自己的 href——取不到时 new URL('', origin) 不抛错、
+   * 得到首页，整个板块会以首页链接加首页文案入库（审查 mydrama-href-null-homepage-url）。
    */
   function extractMyDramaFromListItem(item, index, tags, mdId) {
-    let url = '';
-    try {
-      const u = new URL(item.getAttribute('href') || '', window.location.origin);
-      u.search = '';
-      url = u.toString();
-    } catch (e) {
-      // href 异常时留空，详情阶段自动跳过
+    const url = myDramaVideoUrl(mdId);
+    if (!url) {
+      console.warn(`[ShortScraping] My Drama 第 ${index + 1} 项去重键不是 md+UUID（${mdId}），跳过`);
+      return null;
     }
 
     // 部分板块（如「最佳选择」）条目的第一个 <img> 是板块共用背景图占位，
@@ -1501,11 +1559,14 @@
   /**
    * 从 fandom 列表项提取基础信息。菜单项只有「⬤ 标题」+链接；
    * 文章流项多一张横版特色图。简介与主站 UUID 由详情页补。
+   * Most Trending 菜单里直链主站的条目（去重键已是 md+UUID）url 写规范播放页：原样存 href 时
+   * 带参数（?from=menu）或尾斜杠的链接过不了后台代理白名单，条目就没有简介和 genres 入库、
+   * 此后也没有补的路径（审查 fandom-menu-url-not-canonical）。文章链接照旧存 href，由详情页映射。
    */
   function extractFandomFromListItem(item, index, tags, mdfId) {
     const link = item.querySelector('.wp-block-post-title a') || item.querySelector('a[href]');
     const title = link ? link.textContent.replace(/^[⬤●]\s*/, '').trim() : '';
-    const url = link ? link.href : '';
+    const url = myDramaVideoUrl(mdfId) || (link ? link.href : '');
 
     const img = item.querySelector('.wp-block-post-featured-image img');
     const poster = img ? (img.currentSrc || img.src || '') : '';
@@ -1549,8 +1610,7 @@
         // 播放页 JSON-LD 就带 genres（v1.5.5）：映射当时顺路补采——fandom 子域
         // 直连主站被页面 CORS 拦，经后台代理取 HTML 本地解析；存量已有 genres
         // 的零请求，失败保留空数组下轮自愈（语义同其它详情失败路径）
-        const known = existingDramaSnapshot.get(drama.itemId);
-        if (!(known && Array.isArray(known.genres) && known.genres.length > 0)) {
+        if (existingDramaSnapshot.get(drama.itemId) !== true) {
           const detailHtml = await fetchDetailHtmlViaBackground(drama.url);
           const detailDoc = detailHtml ? parseHtmlDocument(detailHtml) : null;
           if (detailDoc) {
@@ -1655,13 +1715,29 @@
   }
 
   /**
+   * 跳转后的 /movie/ 地址是否仍是这部剧（路径尾段是 -<book_id>）。剧目页 301 只规范 slug；
+   * 下架 / 地区不可用的剧可能被 302 到首页或别的剧（都是 200）——不校验就会拿首页当播放页，
+   * 或拿别的剧的标题、简介、tag_list 覆盖本卡，之后去重命中只补 genres、永远改不回来
+   * （审查 reelshort-redirect-overwrites-url）。
+   */
+  function isReelshortMovieOf(url, bookId) {
+    if (!/^[0-9a-f]{24}$/.test(bookId)) return false;
+    try {
+      return new RegExp(`/movie/[^/?#]+-${bookId}/?$`).test(new URL(url).pathname);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
    * ReelShort 详情补完整简介：数据源固定为 /movie/<slug>-<book_id> 剧目页
    * （__NEXT_DATA__ 的 pageProps.data.special_desc 为简介全文；/full-episodes/
    * 全集页的 special_desc 是「include N episodes」SEO 模板文案，不可用）。
    * 不读 og:description（带 "Drama also known as X; " 拼接前缀，JSON 更干净）。
    * 请求成功后用同一份 __NEXT_DATA__ 的 chapter_id 把 url 升级为第一集播放页
    * /episodes/…；拿不到 chapter_id 时退 301 规范化的 /full-episodes/ 全集页。
-   * 任何失败保留列表页截断版数据与构造的全集页 url，不丢卡。
+   * 任何失败保留列表页截断版数据与构造的全集页 url，不丢卡；跳到了别处（不再是本剧的
+   * /movie/ 页，见 isReelshortMovieOf）同样按详情不可用处理。
    */
   async function fetchReelshortDetail(drama) {
     if (!drama.url) return drama;
@@ -1674,6 +1750,12 @@
       });
 
       if (!response.ok) return drama;
+
+      const canonical = (response.url || '').split('?')[0] || detailUrl;
+      if (!isReelshortMovieOf(canonical, String(drama.itemId || '').slice(2))) {
+        console.warn(`[ShortScraping] ReelShort 详情页跳到了别处（${canonical}），保留列表数据: ${drama.title}`);
+        return drama;
+      }
 
       const doc = parseHtmlDocument(await response.text());
       if (!doc) return drama;
@@ -1689,7 +1771,6 @@
         const tagTexts = cleanGenres((detail.tag_list || []).map(t => t && t.text));
         if (tagTexts.length) drama.genres = tagTexts;
       }
-      const canonical = (response.url || '').split('?')[0] || drama.url.replace('/full-episodes/', '/movie/');
       const episodeUrl = buildReelshortEpisodeUrl(canonical, detail);
       drama.url = episodeUrl || canonical.replace('/movie/', '/full-episodes/');
 
@@ -1763,13 +1844,22 @@
         u.hash = '';
         const movieUrl = u.toString();
         drama.url = movieUrl.replace('/movie/', '/full-episodes/');
+        // 映射到的主站条目库里已有、且已有 genres：scrapePage 不会把它当新卡，也不需要回填，
+        // /movie/ 这次请求纯属浪费（照 MyDrama fandom 的写法短路，审查 fandom-refetch-every-run）
+        if (existingDramaSnapshot.get(drama.itemId) === true) {
+          console.log(`[ShortScraping] ReelShort fandom 映射到已有条目，跳过主站请求: ${drama.itemId}`);
+          return drama;
+        }
         try {
           // 要读 movieResp.url（301 规范化后的地址），同主站详情，直接 fetch
           const movieResp = await fetchWithTimeout(movieUrl, { headers: { 'Accept': 'text/html' } });
-          if (movieResp.ok) {
+          const canonical = (movieResp.url || '').split('?')[0] || movieUrl;
+          // 跳到了别处（首页 / 别的剧）不采：chapter_id 与 tag_list 都会是别人的（isReelshortMovieOf）
+          if (movieResp.ok && !isReelshortMovieOf(canonical, bid[1])) {
+            console.warn(`[ShortScraping] ReelShort fandom 主站页跳到了别处（${canonical}），保留全集页兜底: ${drama.title}`);
+          } else if (movieResp.ok) {
             const movieDoc = parseHtmlDocument(await movieResp.text());
             const movieDetail = readNextData(movieDoc)?.props?.pageProps?.data;
-            const canonical = (movieResp.url || '').split('?')[0] || movieUrl;
             const episodeUrl = buildReelshortEpisodeUrl(canonical, movieDetail);
             if (episodeUrl) drama.url = episodeUrl;
             // 与主站详情同源的 tag_list（这次 /movie/ 请求本为取 chapter_id）
@@ -2206,6 +2296,13 @@
     const title = String(item.bookName || item.name || '').trim();
     const cover = String(item.cover || '').trim();
     const resource = String(item.bookResourceUrl || '').trim();
+    // 没有详情页路径＝给不了可点的链接：跳过该条、下轮重试（同 FlickReels 造不出 slug）。
+    // 以前照样以空 url 入库并推送，之后去重命中只补 genres，站点补上字段也更新不了
+    // （审查 goodshort-empty-url-saved）
+    if (!resource) {
+      console.warn(`[ShortScraping] GoodShort 第 ${index + 1} 项缺 bookResourceUrl（${gsId}），跳过`);
+      return null;
+    }
     const genreNames = (Array.isArray(item.genreList) ? item.genreList : []).map(g => g && g.name);
     const tagNames = (Array.isArray(item.tagsList) ? item.tagsList : []).map(t => t && t.name);
 
@@ -2215,7 +2312,7 @@
       genres: cleanGenres([...genreNames, ...tagNames]),
       description: String(item.introduction || '').trim(),
       // 订阅 URL 必须带 www（裸域 301 到 www），入库地址同口径
-      url: resource ? `https://www.goodshort.com/drama/${resource}` : ''
+      url: `https://www.goodshort.com/drama/${resource}`
     });
   }
 
@@ -2391,6 +2488,11 @@
    * 读页面 Firebase 会话里的 accessToken。**先用 databases() 确认库已存在再 open**——
    * 直接 open 一个不存在的库会把它按版本 1 建出来且没有对象仓库，反而会把站点自己的
    * 鉴权初始化搞坏。带 3 秒兜底，取不到一律返回 null。
+   * **连接用完必关**（审查 shortical-idb-connection-leak）：用户在自己的前台标签页里点按钮时，
+   * 挂着的连接会一直留到页面卸载，碰上 Firebase SDK 升级库版本或删库重建就被它 blocked、
+   * 站点登录态初始化卡住。所以每个出口都 close，超时后才打开的连接一到手就关，站点要升级
+   * 时（versionchange）立即让路；库恰好在 databases() 与 open() 之间被删时 open 会触发
+   * upgradeneeded，这里中止升级、不替站点建空库。
    */
   async function readShorticalToken() {
     const DB_NAME = 'firebaseLocalStorageDb';
@@ -2402,13 +2504,26 @@
 
       return await new Promise(resolve => {
         let settled = false;
-        const done = value => { if (!settled) { settled = true; resolve(value); } };
+        let db = null;
+        const closeDb = () => {
+          try { if (db) db.close(); } catch (e) { /* 已关闭 */ }
+          db = null;
+        };
+        const done = value => {
+          closeDb();
+          if (!settled) { settled = true; resolve(value); }
+        };
         setTimeout(() => done(null), 3000);
         const request = indexedDB.open(DB_NAME);
         request.onerror = () => done(null);
+        request.onupgradeneeded = () => {
+          try { request.transaction.abort(); } catch (e) { /* 中止失败时 onerror / onsuccess 照常收口 */ }
+        };
         request.onsuccess = () => {
+          db = request.result;
+          if (settled) return closeDb();
           try {
-            const db = request.result;
+            db.onversionchange = () => closeDb();
             if (!db.objectStoreNames.contains(STORE)) return done(null);
             const all = db.transaction(STORE, 'readonly').objectStore(STORE).getAll();
             all.onerror = () => done(null);
@@ -2616,6 +2731,13 @@
 
     drama.itemId = `sm${id}`;
     drama.url = episodeUrl;
+    // 映射到的主站条目库里已有、且已有 genres：scrapePage 不会把它当新卡，也不需要回填，
+    // 不再请求 /drama/ 详情页（审查 fandom-refetch-every-run）。这里交回的对象没有简介，
+    // 由 scrapePage 的「映射后命中存量」闸门保证它不会被当新卡存下
+    if (existingDramaSnapshot.get(drama.itemId) === true) {
+      console.log(`[ShortScraping] ShortMax fandom 映射到已有条目，跳过主站请求: ${drama.itemId}`);
+      return drama;
+    }
     // 文章标题是「剧名：Full Guide & Streaming Options」这类 SEO 句式，以主站 h1 为准
     return await fetchShortmaxDetail(drama, { takeTitle: true });
   }

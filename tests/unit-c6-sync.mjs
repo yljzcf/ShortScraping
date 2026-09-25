@@ -34,7 +34,7 @@ const csvPath = path.join(tmpRoot, 'db/timeline.csv');
 let serverOut = '';
 const child = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
   cwd: tmpRoot,
-  env: { ...process.env, PORT: String(PORT) },
+  env: { ...process.env, SHORTSCRAPING_PORT: String(PORT) },
   windowsHide: true,
   stdio: ['ignore', 'pipe', 'pipe']
 });

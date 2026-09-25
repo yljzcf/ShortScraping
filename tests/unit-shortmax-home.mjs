@@ -14,6 +14,7 @@ import './bootstrap.cjs';
 // 用法：node tests/unit-shortmax-home.mjs
 import fs from 'node:fs';
 import { el, documentFrom } from './dom-fixture.mjs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const contentSrc = fs.readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 (0, eval)(fs.readFileSync(new URL('../src/shared/site-registry.js', import.meta.url), 'utf8'));
@@ -119,11 +120,11 @@ async function runScenario({ href = HOME, subscriptions = [SUB_HOME, SUB_FANDOM]
   const listeners = [];
 
   globalThis.chrome = {
-    storage: { local: { async get() { await Promise.resolve(); return { dramas: structuredClone(store.dramas), urlTags: subscriptions }; } } },
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
       async sendMessage(message) {
         await Promise.resolve();
+        if (message?.action === 'getScrapeContext') return scrapeContextReply(store.dramas, subscriptions);
         if (message?.action === 'saveDrama') {
           saveCalls.push(structuredClone(message.drama));
           const dup = store.dramas.some(d => d.itemId === message.drama.itemId);
@@ -332,17 +333,27 @@ const fandomDocs = (overrides = {}) => ({
   check('K10 映射成功但主站详情失败 → 跳过该卡（不留无简介的残卡）', saved.length === 0, show(saved.map(d => d.itemId)));
 }
 {
-  // fandom 条目的去重只能发生在**保存点**：进 scrapePage 时它还是 smf- 临时键、
-  // 与库里的 sm32605 对不上，映射完才撞号 → saveDrama 照发，由后台按 itemId 兜底拒收
-  // （与 MyDrama / ReelShort fandom 逐字同一语义）。要守的是「库里仍只有一条、
-  // 标签仍是先到先得的那份、原记录一个字节没动」。
+  // fandom 条目进 scrapePage 时还是 smf- 临时键、与库里的 sm32605 对不上，映射完才撞号。
+  // 要守的是「库里仍只有一条、标签仍是先到先得的那份、原记录一个字节没动」。
+  // 审查 fandom-refetch-every-run：以前映射后照样请求 /drama/ 详情、照发 saveDrama 靠后台拒收；
+  // 现在映射后先查存量——已有且带 genres 的，主站请求与 saveDrama 都省掉
   const existing = { itemId: 'sm32605', title: 'SSS-Rank: The Slum-Born Thunder God', source: 'shortmax', tags: ['ShortMax', 'Pop'], genres: ['Rise to Power'], scrapedAt: '2026-09-01T00:00:00.000Z' };
-  const { saved, saveCalls } = await runScenario({ href: FANDOM, docs: fandomDocs(), dramas: [existing] });
+  const { saved, saveCalls, fetchCalls } = await runScenario({ href: FANDOM, docs: fandomDocs(), dramas: [existing] });
   check('K11 与首页条目全局去重：库里仍只有一条，标签与原记录先到先得',
     saved.length === 1 && eq(saved[0], existing), show({ n: saved.length, entry: saved[0] }));
-  check('K11b 去重发生在保存点：映射后才撞号，saveDrama 照发但被拒收',
-    saveCalls.length === 1 && saveCalls[0].itemId === 'sm32605' && eq(saveCalls[0].tags, ['ShortMax', 'fandom']),
-    show(saveCalls.map(s => [s.itemId, s.tags])));
+  check('K11b 映射后命中已有 genres 的存量：零 saveDrama',
+    saveCalls.length === 0, show(saveCalls.map(s => [s.itemId, s.tags])));
+  check('K11c 同上：只请求列表与文章页，主站 /drama/ 详情零请求',
+    eq(fetchCalls, [FANDOM, `${ORIGIN}/fandom/${FANDOM_SLUG}`]), show(fetchCalls));
+}
+{
+  // 存量缺 genres：照常取主站详情，只提交一次让后台合并 genres（库里仍是原来那一条）
+  const existing = { itemId: 'sm32605', title: 'SSS-Rank: The Slum-Born Thunder God', source: 'shortmax', tags: ['ShortMax', 'Pop'], genres: [], scrapedAt: '2026-09-01T00:00:00.000Z' };
+  const { saved, saveCalls, fetchCalls } = await runScenario({ href: FANDOM, docs: fandomDocs(), dramas: [existing] });
+  check('K11d 映射后命中缺 genres 的存量 → 取一次主站详情、一次带 genres 的 saveDrama，库里不多出新卡',
+    fetchCalls.includes(`${ORIGIN}/drama/sss-rank-32605`) && saveCalls.length === 1
+      && saveCalls[0].itemId === 'sm32605' && eq(saveCalls[0].genres, ['Rise to Power']) && saved.length === 1,
+    show({ fetchCalls, calls: saveCalls.map(s => [s.itemId, s.genres]), n: saved.length }));
 }
 {
   // 同一卡上另有指向 /fandom/tags/… 的分类链接；取错会让临时键变成 'tags'

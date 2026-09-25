@@ -12,6 +12,7 @@ import './bootstrap.cjs';
 // （全新 window 使防重注入护栏放行，互不串扰）。
 // 用法：node tests/unit-genres.mjs
 import fs from 'node:fs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const contentSrc = fs.readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 const registrySrc = fs.readFileSync(new URL('../src/shared/site-registry.js', import.meta.url), 'utf8');
@@ -46,18 +47,11 @@ async function runScenario({ location, subscription, document, fetch, domParser,
   const proxyCalls = [];
   const listeners = [];
   globalThis.chrome = {
-    storage: {
-      local: {
-        async get() {
-          await Promise.resolve();
-          return { dramas: structuredClone(store.dramas), urlTags: [subscription] };
-        }
-      }
-    },
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
       async sendMessage(message) {
         await Promise.resolve();
+        if (message?.action === 'getScrapeContext') return scrapeContextReply(store.dramas, [subscription]);
         if (message?.action === 'saveDrama') {
           saveCalls.push(structuredClone(message.drama));
           const dup = store.dramas.some(d => d.itemId === message.drama.itemId);
@@ -302,6 +296,31 @@ const { saved: steamSaved } = await runScenario({
 check('S1 Steam appdetails genres（坏条目滤除）',
   eq(steamSaved[0]?.genres, ['Action', 'Adventure']), JSON.stringify(steamSaved[0]?.genres));
 
+// ---------- 场景 4b：Steam 存量回填只请求英文档（审查 steam-backfill-extra-request） ----------
+// 后台对去重命中的存量只合并 genres，中文档那次请求的结果用不上，还叠加 Steam 限流压力
+const steamBackfillCalls = [];
+const steamBackfill = await runScenario({
+  location: { href: STEAM_URL, hostname: 'store.steampowered.com', pathname: '/category/visual_novel', search: '?flavor=contenthub_newandtrending' },
+  subscription: { urlPattern: STEAM_URL, tags: ['Steam', '视觉小说'] },
+  dramas: [{ id: 'old-steam', itemId: '111222', title: 'Steam Game', tags: ['Steam'], source: 'steam', status: 'trans', genres: [] }],
+  document: baseDocument(),
+  fetch: async (url) => {
+    if (url.includes('ajaxgetsaledynamicappquery')) return { ok: true, url, json: async () => ({ appids: [111222] }) };
+    steamBackfillCalls.push(url);
+    if (url.includes('appdetails?appids=111222&l=english')) {
+      return { ok: true, url, json: async () => ({ 111222: { success: true, data: {
+        name: 'Steam Game', short_description: 'sd', genres: [{ id: '1', description: 'Action' }]
+      } } }) };
+    }
+    return { ok: true, url, json: async () => ({ 111222: { success: true, data: { name: '中文名', short_description: '中文' } } }) };
+  }
+});
+check('S2 Steam 存量缺 genres → 回填只发 1 次 appdetails（l=english），不再请求 schinese',
+  steamBackfillCalls.length === 1 && steamBackfillCalls[0].includes('&l=english'), JSON.stringify(steamBackfillCalls));
+check('S2b 回填提交带英文档 genres 的同 itemId',
+  steamBackfill.saveCalls.length === 1 && steamBackfill.saveCalls[0]?.itemId === '111222' && eq(steamBackfill.saveCalls[0]?.genres, ['Action']),
+  JSON.stringify(steamBackfill.saveCalls.map(d => [d.itemId, d.genres])));
+
 // ---------- 场景 5：IMDB（JSON-LD 单字符串归一 + 坏 JSON 块跳过） ----------
 const imdbLink = {
   textContent: '1. Test Movie',
@@ -473,6 +492,26 @@ check('M3 MyDrama 存量回填经详情提交 genres',
   JSON.stringify(backfillMd.saveCalls.map(d => ({ itemId: d.itemId, genres: d.genres }))));
 check('M4 已有 genres 的 MyDrama 存量条目零详情请求', mdDetailFetches === 1, `detailFetches=${mdDetailFetches}`);
 
+// ---------- 场景 9b：同一轮里重复出现的新卡（详情没给 genres）不走回填 ----------
+// v1.6.19 起存量快照改为后台给的 itemId → hasGenres，本轮新存的卡也记进去；若按「缺 genres」记，
+// 同轮后到的重复条目会被当成缺 genres 的存量，再发一次详情请求（与改走消息之前「零请求」不一致）
+let mdDupFetches = 0;
+const dupMd = await runScenario({
+  location: mdLocation,
+  subscription: mdSubscription,
+  document: baseDocument({
+    querySelectorAll: (sel) => sel === '#most_trending [data-testid="series-section-item"]'
+      ? [mdItem(MD_UUID2, '', '别的剧'), mdItem(MD_UUID2, '', '别的剧')] : []
+  }),
+  fetch: async (url) => {
+    if (url.includes('/video/')) mdDupFetches++;
+    return { ok: true, url, text: async () => 'MD-NO-GENRES' };
+  }
+});
+check('M4b 同轮重复出现的新卡（无 genres）只入库一次、详情只请求一次，不再走回填',
+  dupMd.saveCalls.length === 1 && mdDupFetches === 1,
+  `saveCalls=${dupMd.saveCalls.length} detailFetches=${mdDupFetches}`);
+
 // ---------- 场景 10（v1.5.5）：fandom 首见条目映射当时经后台代理补采 genres ----------
 // fandom 子域 content script 直连主站被页面 CORS 拦（/video/ 响应无 ACAO 头），
 // 改发 fetchDetailHtml 消息由后台 SW 代理取播放页 HTML、本地 DOMParser 解析 JSON-LD。
@@ -534,7 +573,7 @@ check('M5b fandom 文章语义不变（h1 标题 / 正文简介 / 主站播放�
     && (fandomA?.description || '').length > 80,
   JSON.stringify({ title: fandomA?.title, url: fandomA?.url, descLen: (fandomA?.description || '').length }));
 
-// ---------- 场景 11（v1.5.5）：存量已有 genres → 零代理请求；重复消息不带脏值 ----------
+// ---------- 场景 11（v1.5.5）：存量已有 genres → 零代理请求；映射后命中存量不再当新卡发 saveDrama ----------
 const fandomM6 = await runScenario({
   location: fandomLocation,
   subscription: fandomSubscription,
@@ -545,9 +584,26 @@ const fandomM6 = await runScenario({
 });
 check('M6 存量已有 genres 的 fandom 条目零代理请求', fandomM6.proxyCalls.length === 0,
   JSON.stringify(fandomM6.proxyCalls));
-check('M6b 重复条目 saveDrama 消息 genres 为空数组（不带脏值）',
-  fandomM6.saveCalls.length === 1 && eq(fandomM6.saveCalls[0]?.genres, []),
-  JSON.stringify(fandomM6.saveCalls.map(d => d.genres)));
+// 审查 fandom-refetch-every-run：以前映射后照发 saveDrama、靠后台按 itemId 拒收；
+// 现在 scrapePage 映射后先查存量，库里已有且带 genres 的零消息
+check('M6b 映射后命中已有 genres 的存量 → 零 saveDrama、零入库变化',
+  fandomM6.saveCalls.length === 0 && fandomM6.saved.length === 1 && eq(fandomM6.saved[0]?.genres, ['Old']),
+  JSON.stringify({ saveCalls: fandomM6.saveCalls.map(d => d.genres), saved: fandomM6.saved.map(d => d.genres) }));
+
+// ---------- 场景 11b：映射后命中存量但库里缺 genres → 经代理补采、只提交一次 genres ----------
+const fandomM6c = await runScenario({
+  location: fandomLocation,
+  subscription: fandomSubscription,
+  dramas: [{ id: 'old-f', itemId: `md${MD_UUID}`, title: 'Wild Silence', tags: ['MyDrama'], source: 'mydrama', status: 'trans' }],
+  document: baseDocument({ querySelectorAll: (sel) => sel === 'li.wp-block-post' ? [fandomPost('wild-silence', 'Wild Silence')] : [] }),
+  fetch: fandomFetch,
+  domParser: FandomDomParser,
+  proxy: (url) => url === `https://my-drama.com/video/${MD_UUID}` ? { success: true, html: 'MD-DETAIL-A' } : { success: false }
+});
+check('M6c 映射后命中缺 genres 的存量 → 一次代理 + 一次带 genres 的 saveDrama（后台只合并 genres）',
+  fandomM6c.proxyCalls.length === 1 && fandomM6c.saveCalls.length === 1
+    && fandomM6c.saveCalls[0]?.itemId === `md${MD_UUID}` && eq(fandomM6c.saveCalls[0]?.genres, MD_GENRES),
+  JSON.stringify({ proxy: fandomM6c.proxyCalls, calls: fandomM6c.saveCalls.map(d => ({ id: d.itemId, g: d.genres })) }));
 
 // ---------- 场景 12（v1.5.5）：代理失败 / 空壳页 → 条目照常入库、genres 空、不抛错 ----------
 const fandomM7 = await runScenario({
@@ -591,6 +647,43 @@ check('M8 fandom 页存量回填跨域改走代理并提交 genres（菜单直�
   fandomM8.saveCalls.length === 1 && eq(fandomM8.saveCalls[0]?.genres, MD_GENRES) && fandomM8.proxyCalls.length === 1,
   JSON.stringify({ calls: fandomM8.saveCalls.map(d => ({ id: d.itemId, g: d.genres })), proxy: fandomM8.proxyCalls }));
 check('M8b 跨域场景零直连 fetch（同源直连由 M1/M3 守护）', videoDirectFetches === 0, `videoDirectFetches=${videoDirectFetches}`);
+
+// ---------- 场景 14：菜单直链带参数（?from=menu）→ 入库 url 与代理目标都是规范播放页（审查 fandom-menu-url-not-canonical） ----------
+// 以前 url 原样存 link.href：代理白名单要求无 query、无尾斜杠，请求被拒，条目无简介无 genres 入库、此后也补不上
+const bgSrc = fs.readFileSync(new URL('../src/background/background.js', import.meta.url), 'utf8');
+const mdProxyPattern = (() => {
+  const m = bgSrc.match(/pattern: (\/\^https:\\\/\\\/my-drama\\\.com\\\/video\\\/[^\n]*\$\/),/);
+  return m ? (0, eval)(m[1]) : null;
+})();
+const menuQueryAnchor = fandomAnchor('ignored', '⬤ Wild Silence');
+menuQueryAnchor.href = `https://my-drama.com/video/${MD_UUID}?from=menu`;
+menuQueryAnchor.getAttribute = (n) => n === 'href' ? `https://my-drama.com/video/${MD_UUID}?from=menu` : null;
+const menuQueryItem = {
+  matches: () => false,
+  querySelector: (sel) => (sel === '.wp-block-post-title a, a[href]' || sel === 'a[href]') ? menuQueryAnchor : null
+};
+const fandomM9 = await runScenario({
+  location: { href: 'https://fandom.my-drama.com/?list=trending', hostname: 'fandom.my-drama.com', pathname: '/', search: '?list=trending', origin: 'https://fandom.my-drama.com' },
+  subscription: { urlPattern: 'https://fandom.my-drama.com/?list=trending', tags: ['MyDrama', 'fandom', 'Trending'] },
+  document: baseDocument({
+    querySelectorAll: sel => sel === '#modal-2-content .wp-block-navigation-submenu' ? [{
+      querySelector: (s) => s === '.wp-block-navigation-item__label' ? { textContent: 'Most Trending' } : null,
+      querySelectorAll: (s) => s === '.wp-block-navigation__submenu-container .wp-block-navigation-link' ? [menuQueryItem] : []
+    }] : []
+  }),
+  fetch: async (url) => ({ ok: false, url }),
+  domParser: FandomDomParser,
+  // 代理桩按后台真实白名单放行：不在白名单内的 url 回「不在代理白名单内」
+  proxy: (url) => (mdProxyPattern && mdProxyPattern.test(url)) ? { success: true, html: 'MD-DETAIL-A' } : { success: false, error: 'URL 不在代理白名单内' }
+});
+const menuSaved = fandomM9.saved.find(d => d.itemId === `md${MD_UUID}`);
+check('M9 菜单直链带 ?from=menu → 代理目标是规范播放页且命中后台白名单（夹具读的是真实白名单正则）',
+  !!mdProxyPattern && eq(fandomM9.proxyCalls, [`https://my-drama.com/video/${MD_UUID}`]),
+  JSON.stringify({ proxyCalls: fandomM9.proxyCalls, pattern: String(mdProxyPattern) }));
+check('M9b 入库 url 是规范形态、简介与 genres 都补上了',
+  menuSaved?.url === `https://my-drama.com/video/${MD_UUID}` && eq(menuSaved?.genres, MD_GENRES)
+    && (menuSaved?.descriptionZh || '').startsWith('一个求死的女人'),
+  JSON.stringify({ url: menuSaved?.url, genres: menuSaved?.genres, zh: (menuSaved?.descriptionZh || '').slice(0, 8) }));
 
 // ---------- 汇总断言：所有入库卡都带 genres 数组字段 ----------
 const all = [...rsSaved, ...dsSaved, ...nsSaved, ...nfSaved, ...nfSaved3, ...steamSaved, ...imdbSaved, ...mdSaved, ...fandomM5.saved, ...fandomM7.saved];

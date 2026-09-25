@@ -8,8 +8,11 @@ rem window does not stop it; use the popup's stop button or tools\stop-sync.bat.
 
 for %%I in ("%~dp0..") do set "PROJECT_DIR=%%~fI"
 set "SERVER_DIR=%PROJECT_DIR%\server"
-set "PORT=31919"
-set "HEALTH_URL=http://127.0.0.1:%PORT%/health"
+rem Health-check port. node reads SHORTSCRAPING_PORT (default 31919), not the generic PORT,
+rem so a PORT set for another project is never inherited. The extension only connects to 31919.
+set "SYNC_PORT=31919"
+if defined SHORTSCRAPING_PORT set "SYNC_PORT=%SHORTSCRAPING_PORT%"
+set "HEALTH_URL=http://127.0.0.1:%SYNC_PORT%/health"
 
 where node >nul 2>nul
 if errorlevel 1 (

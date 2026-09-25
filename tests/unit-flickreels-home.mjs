@@ -8,6 +8,7 @@ import './bootstrap.cjs';
 // 路径闸门、订阅匹配。全程零网络：fetch 一律抛错。
 // 用法：node tests/unit-flickreels-home.mjs
 import fs from 'node:fs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const contentSrc = fs.readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 (0, eval)(fs.readFileSync(new URL('../src/shared/site-registry.js', import.meta.url), 'utf8'));
@@ -106,6 +107,8 @@ const SUB_HOT = { urlPattern: `${HOME}?list=hot_picks`, tags: ['FlickReels', 'Ho
 const SUB_STAR = { urlPattern: `${HOME}?list=7_day_star`, tags: ['FlickReels', '7DayStar'] };
 const SUB_HOME = { urlPattern: HOME, tags: ['FlickReels', 'Home'] };   // 无 ?list 的默认板块场景专用
 const SUBS = [SUB_HOT, SUB_STAR];
+// 板块选择类用例订阅的就是当前页本身：只订首页时带 ?list= 的页不再归到首页订阅名下（U3）
+const subOf = href => [{ urlPattern: href, tags: ['FlickReels', 'Section'] }];
 
 let fetchCalls = 0;
 // 场景执行器：装桩 → eval 真实 content.js → 派发 'scrape' → 返回 { saved, saveCalls, proxyCalls, response }
@@ -115,11 +118,11 @@ async function runScenario({ location, subscriptions = SUBS, document, dramas = 
   const proxyCalls = [];
   const listeners = [];
   globalThis.chrome = {
-    storage: { local: { async get() { await Promise.resolve(); return { dramas: structuredClone(store.dramas), urlTags: subscriptions }; } } },
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
       async sendMessage(message) {
         await Promise.resolve();
+        if (message?.action === 'getScrapeContext') return scrapeContextReply(store.dramas, subscriptions);
         if (message?.action === 'saveDrama') {
           saveCalls.push(structuredClone(message.drama));
           const dup = store.dramas.some(d => d.itemId === message.drama.itemId);
@@ -227,21 +230,27 @@ const STAR_ITEMS = [playlet({ id: 9709, title: 'Star A' })];
   check('S2 无 ?list 默认 hot_picks', eq(saved.map(d => d.itemId), ['fr8098', 'fr7822']), show(saved.map(d => d.itemId)));
 }
 {
-  const { saved } = await runScenario({ location: loc(`${HOME}?list=Hot%20Picks!`), subscriptions: [SUB_HOME], document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
+  const { saved } = await runScenario({ location: loc(`${HOME}?list=Hot%20Picks!`), subscriptions: subOf(`${HOME}?list=Hot%20Picks!`), document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
   check('S3 ?list 值先归一化再比对（大小写/空格/标点不影响，Hot Picks! → hot_picks）', eq(saved.map(d => d.itemId), ['fr8098', 'fr7822']), show(saved.map(d => d.itemId)));
 }
 {
   // 归一后为空（纯 emoji）：以前悄悄退回默认 hot_picks、把热门板块记到这条订阅名下
-  const { saved, response } = await runScenario({ location: loc(`${HOME}?list=%F0%9F%94%A5`), subscriptions: [SUB_HOME], document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
+  const { saved, response } = await runScenario({ location: loc(`${HOME}?list=%F0%9F%94%A5`), subscriptions: subOf(`${HOME}?list=%F0%9F%94%A5`), document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
   check('S3b ?list 值归一后为空 → 0 条，不退回默认 hot_picks', saved.length === 0 && response?.success === true, show(saved.map(d => d.itemId)));
 }
 {
-  const { saved, response } = await runScenario({ location: loc(`${HOME}?list=no_such`), subscriptions: [SUB_HOME], document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
+  const { saved, response } = await runScenario({ location: loc(`${HOME}?list=no_such`), subscriptions: subOf(`${HOME}?list=no_such`), document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
   check('S4 未知板块 → 0 条不抛', saved.length === 0 && response?.success === true, show(response));
 }
 {
-  const { saved } = await runScenario({ location: loc(`${HOME}?list=roll_image`), subscriptions: [SUB_HOME], document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
+  const { saved } = await runScenario({ location: loc(`${HOME}?list=roll_image`), subscriptions: subOf(`${HOME}?list=roll_image`), document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
   check('S5 其它板块按同一约定可订（roll_image）', eq(saved.map(d => d.itemId), ['fr8894']), show(saved.map(d => d.itemId)));
+}
+{
+  // 审查 subscription-prefix-misattribution：以前前缀轮裸 startsWith，只订首页时 ?list=roll_image 页
+  // 也命中首页订阅，那个板块的卡带着首页订阅的标签与 sourceListUrl 入库，订阅外清理也清不掉
+  const { saved, response } = await runScenario({ location: loc(`${HOME}?list=roll_image`), subscriptions: [SUB_HOME], document: homeDoc(twoSections(HOT_ITEMS, STAR_ITEMS)) });
+  check('U3 只订首页时 ?list=roll_image 页不归首页订阅 → 0 条', response?.success === true && saved.length === 0, show(saved.map(d => [d.itemId, d.sourceListUrl])));
 }
 
 // ---------- I：id 守卫 ----------

@@ -5,9 +5,10 @@
  * 设置页保存与同步服务落盘都做——同一份文件走两条路径得到两种标签，直接印到卡片上。
  * 这里取最严的那份为唯一语义：
  *   - 条目须为普通对象；url 取 urlPattern（优先）或 url，trim 后必须是 http(s)；
- *   - tags 接受数组或以英文/全角逗号分隔的字符串，逐个 trim、去空、最多 MAX_TAGS 个；
+ *   - tags 接受数组或以英文/全角逗号分隔的字符串，逐个 trim、去空、去重后最多 MAX_TAGS 个；
  *   - 零标签的条目丢弃；同一 urlPattern 只保留先出现的合法条目（先到先得，
  *     被丢弃的无效条目不占名额——与设置页/同步服务的旧实现「先过滤再去重」一致）。
+ *     「同一」按 UrlMatch 的尾斜杠归一判定，保留先出现的原串写法。
  * 扩展内部形态 { urlPattern, tags }（storage.urlTags）；文件形态 { url, tags }
  * （config/tag.json）由 toTagFileEntries 投影。两者都只输出这两个键，多余字段不透传。
  *
@@ -33,10 +34,11 @@
     if (Array.isArray(value)) list = value;
     else if (typeof value === 'string') list = value.split(/[,，]/);
     else list = [];
-    return list
+    // 先去重再截断：'A, A ,B' 旧实现得 ['A','A','B']，卡片上印出重复标签，还挤掉第三个名额
+    const unique = [...new Set(list
       .map(tag => (tag === null || tag === undefined ? '' : String(tag)).trim())
-      .filter(Boolean)
-      .slice(0, MAX_TAGS);
+      .filter(Boolean))];
+    return unique.slice(0, MAX_TAGS);
   }
 
   function normalizeUrlTags(rawTags) {
@@ -47,10 +49,13 @@
     for (const item of rawTags) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
       const urlPattern = String(item.urlPattern || item.url || '').trim();
-      if (!/^https?:\/\//i.test(urlPattern) || seen.has(urlPattern)) continue;
+      // 去重键与归属判定同口径（尾斜杠归一）：旧实现按原串比，手写 tag.json 里 '…/x' 与
+      // '…/x/' 并存时两条都保留，同一页每轮开两个标签页抓两次，卡上印哪套标签看谁先命中
+      const key = UrlMatch.normalizeListUrl(urlPattern);
+      if (!/^https?:\/\//i.test(urlPattern) || seen.has(key)) continue;
       const tags = normalizeTags(item.tags);
       if (tags.length === 0) continue;
-      seen.add(urlPattern);
+      seen.add(key);
       out.push({ urlPattern, tags });
     }
     return out;

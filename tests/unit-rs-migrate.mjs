@@ -59,6 +59,9 @@ const writeDramasInQueue = async (next, extras = {}) => {
   store.dramas = structuredClone(next);
   Object.assign(store, structuredClone(extras));
 };
+// 联网迁移单次请求期限（v1.6.19 起 fetch 带 AbortSignal.timeout）：取源码里的真实值，不另抄一份
+// eslint-disable-next-line no-unused-vars
+const MIGRATION_FETCH_TIMEOUT_MS = Number(src.match(/const MIGRATION_FETCH_TIMEOUT_MS = (\d+);/)[1]);
 
 const origWarn = console.warn, origLog = console.log;
 console.warn = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origWarn(...a); };

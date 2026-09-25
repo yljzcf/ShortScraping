@@ -21,6 +21,7 @@ import './bootstrap.cjs';
 // 用法：node tests/unit-pinedrama-sections.mjs
 import fs from 'node:fs';
 import { el, documentFrom } from './dom-fixture.mjs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const contentSrc = fs.readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 (0, eval)(fs.readFileSync(new URL('../src/shared/site-registry.js', import.meta.url), 'utf8'));
@@ -219,11 +220,11 @@ async function runScenario({ href = NOVELS, subscriptions = SUBS, live, docs = d
   const listeners = [];
 
   globalThis.chrome = {
-    storage: { local: { async get() { await Promise.resolve(); return { dramas: structuredClone(store.dramas), urlTags: subscriptions }; } } },
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
       async sendMessage(message) {
         await Promise.resolve();
+        if (message?.action === 'getScrapeContext') return scrapeContextReply(store.dramas, subscriptions);
         if (message?.action === 'saveDrama') {
           saveCalls.push(structuredClone(message.drama));
           const dup = store.dramas.some(d => d.itemId === message.drama.itemId);

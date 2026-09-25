@@ -15,6 +15,10 @@ import './bootstrap.cjs';
 //   W 组（接线）：popup.html 不再载 translator.js；popup.js 不再引用 Translator。
 //   A1：applyTranslation 入口已删除（2026-09-25 审查：生产代码无发送方，半成品判据由 S3 经
 //     translateSingle 覆盖）——后台对它不再应答、卡片不动。
+//   B 组（群机器人触发点③，审查 bot-push-trigger-assumption-broken）：🌍 把 new 卡翻成 trans
+//     时推一次；重译本来就是 trans 的卡、只补到一半的都不推。
+//   K 组（SW 保活，审查 sw-long-fetch-termination）：单卡请求与非空批量轮在飞期间每 20s 调一次
+//     chrome.runtime.getPlatformInfo 重置空闲计时，结束即停。
 // 用法：node tests/unit-translate-single.mjs（实现前 S/U/W/A1 应 RED）
 import fs from 'node:fs';
 import path from 'node:path';
@@ -64,7 +68,9 @@ const chromeStub = {
         if (!handled) resolve(undefined);
       });
     },
-    lastError: null
+    lastError: null,
+    // K 组：保活每一跳调它一次（真实 Chrome 里任何扩展 API 调用都会重置 SW 空闲计时）
+    async getPlatformInfo() { chromeStub.__platformInfoCalls = (chromeStub.__platformInfoCalls || 0) + 1; return { os: 'mac' }; }
   },
   alarms: { async getAll() { return []; }, async clear() { return true; }, create() {}, onAlarm: { addListener() {} } },
   tabs: { create() {}, onUpdated: { addListener() {}, removeListener() {} } },
@@ -80,7 +86,16 @@ globalThis.importScripts = (...paths) => {
     (0, eval)(fs.readFileSync(new URL(rel, import.meta.url), 'utf8'));
   }
 };
-globalThis.fetch = async () => { throw new TypeError('unit stub: no network'); };
+// 只放行群机器人 webhook（B 组捕获推送），其余一律断网
+const BOT_HOOK = 'https://open.larksuite.com/open-apis/bot/v2/hook/unit-test';
+const botPosts = [];
+globalThis.fetch = async (url, options) => {
+  if (String(url) === BOT_HOOK) {
+    botPosts.push(JSON.parse(options?.body || '{}'));
+    return { ok: true, status: 200, async text() { return JSON.stringify({ code: 0, msg: 'success' }); } };
+  }
+  throw new TypeError('unit stub: no network');
+};
 
 // Translator 桩：记录 SW 内实际收到的入参；plan 决定返回什么（或抛错）
 const translatorCalls = [];
@@ -229,6 +244,124 @@ await seed(mk('apply'));
   const resp = await send({ action: 'applyTranslation', dramaId: 'apply', result: { title: '', desc: '只有简介' } });
   check('A1 applyTranslation 不再有处理器（无应答、卡片原样不动）',
     resp === undefined && JSON.stringify(byId().apply) === before, JSON.stringify({ resp, card: byId().apply }));
+}
+
+// ============ B 组：群机器人触发点③（🌍 把 new 卡翻成 trans） ============
+// 此前 handleTranslateSingle 完成后不推：新卡被 🌍 抢在批量线之前翻完，批量线扫不到它
+// （只扫 status='new'），这张卡永远不会推群
+{
+  const ENABLED_AT = '2026-09-12T00:00:00.000Z';
+  const AFTER = '2026-09-12T06:00:00.000Z';
+  const setupBot = () => {
+    rawStore.larkConfig = { webhookUrl: '', botWebhookUrl: BOT_HOOK, botEnabled: true, requestTimeoutSec: 5 };
+    rawStore.larkBotState = { enabledAt: ENABLED_AT };
+  };
+  const posted = text => botPosts.filter(p => JSON.stringify(p).includes(text)).length;
+
+  await seed(mk('botnew', { scrapedAt: AFTER }));
+  setupBot();
+  botPosts.length = 0;
+  const resp = await send({ action: 'translateSingle', dramaId: 'botnew' });
+  await sleep(600); // 推送不 await（弹窗不等飞书应答）+ 250ms 发送节流
+  check('B1 🌍 把 new 卡翻成 trans → 推群一次，卡里带刚写进去的译文',
+    resp?.complete === true && byId().botnew?.status === 'trans' && botPosts.length === 1 && posted('中·T-botnew') === 1,
+    JSON.stringify({ resp, posts: botPosts.length }));
+
+  await seed(mk('bottrans', { status: 'trans', titleZh: '旧译名', descriptionZh: '旧简介', translatedAt: AFTER, scrapedAt: AFTER }));
+  setupBot();
+  botPosts.length = 0;
+  translatorPlan = () => ({ title: '新译名', desc: '新简介' });
+  const resp2 = await send({ action: 'translateSingle', dramaId: 'bottrans' });
+  await sleep(600);
+  check('B2 重译本来就是 trans 的卡 → 不推（不是新完成的卡）',
+    resp2?.success === true && byId().bottrans?.titleZh === '新译名' && botPosts.length === 0,
+    JSON.stringify({ resp2, posts: botPosts.length }));
+
+  await seed(mk('botpartial', { scrapedAt: AFTER }));
+  setupBot();
+  botPosts.length = 0;
+  translatorPlan = () => ({ title: '', desc: '只回了简介' });
+  await send({ action: 'translateSingle', dramaId: 'botpartial' });
+  await sleep(600);
+  check('B3 只补到一半（仍 new）→ 不推', byId().botpartial?.status === 'new' && botPosts.length === 0,
+    JSON.stringify({ card: byId().botpartial, posts: botPosts.length }));
+  delete rawStore.larkConfig;
+  delete rawStore.larkBotState;
+}
+
+// ============ K 组：翻译请求在飞期间保活 SW ============
+// setTimeout 间谍只截 20s 那一档（保活间隔），其余照走真实定时器；截下的回调由测试手动触发
+{
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const live = new Map();
+  let nextId = 1;
+  const arm = () => {
+    globalThis.setTimeout = (fn, ms, ...args) => {
+      if (ms !== 20000) return realSetTimeout(fn, ms, ...args);
+      const id = `keepalive-${nextId++}`;
+      live.set(id, fn);
+      return id;
+    };
+    globalThis.clearTimeout = id => (live.has(id) ? live.delete(id) : realClearTimeout(id));
+  };
+  const disarm = () => { globalThis.setTimeout = realSetTimeout; globalThis.clearTimeout = realClearTimeout; };
+  // 没有保活定时器（修复前）时空转，让断言自己 FAIL 而不是夹具抛错
+  const fireOne = () => { if (!live.size) return; const [id, fn] = [...live][0]; live.delete(id); fn(); };
+  const gated = () => {
+    let release;
+    const gate = new Promise(r => { release = r; });
+    translatorPlan = async (title, description) => { await gate; return { title: `中·${title}`, desc: `中文·${description}` }; };
+    return () => release();
+  };
+
+  // K1 单卡 🌍
+  await seed(mk('ka1'));
+  let release = gated();
+  arm();
+  try {
+    chromeStub.__platformInfoCalls = 0;
+    const pending = send({ action: 'translateSingle', dramaId: 'ka1' });
+    await sleep(30);
+    check('K1 单卡请求在飞时挂上 20s 保活定时器', live.size === 1, `live=${live.size}`);
+    fireOne();
+    await sleep(0);
+    check('K1b 保活一跳调一次 getPlatformInfo 并续上下一跳',
+      chromeStub.__platformInfoCalls === 1 && live.size === 1, `calls=${chromeStub.__platformInfoCalls} live=${live.size}`);
+    release();
+    const resp = await pending;
+    check('K1c 请求结束即停：保活定时器被清掉、不再续跳', resp?.success === true && live.size === 0,
+      JSON.stringify({ resp, live: live.size }));
+  } finally {
+    disarm();
+  }
+
+  // K2 批量翻译轮（独立 translate-task / 手动 🌐，没有抓取标签页的消息陪跑）
+  await seed(mk('ka2'));
+  release = gated();
+  arm();
+  try {
+    chromeStub.__platformInfoCalls = 0;
+    const round = performTranslate({ source: 'manual' }); // eslint-disable-line no-undef
+    await sleep(30);
+    check('K2 非空翻译轮请求在飞时挂上保活定时器', live.size === 1 && rawStore.translateRunState?.running === true,
+      `live=${live.size} running=${rawStore.translateRunState?.running}`);
+    fireOne();
+    await sleep(0);
+    check('K2b 批量轮保活一跳调一次 getPlatformInfo', chromeStub.__platformInfoCalls === 1 && live.size === 1,
+      `calls=${chromeStub.__platformInfoCalls} live=${live.size}`);
+    release();
+    const summary = await round;
+    check('K2c 轮结束即停保活', summary?.translatedCount === 1 && live.size === 0, JSON.stringify({ summary, live: live.size }));
+
+    // 空扫描不发请求，不保活
+    const idsBefore = nextId;
+    const empty = await performTranslate({ source: 'manual' }); // eslint-disable-line no-undef
+    check('K2d 空扫描轮不挂保活定时器', empty?.pendingCount === 0 && live.size === 0 && nextId === idsBefore,
+      JSON.stringify({ empty, live: live.size, created: nextId - idsBefore }));
+  } finally {
+    disarm();
+  }
 }
 
 // ============ 弹窗夹具：vm 跑真实 popup.js，只替换 DOMContentLoaded 注册行导出内部函数 ============

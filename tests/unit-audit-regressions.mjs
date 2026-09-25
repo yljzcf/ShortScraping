@@ -396,4 +396,48 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
   }
 }
 
+// 联网迁移挂住不得拦住定时任务安装（审查 setupalarms-gated-by-network-migrations）：此前顶层是
+// 「整条迁移链跑完再 setupAlarms」，Shortical sitemap 请求挂住（无超时）时看门狗与定时任务永远
+// 装不上；SW 在挂住期间被回收的话每次唤醒从头再卡一遍。现 setupAlarms 在种子 set 之后、迁移链
+// 之前执行，联网迁移的请求带 20s 期限（小于 SW 30s 空闲回收阈值）。
+{
+  let sitemapOptions = null;
+  const bg = await background({
+    data: {
+      dramas: [card('sc2200', { source: 'shortical', url: 'https://shortical.com/drama/bound-by-fire-2200' })]
+    },
+    fetch: (url, options) => {
+      if (!String(url).includes('shortical.com/sitemaps/')) return undefined;
+      sitemapOptions = options;
+      return new Promise(() => {}); // 请求一直挂着，永不 resolve
+    }
+  });
+  assert.ok(sitemapOptions, `应已发出 Shortical sitemap 请求: ${bg.log.join(' | ')}`);
+  assert.equal(bg.data.shorticalCanonicalIdsMigrated, undefined, '迁移应仍卡在请求上');
+  assert.deepEqual(['watchdog', 'scrape-task', 'translate-task'].filter(name => bg.alarms.has(name)),
+    ['watchdog', 'scrape-task', 'translate-task'], `迁移挂住时定时任务仍须装好: ${bg.log.join(' | ')}`);
+  assert.ok(bg.log.indexOf('alarm:watchdog') < bg.log.indexOf('fetch:https://shortical.com/sitemaps/series.xml'),
+    `看门狗须先于联网迁移安装: ${bg.log.join(' | ')}`);
+  assert.equal(typeof sitemapOptions.signal?.aborted, 'boolean', 'sitemap 请求须带超时 signal');
+  assert.equal(sitemapOptions.signal.aborted, false);
+}
+
+// ReelShort 播放页迁移的逐条请求同样带超时 signal
+{
+  const signals = [];
+  await background({
+    data: {
+      rsEpisodeUrlMigrated: undefined,
+      dramas: [card('rs1', { source: 'reelshort', url: 'https://www.reelshort.com/movie/some-drama-abc123' })]
+    },
+    fetch: (url, options) => {
+      if (!String(url).startsWith('https://www.reelshort.com/')) return undefined;
+      signals.push(options?.signal);
+      return new Promise(() => {});
+    }
+  });
+  assert.equal(signals.length, 1);
+  assert.equal(typeof signals[0]?.aborted, 'boolean', 'ReelShort 迁移请求须带超时 signal');
+}
+
 console.log('Audit regression scenarios passed');

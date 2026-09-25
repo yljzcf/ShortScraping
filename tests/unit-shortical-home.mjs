@@ -15,6 +15,7 @@ import './bootstrap.cjs';
 // 用法：node tests/unit-shortical-home.mjs
 import fs from 'node:fs';
 import { el, documentFrom } from './dom-fixture.mjs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const contentSrc = fs.readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 (0, eval)(fs.readFileSync(new URL('../src/shared/site-registry.js', import.meta.url), 'utf8'));
@@ -72,30 +73,53 @@ const SUB = { urlPattern: `${HOME}?list=top_recommended`, tags: ['Shortical', 'T
 const loc = href => { const u = new URL(href); return { href, hostname: u.hostname, pathname: u.pathname, search: u.search, origin: u.origin }; };
 
 // ---------- IndexedDB 桩 ----------
-const makeIndexedDb = ({ dbNames = ['firebaseLocalStorageDb'], records = null, hasStore = true, openFails = false, noDatabasesApi = false } = {}) => {
-  const state = { openCalls: 0 };
+// state：openCalls＝open 次数，opened＝真正拿到连接的次数，closeCalls＝连接被 close 的次数
+// （审查 shortical-idb-connection-leak：每条拿到的连接都必须关掉，K 组逐分支核对 opened === closeCalls）。
+// openDelay 让 open 晚于内容脚本的 3 秒兜底才成功；hangGetAll 让读仓库永不返回；
+// versionChangeAfter 在连接打开后这么多毫秒模拟站点升级库版本；upgradeNeeded 模拟库在
+// databases() 与 open() 之间被删（open 触发 upgradeneeded，中止后回 onerror）
+const makeIndexedDb = ({ dbNames = ['firebaseLocalStorageDb'], records = null, hasStore = true, openFails = false, noDatabasesApi = false,
+  openDelay = 0, hangGetAll = false, versionChangeAfter = null, upgradeNeeded = false } = {}) => {
+  const state = { openCalls: 0, opened: 0, closeCalls: 0, upgradeAborted: false, closedOnVersionChange: null };
   if (noDatabasesApi) return { idb: { open() { state.openCalls++; return {}; } }, state };
   const idb = {
     async databases() { return dbNames.map(name => ({ name, version: 1 })); },
     open(name) {
       state.openCalls++;
-      const request = { result: null, onsuccess: null, onerror: null };
+      const request = { result: null, transaction: null, onsuccess: null, onerror: null, onupgradeneeded: null };
       setTimeout(() => {
         if (openFails) return request.onerror && request.onerror();
-        request.result = {
-          objectStoreNames: { contains: store => hasStore && store === 'firebaseLocalStorage' },
+        if (upgradeNeeded) {
+          request.transaction = { abort() { state.upgradeAborted = true; } };
+          request.onupgradeneeded && request.onupgradeneeded();
+          // 规范：升级事务被中止 → open 请求以 AbortError 失败、不留下新库；没中止就照常 success 一个空库
+          if (state.upgradeAborted) return request.onerror && request.onerror();
+        }
+        state.opened++;
+        const db = {
+          onversionchange: null,
+          objectStoreNames: { contains: store => !upgradeNeeded && hasStore && store === 'firebaseLocalStorage' },
+          close() { state.closeCalls++; },
           transaction: () => ({
             objectStore: () => ({
               getAll() {
                 const all = { result: null, onsuccess: null, onerror: null };
-                setTimeout(() => { all.result = records || []; all.onsuccess && all.onsuccess(); }, 0);
+                if (!hangGetAll) setTimeout(() => { all.result = records || []; all.onsuccess && all.onsuccess(); }, 0);
                 return all;
               }
             })
           })
         };
+        request.result = db;
         request.onsuccess && request.onsuccess();
-      }, 0);
+        if (versionChangeAfter !== null) {
+          setTimeout(() => {
+            const before = state.closeCalls;
+            db.onversionchange && db.onversionchange();
+            state.closedOnVersionChange = state.closeCalls > before;
+          }, versionChangeAfter);
+        }
+      }, openDelay);
       return request;
     }
   };
@@ -125,11 +149,11 @@ async function runScenario({ href = `${HOME}?list=top_recommended`, subscription
   const listeners = [];
 
   globalThis.chrome = {
-    storage: { local: { async get() { await Promise.resolve(); return { dramas: structuredClone(store.dramas), urlTags: subscriptions }; } } },
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
       async sendMessage(message) {
         await Promise.resolve();
+        if (message?.action === 'getScrapeContext') return scrapeContextReply(store.dramas, subscriptions);
         if (message?.action === 'saveDrama') {
           saveCalls.push(structuredClone(message.drama));
           const dup = store.dramas.some(d => d.itemId === message.drama.itemId);
@@ -241,6 +265,57 @@ for (const [name, scenario] of [
   check(`${name} → 照常入库、genres 退回卡片上那一个`,
     response?.success === true && saved.length === 3 && eq(saved[0]?.genres, ['Against All Odds']),
     show({ n: saved.length, genres: saved[0]?.genres }));
+}
+
+// ---------- K IndexedDB 连接用完必关（审查 shortical-idb-connection-leak） ----------
+// 用户在自己的前台 Shortical 标签页里点按钮时，挂着的连接会留到页面卸载，站点升级库版本或
+// 删库重建就被它 blocked、登录态初始化卡住。逐分支核对：拿到的每条连接都被关掉
+for (const [name, options] of [
+  ['K1 正常读到 token', { records: tokenRecords('tok-1') }],
+  ['K2 对象仓库不存在', { hasStore: false }],
+  ['K3 记录里没有 accessToken', { records: [{ fbase_key: 'k', value: { uid: 'u' } }] }]
+]) {
+  const indexedDb = makeIndexedDb(options);
+  const { response } = await runScenario({ indexedDb });
+  const { opened, closeCalls } = indexedDb.state;
+  check(`${name} → 连接用完即关（opened=${opened} closeCalls=${closeCalls}）`,
+    response?.success === true && opened === 1 && closeCalls === opened, show(indexedDb.state));
+}
+{
+  // 3 秒兜底先到、open 之后才成功：迟到的连接一到手就关。兜底时长压到 30ms，open 放在 120ms
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms === 3000 ? 30 : ms, ...args);
+  const indexedDb = makeIndexedDb({ records: tokenRecords('tok-late'), openDelay: 120 });
+  try {
+    const { saved, apiCalls } = await runScenario({ indexedDb });
+    await new Promise(r => realSetTimeout(r, 200));
+    check('K4 兜底超时后才打开的连接一到手就关，genres 退回卡片值、不调接口',
+      indexedDb.state.opened === 1 && indexedDb.state.closeCalls === 1 && apiCalls.length === 0 && eq(saved[0]?.genres, ['Against All Odds']),
+      show({ state: indexedDb.state, apiCalls: apiCalls.length }));
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+}
+{
+  // 读仓库挂住期间站点要升级库版本：立即让路（close），不等 3 秒兜底
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms === 3000 ? 80 : ms, ...args);
+  const indexedDb = makeIndexedDb({ hangGetAll: true, versionChangeAfter: 10 });
+  try {
+    const { response } = await runScenario({ indexedDb });
+    check('K5 versionchange 时当场关闭连接（站点升级不被 blocked），之后兜底收口不再重复关',
+      response?.success === true && indexedDb.state.closedOnVersionChange === true && indexedDb.state.closeCalls === 1,
+      show(indexedDb.state));
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+}
+{
+  const indexedDb = makeIndexedDb({ upgradeNeeded: true });
+  const { saved, response } = await runScenario({ indexedDb });
+  check('K6 库在 databases() 与 open() 之间被删 → 中止 upgradeneeded，不替站点建空库，照常入库',
+    response?.success === true && indexedDb.state.upgradeAborted === true && indexedDb.state.opened === 0 && saved.length === 3,
+    show(indexedDb.state));
 }
 
 // ---------- I id 守卫与去重 ----------
@@ -403,10 +478,10 @@ for (const [name, sitemapImpl] of [
   const store = { dramas: [] };
   const listeners = [];
   globalThis.chrome = {
-    storage: { local: { async get() { return { dramas: [], urlTags: [SUB] }; } } },
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
       async sendMessage(message) {
+        if (message?.action === 'getScrapeContext') return scrapeContextReply([], [SUB]);
         if (message?.action === 'saveDrama') { store.dramas.push(message.drama); return { success: true, saved: true }; }
         return { success: true };
       }

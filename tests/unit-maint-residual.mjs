@@ -4,6 +4,7 @@ import './bootstrap.cjs';
 // 经 'scrape' 消息驱动完整管线；location/document 在两轮之间切换站点。
 // 用法：node tests/unit-maint-residual.mjs（v1.4.4 跑应 RED——坏项以标题=ID 入库）
 import fs from 'node:fs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const IMDB_URL = 'https://www.imdb.com/search/title/?release_date=2026-01-01,&genres=short';
 const RR_URL = 'https://www.royalroad.com/fictions/trending';
@@ -47,18 +48,11 @@ const listeners = [];
 let activeUrlTags = [];
 
 globalThis.chrome = {
-  storage: {
-    local: {
-      async get() {
-        await Promise.resolve();
-        return { dramas: structuredClone(rawStore.dramas), urlTags: structuredClone(activeUrlTags) };
-      }
-    }
-  },
   runtime: {
     onMessage: { addListener(fn) { listeners.push(fn); } },
     async sendMessage(message) {
       await Promise.resolve();
+      if (message?.action === 'getScrapeContext') return scrapeContextReply(rawStore.dramas, activeUrlTags);
       if (message?.action === 'saveDrama') {
         const dup = rawStore.dramas.some(d => d.itemId === message.drama.itemId);
         if (!dup) rawStore.dramas.push(structuredClone(message.drama));

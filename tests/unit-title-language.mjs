@@ -19,6 +19,7 @@ import './bootstrap.cjs';
 //
 // fixture 全部内嵌、零网络。用法：node tests/unit-title-language.mjs
 import fs from 'node:fs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const contentSrc = fs.readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 const registrySrc = fs.readFileSync(new URL('../src/shared/site-registry.js', import.meta.url), 'utf8');
@@ -47,24 +48,17 @@ const STEAM_URL = 'https://store.steampowered.com/category/visual_novel?flavor=c
 
 /**
  * 跑一轮 Steam 抓取：装桩 appdetails 的英文档与中文档 → eval 真实 content.js →
- * 派发 'scrape' → 返回入库的那张卡。
+ * 派发 'scrape' → 返回入库的那张卡。enStatus / zhStatus 给了就让该语言档回这个 HTTP 状态（非 2xx）；
+ * 传同一个 store 可以连跑几轮（Z 组：本轮失败、下轮重试）。
  */
-async function steamScenario({ appId = '111222', en, zh }) {
-  const store = { dramas: [] };
+async function steamScenario({ appId = '111222', en, zh, enStatus, zhStatus, store = { dramas: [] } }) {
   const listeners = [];
   globalThis.chrome = {
-    storage: {
-      local: {
-        async get() {
-          await Promise.resolve();
-          return { dramas: structuredClone(store.dramas), urlTags: [{ urlPattern: STEAM_URL, tags: ['Steam', '视觉小说'] }] };
-        }
-      }
-    },
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
       async sendMessage(message) {
         await Promise.resolve();
+        if (message?.action === 'getScrapeContext') return scrapeContextReply(store.dramas, [{ urlPattern: STEAM_URL, tags: ['Steam', '视觉小说'] }]);
         if (message?.action === 'saveDrama') {
           store.dramas.push(structuredClone(message.drama));
           return { success: true, saved: true };
@@ -81,9 +75,11 @@ async function steamScenario({ appId = '111222', en, zh }) {
       return { ok: true, url, json: async () => ({ appids: [Number(appId)] }) };
     }
     if (url.includes(`appdetails?appids=${appId}&l=english`)) {
+      if (enStatus) return { ok: false, status: enStatus, url, json: async () => ({}) };
       return { ok: true, url, json: async () => ({ [appId]: { success: true, data: en } }) };
     }
     if (url.includes(`appdetails?appids=${appId}&l=schinese`)) {
+      if (zhStatus) return { ok: false, status: zhStatus, url, json: async () => ({}) };
       return zh
         ? { ok: true, url, json: async () => ({ [appId]: { success: true, data: zh } }) }
         : { ok: true, url, json: async () => ({ [appId]: { success: false } }) };
@@ -171,6 +167,35 @@ check('L8 官方中文只有一半仍留 new（v1.5.14 语义不回退）',
 const l9 = await steamScenario({ en: enOf('No Chinese Store'), zh: null });
 check('L9 中文档无数据时留 new', l9?.titleZh === '' && l9?.status === 'new', JSON.stringify({ titleZh: l9?.titleZh }));
 
+// ---------- Z 组：中文档 HTTP 非 2xx ≠「该语言无数据」（审查 steam-zh-429-permanent-loss） ----------
+// 以前任何非 2xx 都返回 null、和 success:false 混为一谈：schinese 一被 429，卡片就以 new 入库交 AI 翻译，
+// 之后去重命中只回填 genres，官方中文名与简介再也补不回来。现在整卡本轮跳过、下轮重试
+{
+  const store = { dramas: [] };
+  const zhFull = { name: '逃脱！羁绊之家', short_description: '一场密室逃脱冒险。' };
+  const first = await steamScenario({ en: enOf('Escape! House of Bonds'), zh: zhFull, zhStatus: 429, store });
+  check('Z1 schinese 被 429 → 该卡本轮不入库（不当成「无官方中文」）',
+    first === undefined && store.dramas.length === 0, JSON.stringify(store.dramas.map(d => [d.itemId, d.titleZh, d.status])));
+  const second = await steamScenario({ en: enOf('Escape! House of Bonds'), zh: zhFull, store });
+  check('Z2 下一轮 schinese 恢复 200 → 带 Steam 官方中文入库并标 trans',
+    second?.titleZh === '逃脱！羁绊之家' && second?.descriptionZh === '一场密室逃脱冒险。' && second?.status === 'trans',
+    JSON.stringify({ titleZh: second?.titleZh, status: second?.status }));
+}
+{
+  const r = await steamScenario({ en: enOf('Server Error Game'), zh: { name: '服务器错误', short_description: '中文简介。' }, zhStatus: 503 });
+  check('Z3 schinese 5xx 同样整卡跳过', r === undefined, JSON.stringify(r && [r.titleZh, r.status]));
+}
+{
+  const r = await steamScenario({ en: enOf('Rate Limited'), enStatus: 429 });
+  check('Z4 english 被 429 → 照旧跳过该卡', r === undefined, JSON.stringify(r && r.title));
+}
+{
+  // 反向守卫：success:false（该语言确实没数据）仍按「无官方中文」照常入库、留 new
+  const r = await steamScenario({ en: enOf('No Chinese Here') });
+  check('Z5 schinese success:false 仍照常入库并留 new（L9 语义不变）', r?.title === 'No Chinese Here' && r?.status === 'new',
+    JSON.stringify(r && [r.title, r.status]));
+}
+
 // ---------- R 组：标题冗余折叠 ----------
 // 取不到函数时返回哨兵而不是抛异常：RED 阶段要看到逐条 FAIL，不要整套崩掉
 const td = (drama) => (typeof globalThis.TimelineRender?.titleDisplay === 'function'
@@ -204,6 +229,25 @@ check('R5 不同中文名不得被标点归一误判为同名',
 // 三个消费方（卡片 / 多维表格 payload / 群机器人卡片）必须是同一份实现，不许漂移
 check('R6 timeline-render 的 titleDisplay 就是 translate-config 那一份',
   globalThis.TimelineRender.titleDisplay === globalThis.TranslateConfig.titleDisplay, '');
+
+// ---------- R7 组：弯引号也是装饰性标点（title-decoration-ascii-quotes，batch F） ----------
+// TITLE_DECORATION 的字符类里本该是 “ ” ‘ ’ 的位置，自 7cd50f0 起一直是重复的 ASCII "" ''，
+// MyDrama 标题常带 ’，模型或 Steam 官方中文只把它换成 ' 时，卡片显示成「It's Me（It’s Me）」。
+// 用例里的弯引号一律 \u 转义书写，防止编辑器再次把它们替换成 ASCII。
+check('R7a 仅弯双引号之差 → 视作同名（“Love” / Love）',
+  td({ titleZh: 'Love', title: '“Love”' }) === 'Love',
+  td({ titleZh: 'Love', title: '“Love”' }));
+
+check('R7b 弯单引号 ’ 与 ASCII \' 视作同名，显示 titleZh',
+  td({ titleZh: "It's Me", title: 'It’s Me' }) === "It's Me"
+  && td({ titleZh: '‘Tis Fate', title: "'Tis Fate" }) === '‘Tis Fate',
+  JSON.stringify([td({ titleZh: "It's Me", title: 'It’s Me' }), td({ titleZh: '‘Tis Fate', title: "'Tis Fate" })]));
+
+check('R7c 反例：真正不同名的标题带弯引号时仍拼成「中文（英文）」',
+  td({ titleZh: '是我', title: 'It’s Me' }) === '是我（It’s Me）'
+  && td({ titleZh: 'It’s You', title: 'It’s Me' }) === 'It’s You（It’s Me）',
+  JSON.stringify([td({ titleZh: '是我', title: 'It’s Me' }), td({ titleZh: 'It’s You', title: 'It’s Me' })]));
+// ---------- R7 组结束 ----------
 
 console.log = origLog; console.warn = origWarn; console.error = origError;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

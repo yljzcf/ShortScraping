@@ -9,6 +9,8 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const worktreeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SiteRegistry = require(path.join(worktreeRoot, 'src/shared/site-registry.js'));
+const UrlMatch = require(path.join(worktreeRoot, 'src/shared/url-match.js'));
+const SubscriptionConfig = require(path.join(worktreeRoot, 'src/shared/subscription-config.js'));
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
@@ -132,10 +134,11 @@ for (const rel of filesToScan) {
 // ---------- T4 接线静态断言 ----------
 const manifest = JSON.parse(fs.readFileSync(path.join(worktreeRoot, 'manifest.json'), 'utf8'));
 // content.js 依赖的共享模块清单（v1.6.2 起含 translate-config：Steam 官方中文
-// 采用判据 hasChineseChars 在那里；v1.6.18 起含 scrape-rules：与后台共用的采集口径）。manifest 注入与后台强制注入必须逐字一致——
+// 采用判据 hasChineseChars 在那里；v1.6.18 起含 scrape-rules：与后台共用的采集口径；
+// 其后含 url-match：订阅判定 matchSubscription 与三端归属过滤共用）。manifest 注入与后台强制注入必须逐字一致——
 // 兜底注入路径漏一个模块＝content.js 直接 ReferenceError，而那条路径正是后台
 // 节流标签页的常态入口
-const CONTENT_SCRIPT_FILES = ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/shared/scrape-rules.js', 'src/content/content.js'];
+const CONTENT_SCRIPT_FILES = ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/shared/scrape-rules.js', 'src/shared/url-match.js', 'src/content/content.js'];
 check('T4a manifest content_scripts js 数组前置共享模块',
   deepEq(manifest.content_scripts[0].js, CONTENT_SCRIPT_FILES),
   JSON.stringify(manifest.content_scripts[0].js));
@@ -306,6 +309,53 @@ check('T6d notimdb.com 站点归属怪癖保真', SiteRegistry.siteOfUrl('https:
   const catalog = JSON.parse(fs.readFileSync(path.join(worktreeRoot, 'config/tag.example.json'), 'utf8'));
   const blocked = catalog.map(entry => entry.url).filter(url => !SiteRegistry.isInjectableUrl(url));
   check('T6d 订阅目录的每个 URL 都能走强制注入兜底', catalog.length > 0 && blocked.length === 0, blocked.join(', '));
+}
+
+// ---------- T8 订阅目录守卫（审查 missing-guard-tests） ----------
+// manifest matches 是 '*.host' 形态，裸域与 www 都会命中，T6b 守不住 README 强调的域名形态：
+// 这几站跳转后 location.href 与订阅串不等 → 静默零抓取，npm test 却全过、要到用户那边才暴露
+{
+  const catalog = JSON.parse(fs.readFileSync(path.join(worktreeRoot, 'config/tag.example.json'), 'utf8'));
+  const unmapped = catalog.filter(entry => !SiteRegistry.siteOfUrl(entry.url)).map(entry => entry.url);
+  check('T8a 订阅目录每条都能映射到站点', catalog.length > 0 && unmapped.length === 0, JSON.stringify(unmapped));
+
+  // 照抄 README「各站的域名形态并不一致」那段：带 www. 的四站与必须裸域的两站（站点 301 方向各不相同）
+  const HOST_FORM = { flickreels: 'www', goodshort: 'www', shortmax: 'www', dramabox: 'www', shortical: 'bare', pinedrama: 'bare' };
+  const wrongForm = catalog.filter(entry => {
+    const form = HOST_FORM[SiteRegistry.siteOfUrl(entry.url)];
+    if (!form) return false;
+    const www = new URL(entry.url).hostname.startsWith('www.');
+    return form === 'www' ? !www : www;
+  }).map(entry => entry.url);
+  const covered = Object.keys(HOST_FORM).filter(site => catalog.some(entry => SiteRegistry.siteOfUrl(entry.url) === site));
+  check('T8b 域名形态：FlickReels / GoodShort / ShortMax / DramaBox 带 www.，Shortical / PinesDramas 不带',
+    wrongForm.length === 0 && covered.length === Object.keys(HOST_FORM).length,
+    JSON.stringify({ wrongForm, covered }));
+
+  const byKey = new Map();
+  const dups = [];
+  for (const entry of catalog) {
+    const key = UrlMatch.normalizeListUrl(entry.url);
+    if (byKey.has(key)) dups.push([byKey.get(key), entry.url]);
+    else byKey.set(key, entry.url);
+  }
+  check('T8c 按 UrlMatch.normalizeListUrl（尾斜杠归一）不重复', dups.length === 0, JSON.stringify(dups));
+
+  const badTags = catalog.filter(entry => !Array.isArray(entry.tags) || entry.tags.length < 1 || entry.tags.length > 3
+    || entry.tags.some(tag => typeof tag !== 'string' || !tag.trim())).map(entry => [entry.url, entry.tags]);
+  check('T8d 每条 tags 是 1~3 个非空字符串', badTags.length === 0, JSON.stringify(badTags));
+  check('T8e SubscriptionConfig.normalizeUrlTags 不丢任何一条（形状合法、无隐性重复）',
+    SubscriptionConfig.normalizeUrlTags(catalog).length === catalog.length,
+    `${SubscriptionConfig.normalizeUrlTags(catalog).length} / ${catalog.length}`);
+
+  // 每条订阅作为页面地址时命中的就是它自己（matchSubscription 精确轮），不被别的订阅抢走
+  const urlTags = SubscriptionConfig.normalizeUrlTags(catalog);
+  const stolen = urlTags.filter(sub => UrlMatch.matchSubscription(sub.urlPattern, urlTags) !== sub).map(sub => sub.urlPattern);
+  check('T8f 每条订阅页都命中自己那条订阅', stolen.length === 0, JSON.stringify(stolen));
+
+  const pkg = JSON.parse(fs.readFileSync(path.join(worktreeRoot, 'package.json'), 'utf8'));
+  check('T8g manifest.json 与 package.json 版本号一致', typeof manifest.version === 'string' && manifest.version === pkg.version,
+    JSON.stringify({ manifest: manifest.version, package: pkg.version }));
 }
 
 // ---------- T5 Node 侧消费契约（lark 经 require 间接取数） ----------

@@ -12,6 +12,7 @@ import './bootstrap.cjs';
 // 路径闸门、三条订阅精确等值、去重命中零写、取数失败不入库。
 // 用法：node tests/unit-goodshort-channel.mjs
 import fs from 'node:fs';
+import { scrapeContextReply } from './content-fixture.mjs';
 
 const contentSrc = fs.readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 (0, eval)(fs.readFileSync(new URL('../src/shared/site-registry.js', import.meta.url), 'utf8'));
@@ -89,11 +90,11 @@ async function runScenario({ href = CHANNEL, subscriptions = SUBS, html, documen
   const listeners = [];
 
   globalThis.chrome = {
-    storage: { local: { async get() { await Promise.resolve(); return { dramas: structuredClone(store.dramas), urlTags: subscriptions }; } } },
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
       async sendMessage(message) {
         await Promise.resolve();
+        if (message?.action === 'getScrapeContext') return scrapeContextReply(store.dramas, subscriptions);
         if (message?.action === 'saveDrama') {
           saveCalls.push(structuredClone(message.drama));
           const dup = store.dramas.some(d => d.itemId === message.drama.itemId);
@@ -217,9 +218,26 @@ for (const [name, html] of [
     !('company' in d) && !('year' in d), show(Object.keys(d)));
 }
 {
-  const { saved } = await runScenario({ html: pageOf([book({ cover: '', resource: '' })]) });
-  check('F9 缺封面/缺 resource 时对应字段为空串而不是 undefined',
-    saved[0]?.poster === '' && saved[0]?.url === '', show([saved[0]?.poster, saved[0]?.url]));
+  const { saved } = await runScenario({ html: pageOf([book({ cover: '' })]) });
+  check('F9 缺封面时 poster 为空串（不是 undefined），照常入库',
+    saved.length === 1 && saved[0]?.poster === '' && saved[0]?.url === 'https://www.goodshort.com/drama/not-his-atm-31001740161',
+    show([saved.length, saved[0]?.poster, saved[0]?.url]));
+}
+{
+  // 审查 goodshort-empty-url-saved：以前缺 bookResourceUrl 照样以空 url 入库并推送，
+  // 之后去重命中只补 genres，站点补上字段也更新不了。现在跳过该条、下轮重试（同 FlickReels）
+  const { saved, saveCalls, response } = await runScenario({ html: pageOf([
+    book({ id: '31001740161', resource: '' }),
+    book({ id: '31001730620', name: '正常', resource: 'ok-31001730620' })
+  ]) });
+  check('F9b 缺 bookResourceUrl → 该条不入库（零 saveDrama），其余照常',
+    response?.success === true && eq(saved.map(d => d.itemId), ['gs31001730620'])
+      && !saveCalls.some(d => d.itemId === 'gs31001740161'),
+    show({ saved: saved.map(d => [d.itemId, d.url]), calls: saveCalls.map(d => d.itemId) }));
+  const retry = await runScenario({ html: pageOf([book({ id: '31001740161', resource: 'not-his-atm-31001740161' })]), dramas: saved });
+  check('F9c 下轮站点补上字段 → 以正常链接入库',
+    retry.saved.some(d => d.itemId === 'gs31001740161' && d.url === 'https://www.goodshort.com/drama/not-his-atm-31001740161'),
+    show(retry.saved.map(d => [d.itemId, d.url])));
 }
 {
   const withQuery = `${COVER}?spm=abc`;

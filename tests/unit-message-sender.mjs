@@ -3,8 +3,11 @@ import './bootstrap.cjs';
 //   M 组：chrome.runtime.onMessage 按发送方分流（bg-onmessage-no-sender-check / onmessage-no-sender-check）。
 //     扩展页面＝sender.id 是本扩展且 sender.url 落在 chrome.runtime.getURL('') 之下——设置页以标签页
 //     打开，同样带 sender.tab，不能只凭 sender.tab 判定。其余发送方一律按内容脚本对待，只放行
-//     saveDrama / fetchDetailHtml；清库、导入、Lark 推送与测试发送、触发抓取 / 翻译等特权动作
+//     getScrapeContext / saveDrama / fetchDetailHtml；清库、导入、Lark 推送与测试发送、触发抓取 / 翻译等特权动作
 //     回 success:false 且不产生任何副作用。
+//   C 组 / M2c-M2e：内容脚本不再直连 storage（storage-secrets-exposed-to-content / full-table-read-per-scrape）——
+//     抓取上下文经 getScrapeContext 向后台要，只给 itemId 与「是否已有 genres」；后台顶层尝试把
+//     storage.local 收成 TRUSTED_CONTEXTS，该 API 不支持 / 同步抛错 / 异步拒绝都不能挡住初始化。
 //   D 组：死代码 applyTranslation 处理器与 loadTranslator 已删除（applytranslation-dead-handler）。
 //   F 组：scrapeUrlInTab 快路径失败后的「强制注入 + 轮询」兜底只对注册表站点放行
 //     （host-permissions-overbroad）：订阅 URL 或标签页当前 URL 不属于 SiteRegistry 时报错、不注入。
@@ -31,8 +34,9 @@ const SENDERS = {
   content: { id: EXT_ID, url: 'https://www.imdb.com/search/title/?genres=short', tab: { id: 7 }, frameId: 0, origin: 'https://www.imdb.com' }
 };
 
-async function setup() {
-  const bg = await background();
+// seed：初始 storage（dramas 要在 SW 启动前就位——启动时的队列读会把它装进 dramasCache，事后直改 bg.data 不进缓存）
+async function setup(seed = {}) {
+  const bg = await background({ data: seed });
   bg.context.chrome.runtime.id = EXT_ID;
   const warnings = [];
   bg.context.console = { log() {}, error() {}, warn: (...args) => warnings.push(args.join(' ')) };
@@ -110,6 +114,78 @@ const PRIVILEGED = [
   check('M2b 内容脚本 fetchDetailHtml 照常经后台代理取 HTML',
     detail.resp?.success === true && detail.resp?.html === '<html>detail</html>'
       && fetchCalls.includes('https://www.netflix.com/title/81234567'), JSON.stringify(detail));
+}
+
+// ---------- M2c-M2e 抓取上下文：精简、不带密钥、排在写队列里 ----------
+{
+  const { bg, send } = await setup({
+    dramas: [
+      card('tt10', { genres: ['Drama'], description: '一段很长的简介', descriptionZh: '中文译文' }),
+      card('tt11'),
+      card('tt12', { genres: [] }),
+      { id: 'no-item-id', title: '缺 itemId 的坏行', sourceListUrl: 'https://www.imdb.com/search/title/' }
+    ],
+    translateConfig: { aiApiKey: 'sk-unit-secret', aiEndpoint: 'https://ai.example/v1' },
+    larkConfig: { feishuAppSecret: 'lark-unit-secret', botWebhookUrl: 'https://open.feishu.cn/hook/unit' }
+  });
+  const ctx = await send({ action: 'getScrapeContext' }, SENDERS.content);
+  check('M2c 内容脚本 getScrapeContext → { success, urlTags, known: [[itemId, 是否已有 genres]] }（异步应答）',
+    ctx.sync === true && ctx.resp?.success === true
+      && JSON.stringify(Object.keys(ctx.resp).sort()) === JSON.stringify(['known', 'success', 'urlTags'])
+      && JSON.stringify(ctx.resp.known) === JSON.stringify([['tt10', true], ['tt11', false], ['tt12', false]])
+      && JSON.stringify(ctx.resp.urlTags) === JSON.stringify(bg.data.urlTags),
+    JSON.stringify(ctx));
+  const body = JSON.stringify(ctx.resp);
+  check('M2d 应答不带整条记录（标题 / 简介 / 译文）也不带任何配置密钥',
+    !['Fixture', '一段很长的简介', '中文译文', 'sk-unit-secret', 'lark-unit-secret', 'open.feishu.cn', 'ai.example'].some(t => body.includes(t)), body);
+}
+{
+  // 读表排在写队列里：与一条 saveDrama 同时到达时，上下文里已经有那张新卡
+  const { send } = await setup({ dramas: [card('tt20')] });
+  const saving = send({ action: 'saveDrama', drama: card('tt21', { genres: ['Romance'] }) }, SENDERS.content);
+  const reading = send({ action: 'getScrapeContext' }, SENDERS.content);
+  const [saved, ctx] = await Promise.all([saving, reading]);
+  check('M2e 上下文走写队列：并发的 saveDrama 先提交，known 里已含新卡',
+    saved.resp?.saved === true && JSON.stringify([...(ctx.resp?.known || [])].sort()) === JSON.stringify([['tt20', false], ['tt21', true]]),
+    JSON.stringify({ saved: saved.resp, known: ctx.resp?.known }));
+}
+
+// ---------- C storage.local 访问级别收窄：尽力而为，绝不挡初始化 ----------
+{
+  const bgSrc = fs.readFileSync(path.join(root, 'src/background/background.js'), 'utf8');
+  const callAt = bgSrc.indexOf('\nrestrictStorageToTrustedContexts();');
+  const initAt = bgSrc.indexOf('const initPromise = ');
+  check('C1 后台顶层、initPromise 之前调用 restrictStorageToTrustedContexts()',
+    callAt >= 0 && initAt >= 0 && callAt < initAt, JSON.stringify({ callAt, initAt }));
+  const { bg } = await setup();
+  const defined = bg.run('typeof restrictStorageToTrustedContexts') === 'function';
+  check('C1b restrictStorageToTrustedContexts 已定义', defined, bg.run('typeof restrictStorageToTrustedContexts'));
+  if (defined) {
+  const calls = [];
+  const warnings = [];
+  bg.context.console = { log() {}, error() {}, warn: (...args) => warnings.push(args.join(' ')) };
+  const local = bg.context.chrome.storage.local;
+  local.setAccessLevel = (arg) => { calls.push(arg); return Promise.resolve(); };
+  bg.run('restrictStorageToTrustedContexts()');
+  check('C2 支持时以 { accessLevel: TRUSTED_CONTEXTS } 调 storage.local.setAccessLevel',
+    JSON.stringify(calls) === JSON.stringify([{ accessLevel: 'TRUSTED_CONTEXTS' }]), JSON.stringify(calls));
+  let unhandled = 0;
+  const onUnhandled = () => { unhandled++; };
+  process.on('unhandledRejection', onUnhandled);
+  local.setAccessLevel = () => { throw new Error('This StorageArea does not support setting access level'); };
+  let syncThrew = false;
+  try { bg.run('restrictStorageToTrustedContexts()'); } catch (e) { syncThrew = true; }
+  local.setAccessLevel = () => Promise.reject(new Error('Access level can only be set on session storage'));
+  bg.run('restrictStorageToTrustedContexts()');
+  delete local.setAccessLevel;
+  let missingThrew = false;
+  try { bg.run('restrictStorageToTrustedContexts()'); } catch (e) { missingThrew = true; }
+  await sleep(20);
+  process.off('unhandledRejection', onUnhandled);
+  check('C3 同步抛错 / 异步拒绝 / API 不存在：都不抛出、无未处理拒绝，前两种各留一条告警',
+    !syncThrew && !missingThrew && unhandled === 0 && warnings.filter(w => w.includes('访问级别')).length === 2,
+    JSON.stringify({ syncThrew, missingThrew, unhandled, warnings }));
+  }
 }
 
 // ---------- M3 弹窗（无 tab）与设置页（带 tab）都是扩展页面，特权动作照常执行 ----------

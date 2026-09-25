@@ -497,7 +497,8 @@ await sleep(150);
   check('R3 API 模式额度告警（HTTP 200 + responseStatus 429）→ transportError，不当成译文', r3.title === '' && Boolean(r3.transportError),
     JSON.stringify(r3));
 
-  globalThis.fetch = async (url) => ({ ok: true, status: 200, json: async () => ({ responseStatus: 200, responseData: { translatedText: decodeURIComponent(String(url).match(/q=([^&]*)/)[1]) } }) });
+  // 原文用 searchParams 取：URL 的查询串里空格编码成 '+'，正则 + decodeURIComponent 还原不了
+  globalThis.fetch = async (url) => ({ ok: true, status: 200, json: async () => ({ responseStatus: 200, responseData: { translatedText: new URL(url).searchParams.get('q') } }) });
   const r4 = await globalThis.Translator.translateTitleAndDesc('1923', '');
   check('R4 API 模式译文与原文相同 → 空串且无 transportError（后台按「服务答了没给译文」计次）',
     r4.title === '' && r4.desc === '' && !('transportError' in r4), JSON.stringify(r4));
@@ -505,6 +506,25 @@ await sleep(150);
   globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ responseStatus: 200, responseData: { translatedText: '你好' } }) });
   const r5 = await globalThis.Translator.translateTitleAndDesc('Hello', 'World');
   check('R5 API 模式正常应答照常返回译文', r5.title === '你好' && r5.desc === '你好' && !('transportError' in r5), JSON.stringify(r5));
+
+  // R6 mymemory-length-and-query 第 1 步（batch F）：endpoint 自带查询串（MyMemory 文档建议加
+  // de=邮箱提高额度）时，旧的字符串拼接得 '…/get?de=me@x.com?q=…'，q 被吞进 de 的值里。
+  // 桩按 MyMemory 的真实行为：缺 q 回 responseStatus 403「NO QUERY SPECIFIED」
+  rawStore.translateConfig = { translateMode: 'api', apiEndpoint: 'https://mt.test/get?de=me@x.com', requestTimeoutSec: 5 };
+  const apiUrls = [];
+  globalThis.fetch = async (url) => {
+    apiUrls.push(String(url));
+    const q = new URL(url).searchParams.get('q');
+    return { ok: true, status: 200, json: async () => (q
+      ? { responseStatus: 200, responseData: { translatedText: `译:${q}` } }
+      : { responseStatus: 403, responseDetails: 'NO QUERY SPECIFIED. EXAMPLE REQUEST: GET?Q=HELLO&LANGPAIR=EN|IT', responseData: { translatedText: '' } }) };
+  };
+  const r6 = await globalThis.Translator.translateTitleAndDesc('Tom & Jerry?', 'A cat + a mouse');
+  const p6 = apiUrls[0] ? new URL(apiUrls[0]).searchParams : new URLSearchParams();
+  check('R6 endpoint 自带查询串：保留 de，q / langpair 作为独立参数（含 & ? + 的原文往返无损）',
+    r6.title === '译:Tom & Jerry?' && r6.desc === '译:A cat + a mouse' && !('transportError' in r6)
+      && p6.get('de') === 'me@x.com' && p6.get('langpair') === 'en|zh-CN' && apiUrls.length === 2,
+    JSON.stringify({ r6, urls: apiUrls }));
 }
 
 await sleep(50);

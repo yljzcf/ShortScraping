@@ -27,6 +27,12 @@ check('T1b */15 分步长 → 10:30', nextOf('*/15 * * * *').getTime() === new D
 check('T1c 工作日 9-18/3 点 → 下个周一 9 点（8/1 是周六）', nextOf('0 9-18/3 * * 1-5').getTime() === new Date('2026-08-03T09:00:00').getTime(), String(nextOf('0 9-18/3 * * 1-5')));
 check('T1d 每月 1,15 号 → 8/15', nextOf('0 0 1,15 * *').getTime() === new Date('2026-08-15T00:00:00').getTime(), String(nextOf('0 0 1,15 * *')));
 check('T1e 星期 7 归一为周日 → 8/2', nextOf('0 12 * * 7').getTime() === new Date('2026-08-02T12:00:00').getTime(), String(nextOf('0 12 * * 7')));
+// T1f 闰日跨过一个以上平年：旧的 366 天查找窗口会抛「无法计算下一次 Cron 执行时间」，
+// 与解析期「2/29 合法」的放行自相矛盾（validateConfig 拒绝保存、手改进 cron.json 则后台静默降级为间隔）
+let leapNext = null;
+try { leapNext = new Date(SC.getNextCronRun('0 0 29 2 *', new Date('2026-09-25T10:00:00'))); } catch (e) { leapNext = e.message; }
+check('T1f 0 0 29 2 * 从 2026-09-25 起算 → 2028-02-29',
+  leapNext instanceof Date && leapNext.getTime() === new Date('2028-02-29T00:00:00').getTime(), String(leapNext));
 
 // ---------- T2 非法表达式解析期报错 ----------
 const throws = (expr) => { try { SC.parseSimpleCron(expr); return false; } catch { return true; } };
@@ -35,6 +41,19 @@ check('T2b 分钟越界拒绝', throws('60 * * * *'), '');
 check('T2c 步长 0 拒绝', throws('*/0 * * * *'), '');
 check('T2d 日期×月份永不匹配拒绝（0 0 31 2 *）', throws('0 0 31 2 *'), '');
 check('T2e 闰年 2/29 合法', !throws('0 0 29 2 *'), '');
+// T2f-T2l 旧实现用 Number() 解析数字片段，写错的表达式被静默改义：'45,' 成 {45,0}、'-5' 成 0-5、
+// '1-2-3' 成 1-2、'5/15' 只取 5、'0x1f' 成 31、'1e1' 成 10
+check('T2f 多余逗号 / 空列表项拒绝（45, 与 1,,2）', throws('45, * * * *') && throws('1,,2 * * * *') && throws(',5 * * * *'), '');
+check('T2g 半开区间拒绝（-5 与 5-）', throws('-5 * * * *') && throws('5- * * * *'), '');
+check('T2h 多段区间拒绝（1-2-3）', throws('1-2-3 * * * *'), '');
+check('T2i 十六进制 / 指数写法拒绝（0x1f、1e1、*/1e1）', throws('0x1f * * * *') && throws('1e1 * * * *') && throws('*/1e1 * * * *'), '');
+let singleStepMsg = '';
+try { SC.parseSimpleCron('5/15 * * * *'); } catch (e) { singleStepMsg = e.message; }
+check('T2j 单值带步长（5/15）拒绝并提示区间写法 5-59/15', singleStepMsg.includes('5-59/15'), singleStepMsg);
+check('T2k 合法写法不受收紧影响（前导零 / 区间步长 / 列表 / */n）',
+  !throws('05 * * * *') && !throws('0-59/5 * * * *') && !throws('0 9-18/3 * * 1-5') && !throws('0 0 1,15 * *') && !throws('15 */2 * * *'), '');
+check('T2l 收紧后 validateConfig 同样拒收（设置页 / 同步服务写回走这条）',
+  SC.validateConfig({ scheduleMode: 'cron', scrapeCron: '45, * * * *', translateCron: '50 * * * *' }).ok === false, '');
 
 // ---------- T3 normalizeConfig 回落与 validateConfig 分支 ----------
 const norm = SC.normalizeConfig({ scheduleMode: 'weird', scrapeInterval: -1, translateCron: '  50 * * * *  ' });
@@ -63,7 +82,7 @@ check('T3e DEFAULT_CONFIG 与旧 background/settings 副本同值',
   const base = `http://127.0.0.1:${port}`;
   let output = '';
   const child = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
-    cwd: tmpRoot, env: { ...process.env, PORT: String(port) }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
+    cwd: tmpRoot, env: { ...process.env, SHORTSCRAPING_PORT: String(port) }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
   });
   child.stdout.on('data', chunk => { output += chunk; });
   child.stderr.on('data', chunk => { output += chunk; });

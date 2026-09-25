@@ -1,7 +1,7 @@
 import './bootstrap.cjs';
 // A6 回归测试：dramas 单写者队列引入 SW 生命周期内存缓存。
 // 断言：N 条保存只 1 次全表 get；写失败缓存失效重读不丢不叠；快照读零 get；
-// copy-on-write（快照读者持有的旧引用不被就地突变）。
+// copy-on-write（快照读者持有的旧引用不被就地突变）；CSV 同步失败的报错文案按失败形态区分（T5）。
 // 用法：node tests/unit-dramas-cache.mjs（改造前跑 T1 应 RED=20 次全表读）
 import fs from 'node:fs';
 
@@ -62,10 +62,12 @@ globalThis.importScripts = () => {};
 
 const SUB = 'https://unit.test/list';
 let csvPosts = [];
+let syncReply = null; // T5：替换 /sync 的应答（抛错＝连不上）
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   if (u.includes('tag.json')) return { ok: true, json: async () => [{ url: SUB, tags: ['T'] }] };
   if (u.includes('/sync')) {
+    if (syncReply) return syncReply(init);
     csvPosts.push(JSON.parse(init.body));
     return { ok: true, json: async () => ({ ok: true, count: 0, csvPath: 'stub.csv' }) };
   }
@@ -117,7 +119,7 @@ const send = (msg) => chrome.runtime.sendMessage(msg);
   // applyTranslation 入口已删除（2026-09-25 审查），直接走单卡路径共用的队列内写入
   const updated = await updateSingleDramaTranslation('id-5', { title: '五', desc: '五简介' }); // eslint-disable-line no-undef
   check('T2a 翻译更新零全表 get', dramasReads() === 0, `reads=${dramasReads()}`);
-  check('T2b 翻译结果落库', updated === true && (rawStore.dramas || []).find(d => d.id === 'id-5')?.titleZh === '五', JSON.stringify(updated));
+  check('T2b 翻译结果落库', updated?.done === true && (rawStore.dramas || []).find(d => d.id === 'id-5')?.titleZh === '五', JSON.stringify(updated));
   check('T2c copy-on-write：旧快照引用未被就地突变', cardBefore.titleZh === undefined && snapshotBefore.find(d => d.id === 'id-5').titleZh === undefined, JSON.stringify(cardBefore));
   const snapshotAfter = await getDramasSnapshot(); // eslint-disable-line no-undef
   check('T2d 新快照可见新值且引用已更换', snapshotAfter !== snapshotBefore && snapshotAfter.find(d => d.id === 'id-5')?.titleZh === '五', '');
@@ -142,6 +144,35 @@ const send = (msg) => chrome.runtime.sendMessage(msg);
   await syncTimelineToCsv(); // eslint-disable-line no-undef
   check('T4a CSV 同步走快照零全表 get', dramasReads() === 0, `reads=${dramasReads()}`);
   check('T4b 推送内容完整（21 条）', csvPosts.length === 1 && csvPosts[0].dramas.length === 21, `posts=${csvPosts.length} len=${csvPosts[0]?.dramas?.length}`);
+}
+
+// ---------- T5 CSV 同步失败的报错文案（审查 body-limit-ceiling / readbody-cap-vs-growth 的扩展一半） ----------
+// 修复前所有失败都打「请确认本地同步服务已启动: HTTP 413」：服务端回了 413 超限、/health 一切正常时
+// 这句话只会误导。现在连不上才提示确认服务已启动，服务端回了错误就打印它给的原因
+{
+  const warns = [];
+  console.warn = (...a) => { if (String(a[0]).includes('CSV 同步失败')) warns.push(a.map(String).join(' ')); };
+  const runSync = async (reply) => {
+    syncReply = reply;
+    warns.length = 0;
+    await send({ action: 'warmupCsvSync' }); // 清内容签名强制推送，走生产的防抖 + catch 打日志路径
+    await sleep(700);
+    syncReply = null;
+    return warns.join('\n');
+  };
+  const w413 = await runSync(async () => ({ ok: false, status: 413,
+    json: async () => ({ ok: false, code: 'BODY_TOO_LARGE', error: '请求体超过 64MB 上限，本次未写入任何文件' }) }));
+  check('T5a 413：带状态码与服务端原因，不再叫人确认服务已启动',
+    w413.includes('413') && w413.includes('请求体超过 64MB 上限') && !w413.includes('请确认'), w413);
+  const w500 = await runSync(async () => ({ ok: false, status: 500, json: async () => ({ ok: false, error: '写入 timeline.csv 失败' }) }));
+  check('T5b 其他非 2xx 同样带上服务端 error', w500.includes('HTTP 500') && w500.includes('写入 timeline.csv 失败') && !w500.includes('请确认'), w500);
+  const wNet = await runSync(async () => { throw new TypeError('Failed to fetch'); });
+  check('T5c 连不上（推送体不大）才提示确认服务已启动', wNet.includes('请确认服务已启动') && wNet.includes('Failed to fetch') && !wNet.includes('20MB'), wNet);
+  // 推送体超过旧版服务 20MB 上限时连接被断开，浏览器同样只给 TypeError：直接测报错构造，免得在库里堆 20MB
+  let big;
+  try { big = csvSyncNetworkError(new TypeError('Failed to fetch'), 'x'.repeat(21 * 1024 * 1024)).message; } // eslint-disable-line no-undef
+  catch (e) { big = `抛错：${e.message}`; }
+  check('T5d 推送体超旧版 20MB 上限又连不上：点明多半是超限被断开', big.includes('超限被断开') && big.includes('21.0MB'), big);
 }
 
 console.log = origLog; console.warn = origWarn; console.error = origError;

@@ -423,17 +423,15 @@
     renderAll();
   }
 
+  /** 读扩展包内的 JSON 文件；读取或解析失败一律返回 fallback（调用方都传了：默认值或 null）。 */
   async function fetchJsonFile(fileName, fallback) {
     try {
       const response = await fetch(chrome.runtime.getURL(fileName), { cache: 'no-store' });
       if (!response.ok) throw new Error(`${fileName} HTTP ${response.status}`);
       return await response.json();
     } catch (e) {
-      if (typeof fallback !== 'undefined') {
-        console.warn(`[ShortScraping] 读取 ${fileName} 失败，使用默认值:`, e.message);
-        return fallback;
-      }
-      throw e;
+      console.warn(`[ShortScraping] 读取 ${fileName} 失败，使用默认值:`, e.message);
+      return fallback;
     }
   }
 
@@ -443,7 +441,10 @@
 
   function switchTab(tabName) {
     elements.tabs.forEach(button => {
-      button.classList.toggle('active', button.dataset.tab === tabName);
+      const selected = button.dataset.tab === tabName;
+      button.classList.toggle('active', selected);
+      // 读屏靠 aria-selected 知道当前在哪个分页（nav 是 role=tablist，按钮是 role=tab）
+      button.setAttribute('aria-selected', String(selected));
     });
 
     elements.panels.forEach(panel => {
@@ -923,13 +924,15 @@
       // 此前只有「取消全部」走这条路，取消部分订阅同样删历史却一声不吭。
       // 后台清理前虽会留一份回收站（仅最近 3 批），确认与定向备份仍是第一道闸。
       const removed = SubscriptionConfig.removedSubscriptionUrls(baseline, normalized);
+      let doomedCount = 0;
       if (removed.length > 0) {
         const { dramas = [] } = await chrome.storage.local.get('dramas');
         const doomed = SubscriptionConfig.dramasUnderUrls(dramas, removed);
-        if (!window.confirm(buildUnsubscribeConfirmText(removed, doomed.length))) return;
+        doomedCount = doomed.length;
+        if (!window.confirm(buildUnsubscribeConfirmText(removed, doomedCount))) return;
         // 备份严格先于 storage 写：写 storage 会经 onChanged 立刻触发后台清理，
         // 之后再想导出就晚了。unit-unsubscribe-guard G3b 钉住这个次序。
-        if (doomed.length > 0) exportDoomedDramas(doomed);
+        if (doomedCount > 0) exportDoomedDramas(doomed);
       }
 
       // 退订仍「文件优先」：写 storage 会经 onChanged 立刻让后台清掉对应历史，不可逆，
@@ -958,7 +961,9 @@
       const syncResult = preflight || await trySyncConfig('/config/tag', { urlTags: state.urlTags });
       if (syncResult.ok) {
         if (!preflight) await clearConfigAhead('tag');
-        showStatus(`已保存 ${state.urlTags.length} 条网页订阅，并写回 config/tag.json`, true);
+        // 下载只是发起（a.click() 拿不到另存为被取消、被浏览器拦下的结果），提醒回收站还有一份
+        const backupNote = doomedCount > 0 ? '；备份文件已触发下载，未保存成功可在「数据存档」导出自动清理回收站' : '';
+        showStatus(`已保存 ${state.urlTags.length} 条网页订阅，并写回 config/tag.json${backupNote}`, true);
       } else {
         showStatus(`已保存到扩展本地配置；写回 config/tag.json 失败：${syncResult.error}——本地订阅会保留，并在同步服务启动后（扩展下次唤醒时）自动写回文件`, false);
       }
@@ -1002,7 +1007,8 @@
     if (doomedCount === 0) return `${head}\n其下暂无历史记录，不会删除任何数据。\n\n是否继续？`;
     return `${head}\n其下的 ${doomedCount} 条历史记录会被一并删除，且不可恢复。\n`
       + `继续前会自动下载这 ${doomedCount} 条的 JSON 备份文件；日后如需还原，`
-      + `要先把订阅重新加回来，再用下方「导入恢复」写回。\n\n是否继续？`;
+      + `要先把订阅重新加回来，再用下方「导入恢复」写回。\n`
+      + `若下载被取消或拦截，这批条目仍会存进「数据存档 → 自动清理回收站」（保留最近 3 批），可随时补导。\n\n是否继续？`;
   }
 
   /**
@@ -1654,13 +1660,22 @@
     chrome.tabs.create({ url: chrome.runtime.getURL(fileName) });
   }
 
+  // 提示条 last-write-wins（与弹窗 showToast 同款）：不清旧计时器的话，4.5 秒内连着两次操作，
+  // 后一条会被前一条的计时器提前收掉，只闪零点几秒
+  let statusTimer = null;
+  const STATUS_SUCCESS_MS = 4500;
+  // 错误文案常带一长串原因（写回失败、退订被拒），多留几秒读完
+  const STATUS_ERROR_MS = 8000;
+
   function showStatus(message, success = false) {
     elements.status.textContent = message;
     elements.status.className = `status show ${success ? 'success' : 'error'}`;
 
-    setTimeout(() => {
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(() => {
+      statusTimer = null;
       elements.status.className = 'status';
-    }, 4500);
+    }, success ? STATUS_SUCCESS_MS : STATUS_ERROR_MS);
   }
 
   function escapeHtml(text) {

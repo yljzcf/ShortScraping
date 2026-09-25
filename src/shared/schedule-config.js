@@ -43,8 +43,10 @@
     candidate.setSeconds(0, 0);
     candidate.setMinutes(candidate.getMinutes() + 1);
 
-    // 最多向后查找 366 天，避免非法表达式造成无限循环。
-    const maxAttempts = 366 * 24 * 60;
+    // 向后查找上限：4 年 + 1 天。解析期的可行性检查已拦掉其余永不匹配的组合，只剩
+    // 2/29 可能要跨过一个以上的平年才命中（从 2026-09-25 起算下一次是 2028-02-29）；
+    // 旧上限 366 天会把这条合法表达式误判为「无法计算」。最坏约 210 万次比对、百毫秒级。
+    const maxAttempts = (4 * 366 + 1) * 24 * 60;
     for (let i = 0; i < maxAttempts; i++) {
       if (matchesCron(candidate, cron)) {
         return candidate.getTime();
@@ -76,7 +78,7 @@
 
     // 日期×月份组合可行性：星期不受限时，纯日期约束必须能落在所选月份里
     // （如 "0 0 31 2 *" 永不匹配；若不在解析期拦截，getNextCronRun 要空转
-    // 366 天×1440 分钟才报错，且每次 SW 唤醒都重来一遍）。
+    // 整个查找窗口（4 年×1440 分钟）才报错，且每次 SW 唤醒都重来一遍）。
     // 2 月按 29 天算：29 号在闰年合法，具体是否可达交给 getNextCronRun 判定。
     if (!cron.dayOfMonth.any && cron.dayOfWeek.any) {
       const MAX_DAY_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -90,18 +92,25 @@
     return cron;
   }
 
+  // 数字片段只认十进制非负整数。旧实现直接 Number()：Number('') === 0、'0x1f' → 31、
+  // '1e1' → 10，于是多打一个逗号的 '45, * * * *' 被静默解析成 {45, 0}（每小时跑两次），
+  // '-5' 成 0-5——写错的表达式照样能保存，含义却变了。
+  const CRON_NUMBER = /^\d+$/;
+
   function parseCronField(field, min, max, label) {
     if (field === '*') return { any: true, values: new Set() };
 
+    const formatError = () => new Error(`${label}字段格式错误: ${field}`);
     const values = new Set();
     for (const part of field.split(',')) {
       const stepSegments = part.split('/');
       if (stepSegments.length > 2) {
-        throw new Error(`${label}字段格式错误: ${field}`);
+        throw formatError();
       }
 
       const base = stepSegments[0];
-      const step = stepSegments.length === 2 ? Number(stepSegments[1]) : 1;
+      const hasStep = stepSegments.length === 2;
+      const step = hasStep ? (CRON_NUMBER.test(stepSegments[1]) ? Number(stepSegments[1]) : NaN) : 1;
       if (!Number.isInteger(step) || step <= 0) {
         throw new Error(`${label}字段步长错误: ${field}`);
       }
@@ -112,10 +121,18 @@
         rangeStart = min;
         rangeEnd = max;
       } else if (base.includes('-')) {
-        const [startText, endText] = base.split('-');
-        rangeStart = Number(startText);
-        rangeEnd = Number(endText);
+        // 区间必须恰好两段：旧写法解构取前两段，'1-2-3' 被静默当成 1-2
+        const bounds = base.split('-');
+        if (bounds.length !== 2 || !bounds.every(text => CRON_NUMBER.test(text))) throw formatError();
+        rangeStart = Number(bounds[0]);
+        rangeEnd = Number(bounds[1]);
       } else {
+        if (!CRON_NUMBER.test(base)) throw formatError();
+        // 单值带步长（'5/15'）各家解释不一：Vixie cron 报错，croner / node-cron 当 5-最大值/15，
+        // 旧实现则只取 5。跟 Vixie 直接报错，并提示无歧义的区间写法
+        if (hasStep) {
+          throw new Error(`${label}字段格式错误: ${field}（单值不能带步长；从 ${base} 起每隔 ${step} 请写成 ${base}-${max}/${step}）`);
+        }
         rangeStart = Number(base);
         rangeEnd = Number(base);
       }
@@ -136,6 +153,9 @@
     const dayOfMonthMatches = matchesCronField(date.getDate(), cron.dayOfMonth);
     const dayOfWeekMatches = matchesCronField(date.getDay(), cron.dayOfWeek);
 
+    // 「受限」只看解析结果是不是纯 '*'：日期写 '*/2' 也算受限，与受限的星期走 OR。
+    // Vixie cron 按字段首字符是不是 '*' 判定（'*/2' 算不受限、走 AND）——这里刻意不跟，
+    // 改了会让现有的合法表达式悄悄换语义。
     let dayMatches;
     if (cron.dayOfMonth.any && cron.dayOfWeek.any) {
       dayMatches = true;

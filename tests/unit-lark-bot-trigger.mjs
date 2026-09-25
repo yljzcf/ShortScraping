@@ -1,9 +1,10 @@
 import './bootstrap.cjs';
 // 回归测试：群机器人自动推送的触发点与启用水位线（v1.5.14）。
 //
-// 两个触发点（互斥，故无需持久「已推送」标记）：
+// 触发点（都只在「这一次写入把卡变成 trans」时推，故无需持久「已推送」标记）：
 //   ① 翻译线把一条从 new 补成 trans 时推（走 AI 翻译的站点）；
-//   ② 抓取入库时该卡已是 trans 时推（平台自带中文齐全，不进翻译线）。
+//   ② 抓取入库时该卡已是 trans 时推（平台自带中文齐全，不进翻译线）；
+//   ③ 弹窗单卡 🌍 把一条从 new 翻成 trans 时推（P 组：与批量线抢同一张卡时只推一次）。
 //
 // **W 组是本套件的存在理由**：库里 3454 条存量（含 resetPartialTranslations
 // 退回队列的 683 条）会陆续走完翻译线。没有「启用水位线」的话，一开机器人就会
@@ -206,6 +207,39 @@ botPosts.length = 0;
 await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: mk('pending2') });
 await sleep(300);
 check('N4 入库时还是 new 的卡不在入库时推', botPosts.length === 0, `posts=${botPosts.length}`);
+
+// ---------- P 组：🌍 抢在批量线之前翻完同一张卡（审查 bot-push-trigger-assumption-broken） ----------
+// 批量线已把卡读进本轮、请求还在飞，用户点 🌍 先翻完：由 🌍（触发点③）推一次；批量线随后回填
+// （fillOnly，照样算完成）时卡已是 trans，不再推第二次。此前 🌍 完全不推、由批量线推——批量线
+// 若没翻它（接口熔断停线等），这张新卡永远不会推群。
+await resetDramasCache(); await setupBot();
+botPosts.length = 0;
+{
+  let releaseBatch;
+  const batchGate = new Promise(r => { releaseBatch = r; });
+  let calls = 0;
+  globalThis.Translator = {
+    async translateTitleAndDesc(title) {
+      calls++;
+      if (calls === 1) await batchGate;   // 第一次调用＝批量线，挂住
+      return { title: `中·${title}`, desc: '中文简介' };
+    }
+  };
+  rawStore.dramas = [mk('race')];
+  const round = performTranslate({ source: 'manual' }); // eslint-disable-line no-undef
+  for (let i = 0; i < 50 && calls < 1; i++) await sleep(10);
+  const single = await chromeStub.runtime.sendMessage({ action: 'translateSingle', dramaId: 'race' });
+  await sleep(600); // 触发点③不 await 推送 + 250ms 节流
+  check('P1 🌍 抢先把 new 卡翻成 trans → 由 🌍 推一次（批量线请求仍在飞）',
+    calls === 2 && single?.complete === true && botPosts.length === 1 && JSON.stringify(botPosts[0]).includes('中·T-race'),
+    `calls=${calls} single=${JSON.stringify(single)} posts=${botPosts.length}`);
+  releaseBatch();
+  await round;
+  await sleep(600);
+  check('P2 批量线随后回填同一张卡（已是 trans）不再推第二次',
+    botPosts.length === 1 && (rawStore.dramas || [])[0]?.status === 'trans', `posts=${botPosts.length}`);
+}
+globalThis.Translator = { async translateTitleAndDesc(title) { return { title: `中·${title}`, desc: '中文简介' }; } };
 
 // ---------- O 组：开关与未配置 ----------
 await resetDramasCache(); await setupBot({ enabled: false });

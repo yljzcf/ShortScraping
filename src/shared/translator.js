@@ -65,8 +65,13 @@ globalThis.Translator = (() => {
    * 或额度告警）抛异常；服务正常应答但没有可用译文（缺字段、译文与原文相同）返回空串。
    */
   async function translateWithAPI(text, config, targetLang = 'zh-CN') {
-    const url = `${config.apiEndpoint}?q=${encodeURIComponent(text)}&langpair=en|${targetLang}`;
-    const response = await fetchWithTimeout(url, {}, config.requestTimeoutSec);
+    // 用 URL/searchParams 拼参数：endpoint 可能自带查询串（MyMemory 文档建议加 de=邮箱提高免费
+    // 额度），旧写法 `${endpoint}?q=…` 会拼出第二个 '?'，q 被吞进 de 的值里，所有翻译都失败。
+    // endpoint 不是合法 URL 时 new URL 抛错，与 fetch 抛错同样归为传输层失败
+    const url = new URL(config.apiEndpoint);
+    url.searchParams.set('q', text);
+    url.searchParams.set('langpair', `en|${targetLang}`);
+    const response = await fetchWithTimeout(url.toString(), {}, config.requestTimeoutSec);
 
     if (!response.ok) throw new Error(`翻译接口 HTTP ${response.status}`);
 

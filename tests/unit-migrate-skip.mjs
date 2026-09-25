@@ -344,6 +344,50 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   }
 }
 
+// ---------- T6 beforeMigrations 钩子（审查 setupalarms-gated-by-network-migrations） ----------
+// 顶层 initPromise 经它把 setupAlarms 提到迁移链之前：联网迁移挂住时定时任务照样装得上。
+// 放在最后：T6c 的 sitemap 请求永不 resolve，那次 loadConfigFromJsonFiles 永远挂着。
+{
+  // T6a/b 钩子抛错不挡迁移；种子配置在钩子执行前已落库（setupAlarms 读的是刚恢复的 scheduleConfig）
+  await seedLegacy();
+  delete rawStore.scheduleConfig;
+  let seededAtHook = null;
+  let result = null, threw = false;
+  await loadConfigFromJsonFiles({ // eslint-disable-line no-undef
+    beforeMigrations: async () => {
+      seededAtHook = rawStore.scheduleConfig !== undefined;
+      throw new Error('unit stub: 定时任务安装炸了');
+    }
+  }).then(r => { result = r; }, () => { threw = true; });
+  check('T6a 钩子执行时配置种子已落库', seededAtHook === true, String(seededAtHook));
+  check('T6b 钩子抛错不阻断配置恢复与后面的迁移',
+    !threw && Array.isArray(result?.urlTags) && rawStore.legacyDramaMigrated === true && rawStore.rsEpisodeUrlMigrated === true,
+    JSON.stringify({ threw, legacy: rawStore.legacyDramaMigrated, rs: rawStore.rsEpisodeUrlMigrated }));
+
+  // T6c 联网迁移挂住：钩子已先跑完，不被 sitemap 请求拦住；请求带超时 signal
+  await resetDramasCache();
+  rawStore.dramas = [{ id: 'sc-hang', itemId: 'sc2200', title: 'Bound by Fire', source: 'shortical', status: 'new',
+    tags: ['T'], sourceListUrl: SUB, url: 'https://shortical.com/drama/bound-by-fire-2200', scrapedAt: '2026-09-17T16:29:00.000Z' }];
+  delete rawStore.shorticalCanonicalIdsMigrated;
+  const origFetch = globalThis.fetch;
+  let sitemapSignal = null;
+  let sitemapRequested = false;
+  globalThis.fetch = (url, options) => {
+    if (!String(url).includes('/sitemaps/series.xml')) return origFetch(url, options);
+    sitemapRequested = true;
+    sitemapSignal = options?.signal;
+    return new Promise(() => {}); // 请求挂住，永不 resolve
+  };
+  let hookRanBeforeSitemap = null;
+  loadConfigFromJsonFiles({ beforeMigrations: async () => { hookRanBeforeSitemap = !sitemapRequested; } }); // eslint-disable-line no-undef
+  await sleep(200);
+  check('T6c sitemap 请求挂住时钩子（setupAlarms）已先于它执行完',
+    hookRanBeforeSitemap === true && sitemapRequested && rawStore.shorticalCanonicalIdsMigrated === undefined,
+    JSON.stringify({ hookRanBeforeSitemap, sitemapRequested }));
+  check('T6d sitemap 请求带超时 signal（小于 SW 30s 空闲阈值，超时即抛、下轮重试）',
+    sitemapSignal instanceof AbortSignal && sitemapSignal.aborted === false, String(sitemapSignal));
+}
+
 console.log = origLog; console.warn = origWarn; console.error = origError;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

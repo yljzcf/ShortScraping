@@ -144,7 +144,7 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
   const dramas = rawStore.dramas || [];
   const cardA = dramas.find(d => d.itemId === 'tt0001');
   check('T2a 竞态窗口内保存的新卡未丢失', dramas.some(d => d.itemId === 'tt0002'), `dramas=${dramas.map(d => d.itemId).join(',')}`);
-  check('T2b 翻译结果同时生效', updated === true && cardA?.titleZh === '甲' && cardA?.status === 'trans', JSON.stringify({ updated, cardA }));
+  check('T2b 翻译结果同时生效', updated?.done === true && cardA?.titleZh === '甲' && cardA?.status === 'trans', JSON.stringify({ updated, cardA }));
   check('T2c 两卡俱在', dramas.length === 2, `len=${dramas.length} saved=${JSON.stringify(saved)}`);
 }
 
@@ -167,7 +167,7 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
   await resetDramasCache(); rawStore.dramas = [mk('D', 'tt0004')];
   const updated = await updateSingleDramaTranslation('id-D', { title: '丁', desc: '丁简介' }); // eslint-disable-line no-undef
   const cardD = (rawStore.dramas || []).find(d => d.itemId === 'tt0004');
-  check('T4a updateSingleDramaTranslation 收口成功', updated === true, JSON.stringify(updated));
+  check('T4a updateSingleDramaTranslation 收口成功', updated?.done === true, JSON.stringify(updated));
   check('T4b 翻译字段落库', cardD?.titleZh === '丁' && cardD?.descriptionZh === '丁简介' && cardD?.status === 'trans', JSON.stringify(cardD));
 }
 
