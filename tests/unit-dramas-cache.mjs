@@ -34,6 +34,7 @@ globalThis.chrome = {
     onChanged: { addListener() {} }
   },
   runtime: {
+    id: 'unit-test',
     getURL: p => `chrome-extension://unit-test/${p}`,
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
@@ -44,7 +45,7 @@ globalThis.chrome = {
         const sendResponse = (resp) => { if (!settled) { settled = true; resolve(resp); } };
         let keepOpen = false;
         for (const fn of listeners.runtimeMessage) {
-          if (fn(message, { id: 'unit-test' }, sendResponse) === true) keepOpen = true;
+          if (fn(message, { id: 'unit-test', url: 'chrome-extension://unit-test/src/popup/popup.html' }, sendResponse) === true) keepOpen = true;
         }
         if (!keepOpen && !settled) { settled = true; resolve(undefined); }
       });
@@ -113,9 +114,10 @@ const send = (msg) => chrome.runtime.sendMessage(msg);
   const snapshotBefore = await getDramasSnapshot(); // eslint-disable-line no-undef -- 持有缓存旧引用
   const cardBefore = snapshotBefore.find(d => d.id === 'id-5');
   getLog = [];
-  const resp = await send({ action: 'applyTranslation', dramaId: 'id-5', result: { title: '五', desc: '五简介' } });
+  // applyTranslation 入口已删除（2026-09-25 审查），直接走单卡路径共用的队列内写入
+  const updated = await updateSingleDramaTranslation('id-5', { title: '五', desc: '五简介' }); // eslint-disable-line no-undef
   check('T2a 翻译更新零全表 get', dramasReads() === 0, `reads=${dramasReads()}`);
-  check('T2b 翻译结果落库', resp?.updated === true && (rawStore.dramas || []).find(d => d.id === 'id-5')?.titleZh === '五', JSON.stringify(resp));
+  check('T2b 翻译结果落库', updated === true && (rawStore.dramas || []).find(d => d.id === 'id-5')?.titleZh === '五', JSON.stringify(updated));
   check('T2c copy-on-write：旧快照引用未被就地突变', cardBefore.titleZh === undefined && snapshotBefore.find(d => d.id === 'id-5').titleZh === undefined, JSON.stringify(cardBefore));
   const snapshotAfter = await getDramasSnapshot(); // eslint-disable-line no-undef
   check('T2d 新快照可见新值且引用已更换', snapshotAfter !== snapshotBefore && snapshotAfter.find(d => d.id === 'id-5')?.titleZh === '五', '');

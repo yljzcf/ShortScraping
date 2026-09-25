@@ -70,13 +70,14 @@ const chromeStub = {
     onChanged: { addListener() {} }
   },
   runtime: {
+    id: 'unit-test',
     getURL: p => `chrome-extension://unit-test/${p}`,
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
     onMessage: { addListener(fn) { chromeStub.__msg = fn; } },
     sendMessage(message) {
       return new Promise((resolve) => {
-        const handled = chromeStub.__msg?.(message, {}, resolve);
+        const handled = chromeStub.__msg?.(message, { id: 'unit-test', url: 'chrome-extension://unit-test/src/popup/popup.html' }, resolve);
         if (!handled) resolve(undefined);
       });
     },

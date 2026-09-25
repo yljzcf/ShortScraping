@@ -212,16 +212,101 @@ check('T4h 共享页静态白名单含 site-tabs', serverSrc.includes("'/shared/
 // ---------- T6 manifest matches 推导：可选 path 字段限定注入路径 ----------
 // Netflix 只注入 /tudum/top10*；AppleTV 只注入两个榜单 collection 页所在路径，
 // 且 exact 语义下无 *. 前缀（不波及 apple.com 其它子域）。
-// DramaBox 贡献两项（同一 site 键的两条 host 条目逐条展开），故项数比站点数多一
-check('T6 contentScriptMatches 按站点顺序：host 通配项 + Netflix/AppleTV 路径限定项 + DramaBox 两域名',
+// IMDB / Steam / RoyalRoad 收窄到 adapter.matches 认的订阅入口（2026-09-25 审查
+// manifest-overbroad-injection），IMDB 与 Steam 的 path 是数组、各展开两项；
+// DramaBox 贡献两项（同一 site 键的两条 host 条目逐条展开）
+check('T6 contentScriptMatches 按站点顺序：路径限定项（IMDB/Steam 各两项）+ 短剧站整站 + DramaBox 两域名',
   deepEq(SiteRegistry.contentScriptMatches(), [
-    '*://*.imdb.com/*', '*://*.netflix.com/tudum/top10*', '*://tv.apple.com/us/collection/most-popular-now/*',
-    '*://store.steampowered.com/*', '*://*.my-drama.com/*',
+    '*://*.imdb.com/search/title*', '*://*.imdb.com/find*',
+    '*://*.netflix.com/tudum/top10*', '*://tv.apple.com/us/collection/most-popular-now/*',
+    '*://store.steampowered.com/category/*', '*://store.steampowered.com/tags/*', '*://*.my-drama.com/*',
     '*://*.reelshort.com/*', '*://*.dramashorts.io/*', '*://*.netshort.com/*', '*://*.flickreels.net/*',
     '*://*.goodshort.com/*', '*://*.shortical.com/*', '*://*.shorttv.live/*',
-    '*://*.dramabox.com/*', '*://*.dramaboxdb.com/*', '*://*.royalroad.com/*', '*://*.pinedrama.com/*'
+    '*://*.dramabox.com/*', '*://*.dramaboxdb.com/*', '*://*.royalroad.com/fictions/*', '*://*.pinedrama.com/*'
   ]),
   JSON.stringify(SiteRegistry.contentScriptMatches()));
+
+// ---------- T6b 收窄后每个订阅 URL 仍被 manifest 注入 ----------
+// 按 Chrome 匹配模式语义逐条核对：scheme '*' 只认 http/https；'*.host' 含裸域与任意子域；
+// 路径段连查询串一起匹配（'/search/title*' 要能吃下 '/search/title/?release_date=…'）。
+// tag.example.json 即设置页的订阅目录（SUBSCRIPTION_CATALOG_FILE），用户能勾选的订阅全在里面；
+// README 的示例订阅也一并核对。漏匹配＝该订阅页不再自动注入、浮动按钮消失，后台只能走兜底注入
+function matchesPattern(pattern, url) {
+  const m = pattern.match(/^(\*|https?):\/\/([^/]+)(\/.*)$/);
+  if (!m) return false;
+  let u;
+  try { u = new URL(url); } catch (e) { return false; }
+  const scheme = u.protocol.slice(0, -1);
+  if (m[1] === '*' ? !['http', 'https'].includes(scheme) : scheme !== m[1]) return false;
+  if (m[2].startsWith('*.')) {
+    const base = m[2].slice(2);
+    if (u.hostname !== base && !u.hostname.endsWith(`.${base}`)) return false;
+  } else if (u.hostname !== m[2]) {
+    return false;
+  }
+  const escaped = m[3].split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'));
+  return new RegExp(`^${escaped.join('.*')}$`).test(u.pathname + u.search);
+}
+const injected = url => SiteRegistry.contentScriptMatches().some(p => matchesPattern(p, url));
+{
+  const catalog = JSON.parse(fs.readFileSync(path.join(worktreeRoot, 'config/tag.example.json'), 'utf8'));
+  const readme = fs.readFileSync(path.join(worktreeRoot, 'README.md'), 'utf8');
+  const readmeUrls = [...readme.matchAll(/"url":\s*"([^"]+)"/g)].map(m => m[1]);
+  const urls = [...catalog.map(entry => entry.url), ...readmeUrls];
+  const narrowed = urls.filter(url => ['imdb', 'steam', 'royalroad'].includes(SiteRegistry.siteOfUrl(url)));
+  check('T6b0 订阅目录里 IMDB / Steam / RoyalRoad 三站都有订阅（防本断言空转）',
+    ['imdb', 'steam', 'royalroad'].every(site => narrowed.some(url => SiteRegistry.siteOfUrl(url) === site))
+      && readmeUrls.length >= 2,
+    `narrowed=${narrowed.length} readme=${readmeUrls.length}`);
+  const missed = urls.filter(url => !injected(url));
+  check('T6b 订阅目录与 README 示例的每个订阅 URL 都被 manifest matches 命中',
+    urls.length > 0 && missed.length === 0, JSON.stringify(missed));
+}
+
+// ---------- T6c 三站的非订阅页不再注入；自测匹配器语义 ----------
+for (const [url, expected] of [
+  ['https://www.imdb.com/find/?q=drama', true],
+  ['https://m.imdb.com/search/title/?genres=short', true],
+  ['https://store.steampowered.com/tags/zh-cn/%E5%85%A8%E5%8A%A8%E6%80%81%E5%BD%B1%E5%83%8F/', true],
+  ['https://www.royalroad.com/fictions/best-rated', true],
+  ['https://www.imdb.com/', false],
+  ['https://www.imdb.com/title/tt0111161/', false],
+  ['https://www.imdb.com/chart/top/', false],
+  ['https://store.steampowered.com/', false],
+  ['https://store.steampowered.com/app/570/', false],
+  ['https://www.royalroad.com/home', false],
+  ['https://www.royalroad.com/fiction/12345/some-title', false],
+  // 匹配器自身语义：查询串参与路径匹配、裸域命中 *.、scheme 只认 http(s)
+  ['https://www.flickreels.net/?list=hot_picks', true],
+  ['https://imdb.com/search/title/', true],
+  ['ftp://www.imdb.com/search/title/', false]
+]) {
+  check(`T6c ${url} ${expected ? '注入' : '不注入'}`, injected(url) === expected, `got=${injected(url)}`);
+}
+
+// ---------- T6d 强制注入闸门 isInjectableUrl：点边界匹配，不继承 siteOfHostname 的裸 endsWith 怪癖 ----------
+for (const [url, expected] of [
+  ['https://www.imdb.com/search/title/', true],
+  ['https://imdb.com/find?q=x', true],
+  ['https://m.imdb.com/x', true],
+  ['https://notimdb.com/x', false],                  // siteOfUrl 仍判 imdb（T2 怪癖），注入闸门不放行
+  ['https://fakeimdb.com.evil.test/x', false],
+  ['https://store.steampowered.com/category/x', true],
+  ['https://evil.store.steampowered.com/x', false],  // exact 条目不认子域
+  ['https://www.dramaboxdb.com/x', true],
+  ['https://mydramabox.com/x', false],
+  ['ftp://www.imdb.com/x', false],
+  ['not a url', false]
+]) {
+  check(`T6d isInjectableUrl ${url} → ${expected}`, SiteRegistry.isInjectableUrl(url) === expected,
+    `got=${SiteRegistry.isInjectableUrl(url)}`);
+}
+check('T6d notimdb.com 站点归属怪癖保真', SiteRegistry.siteOfUrl('https://notimdb.com/x') === 'imdb', '');
+{
+  const catalog = JSON.parse(fs.readFileSync(path.join(worktreeRoot, 'config/tag.example.json'), 'utf8'));
+  const blocked = catalog.map(entry => entry.url).filter(url => !SiteRegistry.isInjectableUrl(url));
+  check('T6d 订阅目录的每个 URL 都能走强制注入兜底', catalog.length > 0 && blocked.length === 0, blocked.join(', '));
+}
 
 // ---------- T5 Node 侧消费契约（lark 经 require 间接取数） ----------
 const Lark = require(path.join(worktreeRoot, 'src/shared/lark.js'));

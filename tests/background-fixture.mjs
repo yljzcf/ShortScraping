@@ -7,6 +7,8 @@ import { webcrypto } from 'node:crypto';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const SUB = 'https://www.imdb.com/search/title/';
+// 扩展页面发送方（设置页以标签页打开，Chrome 给的 sender 带 tab）：后台 onMessage 只对扩展页面放行特权动作
+export const PAGE_SENDER = { id: 'fixture', url: 'chrome-extension://fixture/src/settings/settings.html', tab: { id: 1 } };
 export const card = (itemId, extra = {}) => ({
   id: `id_${itemId}`, itemId, title: 'Fixture', source: 'imdb', sourceListUrl: SUB,
   tags: ['IMDB'], status: 'new', scrapedAt: '2026-09-05T01:00:00.000Z', ...extra
@@ -32,7 +34,7 @@ export async function background() {
         },
         async set(values) { Object.assign(data, structuredClone(values)); }
       }, onChanged: { addListener(fn) { listeners.changed = fn; } } },
-      runtime: { getURL: p => `chrome-extension://fixture/${p}`, onInstalled: { addListener() {} }, onStartup: { addListener() {} }, onMessage: { addListener(fn) { listeners.message = fn; } } },
+      runtime: { id: 'fixture', getURL: p => `chrome-extension://fixture/${p}`, onInstalled: { addListener() {} }, onStartup: { addListener() {} }, onMessage: { addListener(fn) { listeners.message = fn; } } },
       alarms: {
         async get(name) { return alarms.get(name); }, async clear(name) { return alarms.delete(name); },
         create(name, info) { alarms.set(name, { name, ...info, scheduledTime: info.when ?? now + info.periodInMinutes * 60000 }); },

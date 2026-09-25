@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
-import { background, card } from './background-fixture.mjs';
+import { background, card, PAGE_SENDER } from './background-fixture.mjs';
 const require = createRequire(import.meta.url);
 const Csv = require('../src/shared/timeline-csv.js');
 const Config = require('../src/shared/translate-config.js');
@@ -112,7 +112,7 @@ const Config = require('../src/shared/translate-config.js');
   const send = request => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${request.action} 未回 sendResponse`)), 1000);
     try {
-      bg.listeners.message(request, {}, resp => { clearTimeout(timer); resolve(resp); });
+      bg.listeners.message(request, PAGE_SENDER, resp => { clearTimeout(timer); resolve(resp); });
     } catch (error) { clearTimeout(timer); reject(error); }
   });
   // 共享校验模块是否已把非法日期计入 invalid 不影响这里：直接让校验同步抛错
@@ -236,11 +236,11 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
   const bg = await background();
   const before = bg.alarms.get('scrape-task').scheduledTime;
   bg.setTime(Date.parse('2026-09-05T00:10:00Z'));
-  const resp = await new Promise(resolve => bg.listeners.message({ action: 'updateAlarms', force: true }, {}, resolve));
+  const resp = await new Promise(resolve => bg.listeners.message({ action: 'updateAlarms', force: true }, PAGE_SENDER, resolve));
   assert.equal(resp.success, true);
   assert.equal(bg.alarms.get('scrape-task').scheduledTime, before);
   bg.data.scheduleConfig = { scheduleMode: 'interval', scrapeInterval: 2, translateInterval: 1 };
-  await new Promise(resolve => bg.listeners.message({ action: 'updateAlarms' }, {}, resolve));
+  await new Promise(resolve => bg.listeners.message({ action: 'updateAlarms' }, PAGE_SENDER, resolve));
   assert.equal(bg.alarms.get('scrape-task').periodInMinutes, 120);
 }
 

@@ -11,7 +11,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 - 🌐 **翻译线**：卡片先以英文即时入库，随后按 `config/trans.json` 自动翻译为中文；平台自带官方中文的条目（Steam 中文详情、My Drama 本地化标题）直接采用、不再消耗翻译
 - 🔁 **抓取节奏**：全量抓取由定时任务（cron 或固定间隔）执行；弹窗内再点一次已激活的站点图标可手动刷新该站点，完成后提示"本次新增 N 条"；全局按去重键防重复入库；页内每个请求 25 秒内未读完即放弃，单个订阅页 5 分钟内抓不完按失败跳过并关闭后台标签页，一个挂住的站点不再堵死后面的抓取（v1.6.16）
 - 💾 **CSV 同步**：本地同步服务把时间线实时写入 `db/timeline.csv`（UTF-8 BOM + CRLF，Excel/WPS 直接打开；v1.5.3 起含 `genres` 内容类型标签列，`tags`/`genres` 多值以英文逗号分隔——v1.5.13 起，与 Lark 推送约定一致）
-- 📡 **局域网共享**：同一局域网的手机/平板/电脑打开 `http://<本机IP>:31919/` 即可只读浏览时间线，数据更新经 SSE 自动刷新；链接显示在弹窗底栏（点击复制 + 二维码）
+- 📡 **局域网共享**：同一局域网的手机/平板/电脑打开 `http://<本机IP>:31919/` 即可只读浏览时间线，数据更新经 SSE 自动刷新；链接显示在弹窗底栏（点击复制 + 二维码）。同步服务一启动就默认开放，不需要时用 `--local-only` 改为仅本机（见「局域网共享」）
 - 🔔 **版本自检**：弹窗对比远端仓库 master 的 `manifest.json`，有新版本以橙色提示
 - 🤖 **Lark 推送**：单卡按钮把条目 POST 到多维表格工作流 webhook；群机器人在条目翻译完成后自动推一张卡到飞书 / Lark 群（可关；配置飞书自建应用凭据时附封面真图；新订阅 URL 的首轮抓取只入库不推送，避免刷屏）；推送失败的卡每分钟自动重试、最多 3 次，重试进行中新失败的卡照常排队，不丢也不重复推（v1.6.16）
 
@@ -184,7 +184,7 @@ server/tools/remove-autostart.command  # 撤销开机自启
 server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 ```
 
-**macOS 开机自启**：运行一次 `server/setup-autostart.command`，注册当前用户的 launchd 后台服务（`~/Library/LaunchAgents/com.shortscraping.sync.plist`）：登录即启动、崩溃自动拉起，日志在 `~/Library/Logs/ShortScraping/sync.log`。`npm run stop` 或弹窗 `⏹` 停下后不会被自动拉回；设置后 `start-sync.command` / `restart-sync.command` / `npm run restart` 改为操作这个后台服务（等价 `launchctl kickstart [-k] gui/$(id -u)/com.shortscraping.sync`；重启会先停掉端口上残留的前台实例，10 秒内未检测到服务则提示去看日志）。设置后 `npm run sync` / `npm start` 不再另起前台实例，而是提示改用 `npm run restart` 后退出（确需前台调试：先 `npm run stop`，再 `SHORTSCRAPING_NO_LAUNCHD=1 npm run sync`）。后台服务拉起时若端口已被前台实例（如旧版 `npm run restart` 或前台调试留下的）占着，它会打印提示后正常退出、不再每 10 秒反复重试；想交回后台托管，运行一次 `npm run restart` 即可。同一脚本还会生成 `~/Applications/ShortScraping Launcher.app` 接住 `shortscraping://` 协议，弹窗 `▶ 启动` 与 `📁` 在 macOS 上随即可用（双击这个应用也能启动服务）。plist 与小应用记的都是绝对路径，移动项目文件夹后重新运行一次设置脚本。
+**macOS 开机自启**：运行一次 `server/setup-autostart.command`，注册当前用户的 launchd 后台服务（`~/Library/LaunchAgents/com.shortscraping.sync.plist`）：登录即启动、崩溃自动拉起，日志在 `~/Library/Logs/ShortScraping/sync.log`。后台服务按默认方式启动、不带 `--local-only`，所以**每次登录都会向当前所连网络开放只读共享页**，连着公共 Wi-Fi（咖啡馆、机场、酒店）时也一样（见「局域网共享」）。`npm run stop` 或弹窗 `⏹` 停下后不会被自动拉回；设置后 `start-sync.command` / `restart-sync.command` / `npm run restart` 改为操作这个后台服务（等价 `launchctl kickstart [-k] gui/$(id -u)/com.shortscraping.sync`；重启会先停掉端口上残留的前台实例，10 秒内未检测到服务则提示去看日志）。设置后 `npm run sync` / `npm start` 不再另起前台实例，而是提示改用 `npm run restart` 后退出（确需前台调试：先 `npm run stop`，再 `SHORTSCRAPING_NO_LAUNCHD=1 npm run sync`）。后台服务拉起时若端口已被前台实例（如旧版 `npm run restart` 或前台调试留下的）占着，它会打印提示后正常退出、不再每 10 秒反复重试；想交回后台托管，运行一次 `npm run restart` 即可。同一脚本还会生成 `~/Applications/ShortScraping Launcher.app` 接住 `shortscraping://` 协议，弹窗 `▶ 启动` 与 `📁` 在 macOS 上随即可用（双击这个应用也能启动服务）。plist 与小应用记的都是绝对路径，移动项目文件夹后重新运行一次设置脚本。
 
 **弹窗 `🔄` 重启**：开机自启下交给 launchd 拉起，服务仍在后台、日志照旧；其余场景（终端/双击脚本前台启动、Windows）由服务派生一个新实例接管端口，新实例**转入后台**运行，原窗口里的旧进程随即结束、不再有输出，日志改写到 `~/Library/Logs/ShortScraping/sync.log`（macOS）或项目下的 `logs/sync.log`（Windows / Linux）。此后关窗口不会停止服务，请用弹窗 `⏹`、stop 脚本或 `npm run stop`。弹窗提示里附日志路径；新实例派生失败时旧实例保持运行，弹窗提示失败原因。
 
@@ -213,12 +213,13 @@ server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 
 ## 📡 局域网共享
 
-同步服务运行时同时提供**只读**时间线页面：局域网设备打开 `http://<本机IP>:31919/`，看到与弹窗一致的时间线（按分组折叠的全部站点切换、日期分组、同款卡片），新数据经 SSE 推送自动刷新。
+同步服务**默认**就对同一网络开放**只读**时间线页面，不需要另外开启：同网任意设备打开 `http://<本机IP>:31919/`，看到与弹窗一致的时间线（按分组折叠的全部站点切换、日期分组、同款卡片），新数据经 SSE 推送自动刷新。
 
 - **链接位置**：弹窗底栏 `📡 <IP>:31919`，点击复制；`▦` 弹出二维码供手机扫码
 - **防火墙**：首次启动时若系统询问是否允许 Node 联网（Windows 为 `node.exe`），请允许**专用网络**，否则局域网设备无法访问
-- **只读边界**：局域网设备只能浏览页面与时间线数据；CSV 同步、配置写回、停止服务等写接口仅接受本机调用，翻译 API Key 无任何读取接口
-- **仅本机模式**：`node server/sync-server.js --local-only` 退回仅 127.0.0.1 监听（弹窗底栏显示「不可用」）
+- **只读边界**：同网设备能看到全部时间线内容（标题、简介、封面、链接、标签与译文）和本机的局域网 IP；不能写配置、推送数据或停止服务——CSV 同步、配置写回、停止/重启服务等写接口仅接受本机调用，翻译 API Key 与 Lark webhook 无任何读取接口
+- **开机自启时**：macOS 开机自启的后台服务（以及 Windows 启动目录里的 `start-sync.bat`）都不带 `--local-only`，每次登录都会开放共享页，连着公共 Wi-Fi 时同一热点下的陌生设备也能打开
+- **仅本机模式**：`npm run sync -- --local-only`（等价 `node server/sync-server.js --local-only`）只监听 127.0.0.1，其他设备无法访问（弹窗底栏显示「不可用」）；不需要共享、或常连公共网络时建议用这个模式。开机自启不支持这个参数，只想本机用时先撤销自启（macOS 运行 `server/tools/remove-autostart.command`，Windows 删掉启动目录里的快捷方式），再按此方式手动启动
 - **升级后**：重启同步服务（`npm run restart`），否则弹窗拿不到局域网地址
 - **共享页没数据**：打开一次扩展弹窗即可，弹窗会自动把当前时间线推给服务
 
@@ -233,12 +234,13 @@ server/tools/fix-csv-encoding.command  # 修复 CSV 编码
 
 ## 🔒 数据与隐私
 
-- 抓取数据保存在本机：`chrome.storage.local`（扩展内，已申请 `unlimitedStorage`，不受 10MB 配额限制——数千条记录约 5MB，按月增长）与 `db/`（CSV/JSON，若启用同步服务）。启用局域网共享时，同网设备可以只读浏览。
+- 抓取数据保存在本机：`chrome.storage.local`（扩展内，已申请 `unlimitedStorage`，不受 10MB 配额限制——数千条记录约 5MB，按月增长）与 `db/`（CSV/JSON，若启用同步服务）。同步服务运行时默认开放局域网只读共享页，同网设备可以浏览全部时间线并看到本机局域网 IP；不需要时以 `--local-only` 启动（见「局域网共享」）。
 - 站外请求包括抓取订阅站点、调用配置的翻译接口、检查更新，以及 Lark 推送：用户点击单卡按钮时 POST 到配置的多维表格工作流 webhook；开启群机器人后，条目翻译完成即自动 POST 到配置的机器人 webhook（可随时关闭）；填写了飞书自建应用凭据时，还会把封面图上传到 `open.feishu.cn` 换取卡片图片 key（不填则发无图卡）。
-- 四个本地配置（含翻译密钥和 webhook）均被 `.gitignore` 排除，不会随仓库分发。
-- 同步服务写接口仅接受回环连接，并且只认首次写入时固定下来的那个扩展（记录在 `config/sync-origin.json`，换目录重载扩展后删除该文件即可重新固定）；所有写请求都要求 `application/json`，本机管理脚本仍可调用。内容脚本仅注入支持的平台域名。
+- 四个本地配置（含翻译密钥和 webhook）均被 `.gitignore` 排除，不会随仓库分发；原子写入中断时残留的 `config/*.tmp` 同样被排除。同步服务写回 `config/trans.json`、`config/lark.json` 这两个存明文密钥的文件时只给文件属主读写权限（0600，macOS / Linux；Windows 沿用目录权限），同机其他账号读不到。v1.6.17 之前写出的这两个文件仍是默认权限，在设置页对应标签页保存一次即收紧，或手动运行 `chmod 600 config/trans.json config/lark.json`。
+- 同步服务写接口仅接受回环连接，并且只认首次写入时固定下来的那个扩展（记录在 `config/sync-origin.json`，换目录重载扩展后删除该文件即可重新固定）；所有写请求都要求 `application/json`，本机管理脚本仍可调用。
+- 扩展权限（v1.6.17 收紧）：不申请 `tabs` 权限；内容脚本仅注入支持的平台域名，其中 IMDB（`/search/title`、`/find`）、Steam（`/category/`、`/tags/`）、RoyalRoad（`/fictions/`）与 Netflix、Apple TV 一样只注入订阅页路径，在这几站浏览其他页面时不注入；后台的强制注入兜底只对支持的站点放行，订阅页跳到了站外（地区跳转、同意页等）时本次抓取直接报失败、不注入。内容脚本只能向后台提交抓取结果、请求代取详情页，清库、导入、配置写回、Lark 推送与测试发送等操作只接受扩展自己的弹窗和设置页发起。
 - 共享页按主机地址类型放行：IP 地址与 `localhost` 直接可用，用自定义域名访问需启动时加 `--allow-host=<域名>`。
-- CSV 对 `= + - @` 开头的文本添加文本前缀；原始 JSON 备份保持原文。导入跳过字段类型、时间戳（含 `2026-02-30`、`2026-13-01` 这类日历上不存在的日期）、链接或 ID 无效的记录，计入「无效」条数、不影响同批其余记录（封面链接无效只清空封面，不丢整条记录）；原文（标题/简介/标签）含乱码字符 `�` 的记录照常导入，结果里单独报条数——多为旧版同步服务写坏的备份，原文无法还原，重新抓取也不会覆盖；条件清理会验证预览范围，范围变化时需重新预览。
+- 防 CSV 公式注入：`db/timeline.csv`、设置页「导出 CSV」与 `npm run export-lark` 产出的 `.csv`（v1.6.17 起）里，以 `= + - @`（或 Tab、换行）开头的单元格会加一个前导撇号 `'`，Excel/WPS 打开时按文本显示、不当公式执行；代价是以 `- `、`+` 开头的正常简介也会带上撇号。原始 JSON 备份、剪贴板「导出到多维表格」与 export-lark 的 TSV 保持原文；确定不经 Excel/WPS 打开、直接导入 Base 的 export-lark CSV 可加 `--raw` 关掉撇号。导入跳过字段类型、时间戳（含 `2026-02-30`、`2026-13-01` 这类日历上不存在的日期）、链接或 ID 无效的记录，计入「无效」条数、不影响同批其余记录（封面链接无效只清空封面，不丢整条记录）；原文（标题/简介/标签）含乱码字符 `�` 的记录照常导入，结果里单独报条数——多为旧版同步服务写坏的备份，原文无法还原，重新抓取也不会覆盖；条件清理会验证预览范围，范围变化时需重新预览。
 
 ## 📁 项目结构
 
@@ -259,7 +261,7 @@ ShortScraping/
 │   ├── sync-server.js            # CSV 写入 + 配置写回 + 局域网只读共享（SSE）
 │   ├── public/                   # 局域网共享页（share.html/css/js）
 │   └── tools/                    # 管理脚本：stop-sync/restart-sync/fix-csv-encoding（.bat + .command）、Node 助手 stop.js/fix-csv-encoding.js、remove-launcher.bat、launcher.vbs
-├── scripts/                      # update-site-matches.mjs（由 site-registry 生成 manifest 域名清单）、export-lark-csv.mjs（多维表格导入文件，`npm run export-lark`；`--since=YYYY-MM-DD` 按本地 0 点切、比的是入库时间 `savedAt`（旧条目退回 `scrapedAt`），与设置页日期框一致）
+├── scripts/                      # update-site-matches.mjs（由 site-registry 生成 manifest 内容脚本匹配清单）、export-lark-csv.mjs（多维表格导入文件，`npm run export-lark`；`--since=YYYY-MM-DD` 按本地 0 点切、比的是入库时间 `savedAt`（旧条目退回 `scrapedAt`），与设置页日期框一致；`.csv` 默认加公式撇号，`--raw` 关掉）
 ├── tests/                       # 隔离回归测试与夹具（npm test）
 ├── db/timeline.csv               # CSV 输出（运行时生成）
 ├── db/timeline.json              # 时间线快照（共享页数据源，服务重启后回读）
@@ -275,9 +277,9 @@ ShortScraping/
 
 ## 验证与升级
 
-使用 Node.js 22 或更新版本运行 `npm test`（当前 53 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+使用 Node.js 22 或更新版本运行 `npm test`（当前 54 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
 
-更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本域名清单，测试会检查两者一致。
+更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本匹配清单（域名，及个别站点的订阅页路径），测试会检查两者一致。
 
 ## 📄 License
 

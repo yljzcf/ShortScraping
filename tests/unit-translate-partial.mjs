@@ -43,13 +43,14 @@ const chromeStub = {
     onChanged: { addListener() {} }
   },
   runtime: {
+    id: 'unit-test',
     getURL: p => `chrome-extension://unit-test/${p}`,
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
     onMessage: { addListener(fn) { chromeStub.__msg = fn; } },
     sendMessage(message) {
       return new Promise((resolve) => {
-        const handled = chromeStub.__msg?.(message, {}, resolve);
+        const handled = chromeStub.__msg?.(message, { id: 'unit-test', url: 'chrome-extension://unit-test/src/popup/popup.html' }, resolve);
         if (!handled) resolve(undefined);
       });
     },
@@ -199,9 +200,8 @@ for (; rounds < 6; rounds++) {
 // ---------- 单卡路径不受 fillOnly 约束 ----------
 await resetDramasCache();
 rawStore.dramas = [mk('recard', { status: 'trans', titleZh: '旧译名', descriptionZh: '旧简介', translatedAt: '2026-07-01T00:00:00.000Z' })];
-await chromeStub.runtime.sendMessage({
-  action: 'applyTranslation', dramaId: 'recard', result: { title: '新译名', desc: '新简介' }
-});
+// applyTranslation 入口已删除（2026-09-25 审查）：单卡路径（translateSingle）即不带 fillOnly 调这里
+await updateSingleDramaTranslation('recard', { title: '新译名', desc: '新简介' }); // eslint-disable-line no-undef
 await sleep(200);
 {
   const m = byId();

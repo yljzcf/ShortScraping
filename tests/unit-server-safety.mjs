@@ -50,6 +50,9 @@ try {
   assert.equal((await post('/config/trans', { translateConfig: { delayMs: 0 } }, { Origin: extensionOrigin })).status, 200);
   const savedConfig = JSON.parse(fs.readFileSync(path.join(directory, 'config/trans.json'), 'utf8'));
   assert.equal(savedConfig.delayMs, 0);
+  // trans.json / lark.json hold plaintext keys: a freshly created one is owner-only (Windows has no POSIX modes).
+  const fileMode = rel => fs.statSync(path.join(directory, rel)).mode & 0o777;
+  if (process.platform !== 'win32') assert.equal(fileMode('config/trans.json'), 0o600);
   assert.equal((await post('/sync', { dramas: [card('tt1')] })).body.count, 1);
   const csv = fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8');
   const snapshot = fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8');
@@ -89,6 +92,17 @@ try {
       { scheduleMode: 'cron', scrapeInterval: 6, translateInterval: 1, scrapeCron: '10 3 * * *', translateCron: '20 3 * * *' },
       raw => ScheduleConfig.validateConfig(raw).config]
   ];
+  // Files saved at 0644 by older versions (and a 0644 .tmp left by an interrupted save, which
+  // writeFileSync's mode would not touch) must come out 0600 on the next save; other config keeps
+  // the umask default, measured with a probe file because the child inherits this process's umask.
+  const probe = path.join(directory, 'config/mode-probe');
+  fs.writeFileSync(probe, '');
+  const defaultMode = fs.statSync(probe).mode & 0o777;
+  fs.unlinkSync(probe);
+  const SECRET_FILES = new Set(['config/trans.json', 'config/lark.json']);
+  fs.chmodSync(path.join(directory, 'config/trans.json'), 0o644);
+  fs.writeFileSync(path.join(directory, 'config/lark.json.tmp'), 'stale');
+  fs.chmodSync(path.join(directory, 'config/lark.json.tmp'), 0o644);
   for (const [route, key, rel, valid, normalize] of configCases) {
     const file = path.join(directory, rel);
     const saved = await post(route, { [key]: valid });
@@ -96,6 +110,9 @@ try {
     assert.deepEqual(saved.body.config, normalize(valid));
     const written = fs.readFileSync(file, 'utf8');
     assert.equal(written, `${JSON.stringify(normalize(valid), null, 2)}\n`);
+    if (process.platform !== 'win32') {
+      assert.equal(fileMode(rel), SECRET_FILES.has(rel) ? 0o600 : defaultMode, `${rel} mode ${fileMode(rel).toString(8)}`);
+    }
     for (const bad of [{}, { [key]: null }, { [key]: [] }, { [key]: 'x' }, { [key]: 0 }, { [`${key}s`]: valid }, null]) {
       const refused = await post(route, bad);
       assert.equal(refused.status, 400, `${route} ${JSON.stringify(bad)}`);

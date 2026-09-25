@@ -1,7 +1,7 @@
 import './bootstrap.cjs';
 // B1 回归测试：CSV 序列化抽共享模块 timeline-csv.js，产物与旧 sync-server 内联
 // 实现的普通文本产物字节级一致；固定黄金样例 + 分支断言。
-// 公式起始文本保护由 unit-audit-regressions 另行验证。
+// 公式起始文本保护的逐值用例在 unit-audit-regressions，整份产物层面见 T17/T18。
 // 用法：node tests/unit-timeline-csv.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -85,6 +85,22 @@ check('T14 闰年 2 月 29 日仍合法', TimelineCsv.validateImportDrama(import
 check('T15 带偏移的合法时间戳照常换算成 UTC', TimelineCsv.validateImportDrama(importCard({ translatedAt: '2026-09-05T01:00:00+08:00' }))?.translatedAt
   === '2026-09-04T17:00:00.000Z', '');
 check('T16 无偏移时间戳仍判无效（原有语义不变）', TimelineCsv.validateImportDrama(importCard({ scrapedAt: '2026-09-05T01:00:00' })) === null, '');
+
+// D5（2026-09-25 审计）：db/timeline.csv 带 BOM+CRLF 就是为了让 Excel/WPS 直接打开，整份产物层面
+// 再守一次公式前缀（csvEscape 的逐值用例在 unit-audit-regressions）。金样不含公式起始文本，不受影响；
+// - 开头的列表式简介也加撇号是按 OWASP 的刻意取舍（见 neutralizeFormula 注释）
+{
+  const hostile = TimelineCsv.buildTimelineCsv([{ id: 'x', itemId: 'tt0901', title: '=HYPERLINK("http://e","c")',
+    titleZh: '+1', description: '- 第一集', descriptionZh: '＠全角不算', tags: ['@SUM(1)'], sourceListUrl: SUB }]).content;
+  const row = hostile.split('\r\n')[1];
+  check('T17 整份 CSV：= + - @ 开头的单元格加撇号，全角与表头不加',
+    row.includes('"\'=HYPERLINK(""http://e"",""c"")"') && row.includes('"\'+1"') && row.includes('"\'- 第一集"')
+    && row.includes('"\'@SUM(1)"') && row.includes('"＠全角不算"')
+    && hostile.split('\r\n')[0] === '\uFEFF' + TimelineCsv.CSV_COLUMNS.join(','), row);
+  check('T18 neutralizeFormula 导出供其他 .csv 出口复用（lark toCsv）',
+    typeof TimelineCsv.neutralizeFormula === 'function'
+    && TimelineCsv.neutralizeFormula('=1') === "'=1" && TimelineCsv.neutralizeFormula('a=1') === 'a=1', '');
+}
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

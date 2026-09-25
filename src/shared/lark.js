@@ -271,18 +271,19 @@
    * webhook 触发器按「1 条记录＝1 次工作流运行」计费，存量 3453 条与每月约
    * 1400 条的增量都远超免费额度，故批量走「导出文件/剪贴板 → Base 导入或粘贴」。
    *
-   * 与 TimelineCsv 的两处刻意分歧（勿「统一口径」改回去，unit-lark-table 守着）：
-   * 1. poster 一律经 posterForPayload 改写——官方「链接转附件」捷径解析不了含
-   *    英文逗号/百分号编码的 URL。2026-09-12 全量实测：不改写有 601 条转不出图，
-   *    改写后只剩 5 条（1 条 netshort 与 1 条 mydrama 的逗号在 CDN 路径里、
-   *    3 条 mydrama 标题带 %E2%80%99 右单引号），无解部分是站点数据本身的形态。
-   * 2. 不加 CSV 公式前缀——Base 文本字段不执行公式，加前缀只会让以 - / + 开头的
-   *    正常简介（全量实测 4 条）平白多出撇号。
+   * 与 TimelineCsv 的刻意分歧（勿「统一口径」改回去，unit-lark-table 守着）：
+   * poster 一律经 posterForPayload 改写——官方「链接转附件」捷径解析不了含
+   * 英文逗号/百分号编码的 URL。2026-09-12 全量实测：不改写有 601 条转不出图，
+   * 改写后只剩 5 条（1 条 netshort 与 1 条 mydrama 的逗号在 CDN 路径里、
+   * 3 条 mydrama 标题带 %E2%80%99 右单引号），无解部分是站点数据本身的形态。
    *
-   * CSV 与 TSV 的单元格内容完全一致，只差传输形态与表头：
-   * - CSV 给「导入」建表——表头即字段名，固定中文（2026-09-12 用户定）；
-   * - TSV 给剪贴板粘贴追加——**不带表头**。Base 粘贴不会把首行认成字段名，
-   *   带上只会在表末平白多出一行「id / itemId / title…」的垃圾记录。
+   * CSV 与 TSV 只差传输形态、表头与公式前缀：
+   * - CSV 给「导入」建表——表头即字段名，固定中文（2026-09-12 用户定）；它是落盘的
+   *   .csv，双击默认用 Excel/WPS 打开，所以与 db/timeline.csv 同样经 TimelineCsv.neutralizeFormula
+   *   给 = + - @ 开头的单元格加撇号（2026-09-25 审计 D5）。代价：直接导入 Base 时那几条以
+   *   - / + 开头的正常简介（全量实测 4 条）会多出撇号——确定不经表格软件的，用 toCsv 的 raw 关掉；
+   * - TSV 给剪贴板粘贴追加——**不带表头、不加公式前缀**。Base 文本字段不执行公式，撇号会
+   *   原样显示；Base 粘贴也不会把首行认成字段名，带上表头只会在表末平白多出一行垃圾记录。
    */
   const CSV_BOM = '﻿';
   const TABLE_COLUMNS = TimelineCsv.CSV_COLUMNS;
@@ -451,18 +452,23 @@
     return { ...mark, overlapKeys: [...overlap], previous };
   }
 
-  /** 行数组 → 制表符分隔文本（剪贴板粘贴追加用：无表头、无 BOM、无引号包裹）。 */
+  /** 行数组 → 制表符分隔文本（剪贴板粘贴追加用：无表头、无 BOM、无引号包裹、无公式前缀）。 */
   function toTsv(rows) {
     return (rows || [])
       .map(row => TABLE_COLUMNS.map(column => tableCell(row[column])).join('\t'))
       .join('\n');
   }
 
-  /** 行数组 → CSV 文本（导入建表用：BOM + CRLF + 中文表头，与 TimelineCsv 同款引号转义）。 */
-  function toCsv(rows) {
+  /**
+   * 行数组 → CSV 文本（导入建表用：BOM + CRLF + 中文表头，与 TimelineCsv 同款引号转义与公式前缀）。
+   * @param {{raw?: boolean}} [options] raw 关掉公式前缀，只给「直接导入 Base、不经表格软件打开」
+   *        的场合（export-lark --raw）；默认开着，因为落盘的 .csv 随时可能被双击打开。
+   */
+  function toCsv(rows, options) {
+    const guard = options && options.raw ? (text => text) : TimelineCsv.neutralizeFormula;
     const quote = (text) => `"${text.replace(/"/g, '""')}"`;
     const body = (rows || []).map(row => TABLE_COLUMNS
-      .map(column => quote(tableCell(row[column]))).join(','));
+      .map(column => quote(guard(tableCell(row[column])))).join(','));
     return CSV_BOM + [TABLE_HEADERS.map(quote).join(','), ...body].join('\r\n') + '\r\n';
   }
 

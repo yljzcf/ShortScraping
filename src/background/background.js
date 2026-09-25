@@ -82,7 +82,8 @@ function enqueueDramaWrite(label, operation) {
 
 // SW 生命周期内的 dramas 表内存缓存：首个队列操作 get 一次后回填，后续队列内
 // 读写零 get（抓 N 条从 N 次约 1.5MB 的全表反序列化降为 1 次）。一致性前提：
-// dramas 的全部写路径都收口在 enqueueDramaWrite 队列内（全仓已核实八处），且
+// dramas 的全部写路径都收口在 enqueueDramaWrite 队列内（逐个 grep enqueueDramaWrite 核对，
+// 此处不记数——增删写路径后数字即过期），且
 // 缓存数组视为只读——写一律 copy-on-write 构造新数组。SW 回收即缓存消失。
 let dramasCache = null;
 
@@ -1196,6 +1197,13 @@ async function scrapeLoadedTab(tabId, url, page) {
     //    complete 但接收端不存在 → 首次 sendMessage 失败。
     // scripting.executeScript 只要文档已提交即可注入（不等 DCL），
     // content.js 自带防重注入护栏，与 manifest 注入并存安全。
+    // 兜底只对注册表站点放行：订阅 URL 手改成站外域名、或订阅页跳到了站外（地区跳转 /
+    // 同意页）时，manifest 本就不注入，这里也不能借全站 host 权限把 content.js 塞进
+    // 任意站点（2026-09-25 审查 host-permissions-overbroad）。订阅 URL 与标签页当前 URL 都要命中
+    const pageUrl = await currentTabUrl(tabId, url);
+    if (!SiteRegistry.isInjectableUrl(url) || !SiteRegistry.isInjectableUrl(pageUrl)) {
+      throw new Error(`${e.message}；页面不属于已支持的站点，不做强制注入: ${pageUrl || url}`);
+    }
     console.warn(`[ShortScraping] ${e.message}，强制注入后轮询触发抓取: ${url}`);
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -1205,6 +1213,21 @@ async function scrapeLoadedTab(tabId, url, page) {
       files: ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/content/content.js']
     }).catch(err => console.warn(`[ShortScraping] 强制注入失败（继续轮询）: ${err.message}`));
     return await sendScrapeWhenReady(tabId, 40, 3000, page);
+  }
+}
+
+/**
+ * 取标签页当前 URL，供兜底注入前核对站点归属（订阅页可能已跳转到别的域名）。
+ * 读 tab.url 不需要 tabs 权限：http(s) 页面有 host 权限即可见；读到空串（非 http(s)
+ * 页面）按不属于任何站点处理。tabs.get 本身失败（标签页已被关掉）时退回订阅 URL
+ * 判定——此时注入与轮询本来也会失败，交给后面的正常报错路径。
+ */
+async function currentTabUrl(tabId, fallbackUrl) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return tab ? (tab.url || tab.pendingUrl || '') : fallbackUrl;
+  } catch (e) {
+    return fallbackUrl;
   }
 }
 
@@ -1362,9 +1385,6 @@ async function performTranslateOnce(source) {
       processedCount: 0,
       translatedCount: 0
     });
-
-    // 加载翻译模块
-    await loadTranslator();
 
     // 翻译每条记录。注意：抓取线可能正在并行写入新卡片，
     // 所以不能在这里把开头读取到的 dramas 快照整体写回，否则会覆盖抓取线新增内容。
@@ -1635,7 +1655,7 @@ const MAX_PARTIAL_TRANSLATE_ATTEMPTS = 3;
  * titleZh，简介非空须有 descriptionZh（既有值也算数）。没翻全的半成品**保持 status='new'**
  * 让下一轮继续补、translateAttempts 累加，达上限才收口。此前无论多残缺都直接标 trans，
  * 导致「有简介无标题」的条目被永久定格、再也不进翻译队列（全库实测 660 条这样卡死）。
- * 三个写入口（批量线 / translateSingle / applyTranslation）共用这一份判据，不由调用方各算。
+ * 两个写入口（批量线 / translateSingle）共用这一份判据，不由调用方各算。
  * 返回值＝是否收口为 trans（半成品返回 false；卡片不存在也返回 false）。
  */
 function updateSingleDramaTranslation(dramaId, result, options = {}) {
@@ -1690,7 +1710,6 @@ async function handleTranslateSingle(dramaId) {
   }
 
   try {
-    await loadTranslator();
     // 语言守卫与批量线同口径：模型回显英文不得覆盖既有中文译名
     const result = keepChineseTranslation(await Translator.translateTitleAndDesc(drama.title, drama.description));
     if (!result.title && !result.desc) {
@@ -1994,17 +2013,6 @@ function resumePostScrapeTranslateLoop() {
   if (postScrapeTranslateRunning || postScrapeTranslateTimer) return;
   console.log('[ShortScraping] 抓取已全部结束而抓取后翻译线已退出，再安排一次收尾扫描');
   schedulePostScrapeTranslateLoop();
-}
-
-/**
- * 加载翻译模块
- */
-async function loadTranslator() {
-  // Translator 模块已通过 manifest 导入
-  if (typeof Translator === 'undefined') {
-    console.error('[ShortScraping] Translator 模块未加载');
-    throw new Error('Translator not loaded');
-  }
 }
 
 /**
@@ -2535,9 +2543,36 @@ function showNotification(message) {
 }
 
 /**
+ * 内容脚本可发的消息白名单：content.js 只发这两种（抓取入库、详情页代理取 HTML）。
+ * 新增内容脚本消息时须同步加到这里，否则会被下面的发送方闸门拒掉。
+ */
+const CONTENT_SCRIPT_ACTIONS = new Set(['saveDrama', 'fetchDetailHtml']);
+
+/**
+ * 发送方是否为本扩展自己的页面（弹窗 / 设置页）。判据是来源 URL 落在本扩展源下；
+ * 不能只看 sender.tab——设置页以标签页打开（options_ui.open_in_tab），它发来的消息
+ * 同样带 sender.tab。其余发送方（运行在第三方站点里的内容脚本，以及缺 url 的
+ * 任何来源）一律按内容脚本对待，只放行 CONTENT_SCRIPT_ACTIONS。
+ */
+function isExtensionPageSender(sender) {
+  return Boolean(sender) && sender.id === chrome.runtime.id
+    && typeof sender.url === 'string' && sender.url.startsWith(chrome.runtime.getURL(''));
+}
+
+/**
  * 监听消息
  */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // 发送方闸门（2026-09-25 审查 bg-onmessage-no-sender-check）：清库、导入、Lark 推送 /
+  // 测试发送（会把调用方给的 webhook 当真配置用）这类特权动作只接受扩展页面。内容脚本
+  // 跑在第三方站点的渲染进程里，那里一旦被攻破，不能借后台的全站 host 权限与已固定的
+  // 扩展 Origin 代发请求或清空时间线
+  if (!isExtensionPageSender(sender) && !CONTENT_SCRIPT_ACTIONS.has(request?.action)) {
+    console.warn(`[ShortScraping] 已拒绝非扩展页面发来的消息: ${request?.action}（来源 ${sender?.url || '未知'}）`);
+    sendResponse({ success: false, error: '该操作只接受扩展页面（弹窗 / 设置页）发起' });
+    return false;
+  }
+
   if (request.action === 'warmupCsvSync') {
     // 弹窗检测到同步服务健康时的补喂：服务启动晚于 SW 预热推送时，
     // 快照会一直空着，打开弹窗即可把当前时间线重新推给服务。
@@ -2606,15 +2641,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'translateSingle') {
     handleTranslateSingle(request.dramaId).then(sendResponse).catch((error) => {
-      sendResponse({ success: false, error: error.message });
-    });
-    return true;
-  }
-
-  if (request.action === 'applyTranslation') {
-    updateSingleDramaTranslation(request.dramaId, request.result).then((updated) => {
-      sendResponse({ success: true, updated });
-    }).catch((error) => {
       sendResponse({ success: false, error: error.message });
     });
     return true;

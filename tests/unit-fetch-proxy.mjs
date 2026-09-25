@@ -26,6 +26,7 @@ globalThis.chrome = {
     onChanged: { addListener() {} }
   },
   runtime: {
+    id: 'unit-test',
     getURL: p => `chrome-extension://unit-test/${p}`,
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
@@ -35,8 +36,11 @@ globalThis.chrome = {
         let settled = false;
         const sendResponse = (resp) => { if (!settled) { settled = true; resolve(resp); } };
         let keepOpen = false;
+        // 发送方按真实内容脚本构造（fandom 子域页面、带 tab）：fetchDetailHtml 在后台
+        // onMessage 的内容脚本白名单里，发送方闸门不应拦它
+        const sender = { id: 'unit-test', url: 'https://fandom.my-drama.com/', tab: { id: 7 }, frameId: 0 };
         for (const fn of listeners.runtimeMessage) {
-          if (fn(message, { id: 'unit-test' }, sendResponse) === true) keepOpen = true;
+          if (fn(message, sender, sendResponse) === true) keepOpen = true;
         }
         if (!keepOpen && !settled) { settled = true; resolve(undefined); }
       });

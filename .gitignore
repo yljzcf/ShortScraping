@@ -35,6 +35,8 @@ config/tag.json
 config/cron.json
 config/lark.json
 config/sync-origin.json
+# Atomic-write leftovers (sync-server writes <name>.tmp then renames); trans/lark ones hold plaintext keys
+config/*.tmp
 
 # Local-only dev docs (kept on disk, not published)
 CLAUDE.md

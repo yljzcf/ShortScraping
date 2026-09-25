@@ -6,7 +6,7 @@ import './bootstrap.cjs';
 //   A1    空时间线只在 allowEmptySync 标记下推送（带 allowEmpty），409 不重试，非空推送成功后摘标记。
 // 全部走 background-fixture 的 vm 桩：配置文件与同步服务都是 fetch 桩，不连任何真实端口。
 // 用法：node tests/unit-config-guard.mjs
-import { background, card, SUB } from './background-fixture.mjs';
+import { background, card, SUB, PAGE_SENDER } from './background-fixture.mjs';
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
@@ -322,7 +322,7 @@ const ok = { status: 200, body: { ok: true } };
 // ---------- S5/S6 设置页「按条件清理」：清空时间线才写 allowEmptySync ----------
 {
   const bg = await makeBg();
-  const send = request => new Promise(resolve => bg.listeners.message(request, {}, resolve));
+  const send = request => new Promise(resolve => bg.listeners.message(request, PAGE_SENDER, resolve));
   const prune = async sites => {
     const preview = await send({ action: 'pruneDramas', sites, dryRun: true });
     return send({ action: 'pruneDramas', sites, previewToken: preview.previewToken });

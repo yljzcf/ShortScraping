@@ -4,8 +4,13 @@
 //   1. 那份的 poster 是榜单页缩略图原样，含英文逗号/百分号编码——官方「链接转
 //      附件」捷径解析不了，2026-09-12 全量实测有 601 条封面转不出图；本脚本经
 //      Lark.buildTableRows 走 posterForPayload 改写，只剩 5 条无解；
-//   2. 那份带 CSV 公式前缀，Base 不执行公式、加前缀反而污染数据；
+//   2. 那份的表头是英文列名，Base 导入建表要的是中文字段名；
 //   3. Base 单次导入的行数上限未知，撞上了要能 --chunk 分批切。
+//
+// .csv 产物与 db/timeline.csv 一样给 = + - @ 开头的单元格加撇号（OWASP CSV 注入防护，
+// 2026-09-25 审计 D5）：它带 BOM 落盘，双击默认用 Excel/WPS 打开，标题/简介又是第三方可控内容。
+// 代价是直接导入 Base 时以 - / + 开头的正常简介多出撇号；确定不经表格软件、直接导入 Base 的
+// 加 --raw 关掉。TSV 是粘贴用的，Base 不执行公式，本来就不加。
 //
 // 用法：
 //   npm run export-lark                          全量
@@ -13,6 +18,7 @@
 //   npm run export-lark -- --source=imdb --source=steam
 //   npm run export-lark -- --chunk=1000          每 1000 条切一个文件
 //   npm run export-lark -- --format=tsv          产 TSV（粘贴用；日常增量建议走设置页按钮）
+//   npm run export-lark -- --raw                 .csv 不加公式撇号（只在直接导入 Base、不用 Excel 打开时用）
 //   npm run export-lark -- --input=<path> --outDir=<dir>
 //
 // 表头固定中文（2026-09-12 用户定），不提供切换；TSV 按粘贴追加语义不带表头。
@@ -32,7 +38,7 @@ const SiteRegistry = require('../src/shared/site-registry.js');
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function parseArgs(argv) {
-  const options = { sources: [], format: 'csv', chunk: 0, since: '', input: '', outDir: '' };
+  const options = { sources: [], format: 'csv', chunk: 0, since: '', input: '', outDir: '', raw: false };
   for (const arg of argv) {
     const match = /^--([a-zA-Z]+)(?:=(.*))?$/.exec(arg);
     if (!match) throw new Error(`无法识别的参数：${arg}`);
@@ -45,6 +51,11 @@ function parseArgs(argv) {
       case 'chunk': options.chunk = Number(value); break;
       case 'input': options.input = value; break;
       case 'outDir': options.outDir = value; break;
+      // 只认裸开关：--raw=false 之类的写法按拼错拒绝，免得「以为关了、其实开着」
+      case 'raw':
+        if (rawValue !== undefined) throw new Error('--raw 是开关，不带值');
+        options.raw = true;
+        break;
       default: throw new Error(`无法识别的参数：--${key}`);
     }
   }
@@ -106,7 +117,7 @@ function main() {
     return;
   }
 
-  const serialize = options.format === 'tsv' ? Lark.toTsv : Lark.toCsv;
+  const serialize = options.format === 'tsv' ? Lark.toTsv : batch => Lark.toCsv(batch, { raw: options.raw });
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const batches = options.chunk > 0
     ? Array.from({ length: Math.ceil(rows.length / options.chunk) },

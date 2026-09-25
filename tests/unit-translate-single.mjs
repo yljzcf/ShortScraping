@@ -13,7 +13,8 @@ import './bootstrap.cjs';
 //   U 组（弹窗，vm 跑真实 popup.js）：只发消息；translateInFlight 按 dramaId 防重；
 //     终态按 data-id 重查节点回写（storage.onChanged 全量重渲染会换掉节点）。
 //   W 组（接线）：popup.html 不再载 translator.js；popup.js 不再引用 Translator。
-//   A1：applyTranslation 与 translateSingle 共用同一完成判据（半成品也保持 new）。
+//   A1：applyTranslation 入口已删除（2026-09-25 审查：生产代码无发送方，半成品判据由 S3 经
+//     translateSingle 覆盖）——后台对它不再应答、卡片不动。
 // 用法：node tests/unit-translate-single.mjs（实现前 S/U/W/A1 应 RED）
 import fs from 'node:fs';
 import path from 'node:path';
@@ -50,13 +51,16 @@ const chromeStub = {
     onChanged: { addListener() {} }
   },
   runtime: {
+    id: 'unit-test',
     getURL: p => `chrome-extension://unit-test/${p}`,
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
     onMessage: { addListener(fn) { chromeStub.__msg = fn; } },
     sendMessage(message) {
       return new Promise((resolve) => {
-        const handled = chromeStub.__msg?.(message, {}, resolve);
+        // 发送方按真实弹窗构造：后台 onMessage 的发送方闸门只对扩展页面放行 translateSingle
+        const sender = { id: 'unit-test', url: 'chrome-extension://unit-test/src/popup/popup.html' };
+        const handled = chromeStub.__msg?.(message, sender, resolve);
         if (!handled) resolve(undefined);
       });
     },
@@ -218,15 +222,13 @@ translatorPlan = () => { throw new Error('unit stub: 翻译接口 500'); };
   check('S8b 抛错时卡片原样不动', JSON.stringify(byId().boom) === before, JSON.stringify(byId().boom));
 }
 
-// ---------- A1 applyTranslation 与 translateSingle 同一完成判据 ----------
+// ---------- A1 applyTranslation 入口已删除：扩展页面发来也不再落库 ----------
 await seed(mk('apply'));
 {
+  const before = JSON.stringify(byId().apply);
   const resp = await send({ action: 'applyTranslation', dramaId: 'apply', result: { title: '', desc: '只有简介' } });
-  const c = byId().apply;
-  check('A1 applyTranslation 半成品也保持 new 并累加 translateAttempts（与 translateSingle 同判据）',
-    resp?.success === true && resp?.updated === false && c?.status === 'new'
-    && c?.descriptionZh === '只有简介' && c?.translateAttempts === 1 && !c?.translatedAt,
-    JSON.stringify({ resp, card: c }));
+  check('A1 applyTranslation 不再有处理器（无应答、卡片原样不动）',
+    resp === undefined && JSON.stringify(byId().apply) === before, JSON.stringify({ resp, card: byId().apply }));
 }
 
 // ============ 弹窗夹具：vm 跑真实 popup.js，只替换 DOMContentLoaded 注册行导出内部函数 ============

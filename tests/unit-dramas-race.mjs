@@ -50,6 +50,7 @@ const chromeStub = {
     onChanged: { addListener() {} }
   },
   runtime: {
+    id: 'unit-test',
     getURL: p => `chrome-extension://unit-test/${p}`,
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
@@ -61,7 +62,7 @@ const chromeStub = {
         const sendResponse = (resp) => { if (!settled) { settled = true; resolve(resp); } };
         let keepOpen = false;
         for (const fn of listeners.runtimeMessage) {
-          if (fn(message, { id: 'unit-test' }, sendResponse) === true) keepOpen = true;
+          if (fn(message, { id: 'unit-test', url: 'chrome-extension://unit-test/src/popup/popup.html' }, sendResponse) === true) keepOpen = true;
         }
         if (!keepOpen && !settled) { settled = true; resolve(undefined); }
       });
@@ -161,12 +162,12 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
   check('T3b 恰好一次 saved=true', flags.filter(f => f === true).length === 1 && flags.filter(f => f === false).length === 1, JSON.stringify(flags));
 }
 
-// ---------- T4 弹窗单卡翻译走后台 applyTranslation 接口 ----------
+// ---------- T4 单卡翻译落库走队列（applyTranslation 入口已于 2026-09-25 删除，直接调队列内写入） ----------
 {
   await resetDramasCache(); rawStore.dramas = [mk('D', 'tt0004')];
-  const resp = await chromeStub.runtime.sendMessage({ action: 'applyTranslation', dramaId: 'id-D', result: { title: '丁', desc: '丁简介' } });
+  const updated = await updateSingleDramaTranslation('id-D', { title: '丁', desc: '丁简介' }); // eslint-disable-line no-undef
   const cardD = (rawStore.dramas || []).find(d => d.itemId === 'tt0004');
-  check('T4a applyTranslation 接口存在且成功', resp?.success === true && resp?.updated === true, JSON.stringify(resp));
+  check('T4a updateSingleDramaTranslation 收口成功', updated === true, JSON.stringify(updated));
   check('T4b 翻译字段落库', cardD?.titleZh === '丁' && cardD?.descriptionZh === '丁简介' && cardD?.status === 'trans', JSON.stringify(cardD));
 }
 

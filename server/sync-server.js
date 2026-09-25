@@ -84,10 +84,16 @@ function ensureDb() {
 
 // 原子落盘单一真源：先写同目录 .tmp 再 rename，进程中断不会留下半截文件。
 // CSV、局域网快照与四个配置文件共用，改写入策略（重试、fsync、临时名）只改这里。
-function writeFileAtomic(filePath, content) {
+// options.mode 只给带明文密钥的配置用（见 SECRET_FILE_MODE），其余文件沿用 umask 默认权限
+function writeFileAtomic(filePath, content, options = {}) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmpPath = `${filePath}.tmp`;
-  fs.writeFileSync(tmpPath, content, 'utf8');
+  const { mode } = options;
+  fs.writeFileSync(tmpPath, content, mode === undefined ? 'utf8' : { encoding: 'utf8', mode });
+  // writeFileSync 的 mode 只在新建时生效：上次中断残留的 .tmp 会沿用旧的 0644，rename 前再收紧一次。
+  // 目标文件不用单独 chmod——rename 让它直接换成 .tmp 的 inode，旧文件的宽松权限随之作废。
+  // Windows 的 chmod 只认只读位，权限靠目录 ACL，不在这里处理
+  if (mode !== undefined && process.platform !== 'win32') fs.chmodSync(tmpPath, mode);
   if (process.platform === 'win32') renameWithRetryWin32(tmpPath, filePath);
   else fs.renameSync(tmpPath, filePath);
 }
@@ -117,9 +123,13 @@ function renameWithRetryWin32(tmpPath, filePath) {
   }
 }
 
-function writeJsonAtomic(filePath, value) {
-  writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`);
+function writeJsonAtomic(filePath, value, options) {
+  writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`, options);
 }
+
+// trans.json（aiApiKey）与 lark.json（feishuAppSecret、webhook）存的是明文密钥，只许属主读写：
+// 项目放在 /Users/Shared、/opt 这类可遍历目录时，默认的 0644 让同机其他账号直接 cat 走
+const SECRET_FILE_MODE = 0o600;
 
 // 手改配置常带 UTF-8 BOM（PowerShell 5.1 的 Set-Content -Encoding UTF8、编辑器的「UTF-8 with BOM」）。
 // 扩展端 fetch().json() 会自动剥掉，fs 读出来却原样留着、JSON.parse 直接报错——
@@ -248,14 +258,14 @@ function pickConfigObject(payload, key) {
 function writeTransConfig(rawConfig) {
   const config = TranslateConfig.normalizeConfig(rawConfig);
 
-  writeJsonAtomic(TRANS_CONFIG_PATH, config);
+  writeJsonAtomic(TRANS_CONFIG_PATH, config, { mode: SECRET_FILE_MODE });
   return config;
 }
 
 function writeLarkConfig(rawConfig) {
   const config = Lark.normalizeConfig(rawConfig);
 
-  writeJsonAtomic(LARK_CONFIG_PATH, config);
+  writeJsonAtomic(LARK_CONFIG_PATH, config, { mode: SECRET_FILE_MODE });
   return config;
 }
 

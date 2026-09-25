@@ -2,12 +2,12 @@ import './bootstrap.cjs';
 // 回归测试：Lark 多维表格导出投影层（lark.js 的 TABLE_COLUMNS / buildTableRows /
 // toCsv / toTsv），以及此前零覆盖的 posterForPayload。
 //
-// 本出口与 TimelineCsv 的两处刻意分歧在此固化，防止日后被「统一口径」改回去：
-//   1. poster 一律经 posterForPayload 改写——官方「链接转附件」捷径解析不了
-//      含英文逗号/百分号编码的 URL，不改写则 IMDB/dramashorts/mydrama 共 601 条
-//      封面转不成附件（2026-09-12 全量实测）；
-//   2. 不加 CSV 公式前缀——Base 文本字段不执行公式，加前缀只会让以 - / + 开头的
-//      正常简介多出撇号。
+// 本出口与 TimelineCsv 的刻意分歧在此固化，防止日后被「统一口径」改回去：
+//   poster 一律经 posterForPayload 改写——官方「链接转附件」捷径解析不了
+//   含英文逗号/百分号编码的 URL，不改写则 IMDB/dramashorts/mydrama 共 601 条
+//   封面转不成附件（2026-09-12 全量实测）。
+// 公式前缀按出口分开（2026-09-25 审计 D5，X 组）：落盘的 CSV 与 TimelineCsv 同一规则加撇号
+// （双击会用 Excel/WPS 打开），剪贴板 TSV 不加（Base 不执行公式，撇号会原样显示）。
 // 用法：node tests/unit-lark-table.mjs
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -276,13 +276,66 @@ check('S8 CSV 带 BOM + CRLF + 中文表头', csv.startsWith('﻿') && csv.inclu
 check('S9 CSV 行数 = 表头 + 记录数', csv.trimEnd().split('\r\n').length === rows.length + 1,
   `lines=${csv.trimEnd().split('\r\n').length}`);
 check('S10 CSV 引号转义生效', csv.includes('""引号""'), '');
-check('S11 CSV 同样不加公式前缀', !csv.includes("'- 以减号"), '');
+// D5 起刻意翻转：CSV 会被双击用表格软件打开，- 开头的正常简介也按 OWASP 加撇号（代价见 lark.js 注释）
+check('S11 CSV 对 - 开头的简介加公式前缀（TSV 不加，见 S5）', csv.includes('"\'- 以减号开头的正常简介"'), '');
 check('S12 CSV 与 TimelineCsv 产物不同（poster 已改写、表头已中文，证明没走错出口）',
   csv !== TimelineCsv.buildTimelineCsv(FIXTURE).content, '');
 check('S13 空输入：CSV 只剩表头、TSV 为空串', Lark.toTsv([]) === ''
   && Lark.toCsv([]).trimEnd().split('\r\n').length === 1, JSON.stringify(Lark.toTsv([])));
 check('S14 CSV 数据行列数与表头一致', csv.trimEnd().split('\r\n').slice(1)
   .every(line => (line.match(/","/g) || []).length + 1 === 15), '');
+
+// ---------- X 组：CSV 公式注入防护（2026-09-25 审计 D5 lark-csv-formula-injection） ----------
+// export-lark 的 .csv 带 BOM 落盘，双击默认用 Excel/WPS 打开：第三方可控的标题/简介以
+// = + - @ 开头时会被当公式执行（HYPERLINK 外链、DDE）。剪贴板 TSV 进的是 Base，不能加撇号
+{
+  const evil = Lark.buildTableRows([
+    { id: 'x-1', itemId: 'xx0001', title: '=HYPERLINK("http://e","c")', titleZh: '+1+1', source: 'steam',
+      description: '@SUM(1)', descriptionZh: '\t=cmd', tags: ['-2+3'], genres: [], status: 'trans', sourceListUrl: SUB },
+    { id: 'x-2', itemId: 'xx0002', title: '＝全角不算公式', titleZh: '－1℃的恋人', source: 'steam',
+      description: 'ordinary = inside', tags: [], genres: [], status: 'trans', sourceListUrl: SUB }
+  ]);
+  const evilCsv = Lark.toCsv(evil);
+  // toCsv 每格都有引号包裹：按 RFC 4180 解一行（"" 还原成 "），标题里带引号也不会切错
+  const parseLine = (line) => {
+    const cells = [];
+    for (let i = 0; i < line.length; i += 1) { // 每轮从开引号起，结束时 i 停在分隔逗号上
+      let cell = '';
+      for (i += 1; i < line.length; i += 1) {
+        if (line[i] !== '"') cell += line[i];
+        else if (line[i + 1] === '"') { cell += '"'; i += 1; } else { i += 1; break; }
+      }
+      cells.push(cell);
+    }
+    return cells;
+  };
+  const cellsOf = (text, line) => parseLine(text.replace('\uFEFF', '').split('\r\n')[line]);
+  const [hostile, benign] = [cellsOf(evilCsv, 1), cellsOf(evilCsv, 2)];
+  const col = (name) => Lark.TABLE_COLUMNS.indexOf(name);
+  check('X0 解析自检：每行恰好 15 格', hostile.length === 15 && benign.length === 15, `${hostile.length}/${benign.length}`);
+  check('X1 CSV：= + - @ 与折叠后的前导 Tab 开头的单元格都加撇号',
+    hostile[col('title')] === `'=HYPERLINK("http://e","c")`
+    && hostile[col('titleZh')] === "'+1+1" && hostile[col('description')] === "'@SUM(1)"
+    && hostile[col('descriptionZh')] === "' =cmd" && hostile[col('tags')] === "'-2+3", JSON.stringify(hostile));
+  check('X2 CSV：全角符号与中间出现的 = 不加撇号、表头不加',
+    benign[col('title')] === '＝全角不算公式' && benign[col('titleZh')] === '－1℃的恋人'
+    && benign[col('description')] === 'ordinary = inside'
+    && evilCsv.split('\r\n')[0].replace('\uFEFF', '') === Lark.TABLE_HEADERS.map(h => `"${h}"`).join(','),
+    JSON.stringify(benign));
+  // 不含换行/制表符的格两边应逐字一致：db/timeline.csv 与导入文件对同一条目的防护不会各说各话
+  check('X3 CSV 前缀规则与 TimelineCsv.csvEscape 同一真源',
+    typeof TimelineCsv.neutralizeFormula === 'function'
+    && ['title', 'titleZh', 'description', 'tags'].every(name =>
+      parseLine(TimelineCsv.csvEscape(evil[0][name]))[0] === hostile[col(name)]), '');
+  const evilTsv = Lark.toTsv(evil).split('\n')[0].split('\t');
+  check('X4 TSV 不加撇号（粘进 Base 的文本字段不执行公式，撇号会原样显示）',
+    evilTsv[col('title')] === '=HYPERLINK("http://e","c")' && evilTsv[col('description')] === '@SUM(1)'
+    && !evilTsv.some(cell => cell.startsWith("'")), JSON.stringify(evilTsv.slice(2, 5)));
+  const rawCsv = Lark.toCsv(evil, { raw: true });
+  check('X5 toCsv raw 关掉前缀（export-lark --raw，直接导入 Base 用），其余形态不变',
+    cellsOf(rawCsv, 1)[col('title')] === '=HYPERLINK("http://e","c")' && !rawCsv.includes(`"'`)
+    && rawCsv.split('\r\n')[0] === evilCsv.split('\r\n')[0], '');
+}
 
 // ---------- W 组：增量导出的比较口径与水位线（2026-09-25 审计 B6 lark-export-watermark-gap） ----------
 // 三条漏导路径各守一处：

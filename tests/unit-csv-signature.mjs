@@ -22,6 +22,7 @@ globalThis.chrome = {
     onChanged: { addListener() {} }
   },
   runtime: {
+    id: 'unit-test',
     getURL: p => `chrome-extension://unit-test/${p}`,
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
@@ -32,7 +33,7 @@ globalThis.chrome = {
         const sendResponse = (resp) => { if (!settled) { settled = true; resolve(resp); } };
         let keepOpen = false;
         for (const fn of listeners.runtimeMessage) {
-          if (fn(message, { id: 'unit-test' }, sendResponse) === true) keepOpen = true;
+          if (fn(message, { id: 'unit-test', url: 'chrome-extension://unit-test/src/popup/popup.html' }, sendResponse) === true) keepOpen = true;
         }
         if (!keepOpen && !settled) { settled = true; resolve(undefined); }
       });

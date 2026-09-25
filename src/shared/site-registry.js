@@ -11,7 +11,12 @@
  *   exact  = hostname 全等（steam 仅认 store.steampowered.com，商店子域之外不命中）。
  * path（可选，v1.5.8）只限定 manifest content_scripts.matches 的路径段（默认 /*），
  *   用于 Netflix 这类只需注入某个栏目页的大站；站点归属判定（siteOfHostname/siteOfUrl）
- *   仍只按 host，后台 scripting.executeScript 强制注入兜底路径也不受 matches 限制。
+ *   仍只按 host，后台 scripting.executeScript 强制注入兜底路径也不受 matches 限制
+ *   （但兜底只对 isInjectableUrl 命中的页面放行，点边界匹配，见 background.js scrapeLoadedTab）。
+ *   path 可写成数组，一条 host 条目展开成多项 matches（Steam 的 /category/ 与 /tags/
+ *   两种内容中心入口）。收窄时须与 content.js 对应 adapter.matches 认的路径一致，
+ *   订阅 URL 带的查询串也要能被匹配到（Chrome 匹配模式的路径段连查询串一起匹配）——
+ *   unit-site-registry T6b 拿 tag.example.json 的全部订阅 URL 逐条核对。
  *
  * 一个 site 键可以有多条 host 条目（v1.6.11 起，DramaBox 的 dramabox.com 与
  * dramaboxdb.com 是同一片库的两套人工编排视图，favicon 都逐字节相同，拆两个标签
@@ -31,11 +36,14 @@
 
   // 顺序即展示序（2026-09-11 用户定：Netflix 紧随 IMDB 排第二，RoyalRoad 移到末位；
   // 2026-09-12 用户定：AppleTV 紧随 Netflix 排第三；2026-09-16：FlickReels 紧随 NetShort）
+  // IMDB / Steam / RoyalRoad 三站的订阅页路径固定，path 收窄到 adapter.matches 认的入口
+  // （2026-09-25 审查 manifest-overbroad-injection：整站 /* 让用户在这三站浏览的每个页面
+  // 都被注入三个脚本和 CSS，却只有订阅页用得上）
   const SITES = [
-    { site: 'imdb', name: 'IMDB', host: 'imdb.com', match: 'suffix' },
+    { site: 'imdb', name: 'IMDB', host: 'imdb.com', match: 'suffix', path: ['/search/title*', '/find*'] },
     { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*' },
     { site: 'appletv', name: 'AppleTV', host: 'tv.apple.com', match: 'exact', path: '/us/collection/most-popular-now/*' },
-    { site: 'steam', name: 'Steam', host: 'store.steampowered.com', match: 'exact' },
+    { site: 'steam', name: 'Steam', host: 'store.steampowered.com', match: 'exact', path: ['/category/*', '/tags/*'] },
     { site: 'mydrama', name: 'MyDrama', host: 'my-drama.com', match: 'suffix' },
     { site: 'reelshort', name: 'ReelShort', host: 'reelshort.com', match: 'suffix' },
     { site: 'dramashorts', name: 'DramaShorts', host: 'dramashorts.io', match: 'suffix' },
@@ -54,7 +62,7 @@
     // （'www.dramaboxdb.com'.endsWith('dramabox.com') 为 false），条目顺序不影响匹配。
     { site: 'dramabox', name: 'DramaBox', host: 'dramabox.com', match: 'suffix' },
     { site: 'dramabox', name: 'DramaBox', host: 'dramaboxdb.com', match: 'suffix' },
-    { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix' },
+    { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix', path: '/fictions/*' },
     // 同 FlickReels：首页订阅带 ?list=，Chrome 匹配模式的路径段连查询串一起匹配，
     // '/' 匹配不到 '/?list=…'，故 path 留默认 /*（非订阅页由 adapter.matches 闸住）
     { site: 'pinedrama', name: 'PinesDramas', host: 'pinedrama.com', match: 'suffix' }
@@ -116,17 +124,39 @@
   }
 
   /**
+   * 强制注入兜底的放行判定：与 manifest matches 同一口径的点边界匹配（suffix 条目＝裸域或其子域），
+   * 不沿用 siteOfHostname 的裸 endsWith——那条怪癖只关乎站点归属显示，放到注入闸门上
+   * notimdb.com 这类站外域名就能借全站 host 权限被塞进 content.js。
+   */
+  function isInjectableUrl(url) {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (e) {
+      return false;
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    const hostname = parsed.hostname;
+    return SITES.some(entry => entry.match === 'exact'
+      ? hostname === entry.host
+      : hostname === entry.host || hostname.endsWith(`.${entry.host}`));
+  }
+
+  /**
    * manifest content_scripts.matches 的推导式。注册表是站点归属的单一真源，
    * 生成脚本（scripts/update-site-matches.mjs）与回归断言都从这里取，
    * 避免「两处各自从注册表推一遍」导致改一处漏一处。
    */
   function contentScriptMatches() {
-    return SITES.map(entry => `*://${entry.match === 'exact' ? '' : '*.'}${entry.host}${entry.path || '/*'}`);
+    return SITES.flatMap(entry => {
+      const origin = `*://${entry.match === 'exact' ? '' : '*.'}${entry.host}`;
+      return [].concat(entry.path || '/*').map(path => `${origin}${path}`);
+    });
   }
 
   const api = {
     SITES, SITE_GROUPS, DEFAULT_GROUP, CATEGORY_SOURCES, SOURCE_NAMES, hostBySource,
-    groupOfSite, siteOfHostname, siteOfUrl, contentScriptMatches
+    groupOfSite, siteOfHostname, siteOfUrl, isInjectableUrl, contentScriptMatches
   };
 
   if (typeof module !== 'undefined' && module.exports) {

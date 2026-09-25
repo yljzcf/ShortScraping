@@ -36,17 +36,30 @@
     .filter(key => key !== 'tags' && key !== 'genres')
     .concat('imdbId');
 
+  /**
+   * CSV 公式注入防护（OWASP CSV Injection）：CSV 引号只隔离列，不阻止表格公式；
+   * 以 = + - @ 或前导 Tab/CR/LF 开头的不可信文本加一个前导撇号，Excel/WPS 打开时按文本处理。
+   * 凡是会以 .csv 落盘、可能被双击用表格软件打开的出口都经这里（db/timeline.csv、设置页
+   * 「导出 CSV」、export-lark 的 .csv）；剪贴板 TSV 粘进 Base 不走这里，撇号会原样显示。
+   *
+   * 只覆盖 OWASP 明列的半角字符：没有表格软件在导入时把全角 ＝＋－＠ 当公式起始，给它们
+   * 加前缀只会让以「－」「＋」开头的合法中文文案多出撇号。半角 - / + 则不做「后面跟数字
+   * 才算」的细分：Excel 会把 `-2+3`、`+A1` 当公式求值，`- 第一集` 这类列表式简介分不清
+   * 意图，按 OWASP 一律加前缀。代价是这些正常文案在表格软件（及 Base 导入）里多出一个撇号
+   * （此前全量实测以 - / + 开头的简介共 4 条），换来的是标题/简介这类第三方可控内容不会被当公式执行。
+   * 应用内没有回读 CSV 单元格的路径（导入恢复只收 JSON），撇号不会在往返中累积。
+   */
+  function neutralizeFormula(text) {
+    return /^\s*[=+\-@]|^[\t\r\n]/.test(text) ? `'${text}` : text;
+  }
+
   function csvEscape(value) {
     if (value === null || value === undefined) return '';
     // 数组用英文逗号连接（v1.5.13 由竖线改，与 Lark payload 自 2026-07-25 的约定一致，
     // 表格软件/Base 把文本列转多选时默认也按逗号切）：单元格本就带引号包裹，逗号
     // 不会把它拆成两列。已知残留风险——标签值本身若含英文逗号会在 Base 里被错切成
     // 两个标签，全量 3454 条实测零命中，payload 侧暴露同样风险已久，两边保持一致。
-    let text = Array.isArray(value) ? value.join(',') : String(value);
-    // CSV 引号只隔离列，不阻止表格公式；为不可信文本添加文本前缀。
-    // 只覆盖 OWASP 明列的 = + - @ 与前导 Tab/CR/LF：没有表格软件在导入时把全角
-    // ＝＋－＠ 当公式起始，给它们加前缀只会让以「－」「＋」开头的合法中文文案多出撇号。
-    if (/^\s*[=+\-@]|^[\t\r\n]/.test(text)) text = `'${text}`;
+    const text = neutralizeFormula(Array.isArray(value) ? value.join(',') : String(value));
     return `"${text.replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
   }
 
@@ -171,7 +184,7 @@
     return { content: serializeTimelineCsv(rows), count: rows.length };
   }
 
-  const api = { CSV_COLUMNS, csvEscape, normalizeDrama, validateImportDrama, buildTimelineCsv };
+  const api = { CSV_COLUMNS, csvEscape, neutralizeFormula, normalizeDrama, validateImportDrama, buildTimelineCsv };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;

@@ -163,6 +163,37 @@ check('O7 tsv 扩展名 + 无表头无 BOM 无 CRLF', files[0].endsWith('.tsv')
 check('O8 tsv 每行 15 格且行数＝记录数', text.split('\n').every(line => line.split('\t').length === 15)
   && text.split('\n').length === 4, text.split('\n').map(l => l.split('\t').length).join(','));
 
+// ---------- X 组：.csv 的公式注入防护（2026-09-25 审计 D5 lark-csv-formula-injection） ----------
+// 带 BOM 的 .csv 双击默认用 Excel/WPS 打开，第三方标题/简介以 = + - @ 开头会被当公式执行；
+// --raw 留给「直接导入 Base、不经表格软件」的用法，TSV 粘贴本就不加
+const EVIL_INPUT = path.join(workDir, 'evil.json');
+fs.writeFileSync(EVIL_INPUT, JSON.stringify({ version: 1, dramas: [
+  { id: 'x1', itemId: 'st0301', title: '=HYPERLINK("http://e","c")', source: 'steam', status: 'trans',
+    description: '- 以减号开头的正常简介', descriptionZh: '@SUM(1)', scrapedAt: '2026-09-12T00:00:00.000Z' }
+] }));
+const evilIo = [`--input=${EVIL_INPUT}`, `--outDir=${OUT}`];
+const firstOut = () => { const list = outFiles(); return list.length ? fs.readFileSync(path.join(OUT, list[0]), 'utf8') : ''; };
+reset();
+r = run([], { io: evilIo });
+text = firstOut();
+check('X1 默认 .csv 给 = - @ 开头的单元格加撇号', r.code === 0
+  && text.includes('"\'=HYPERLINK(""http://e"",""c"")"') && text.includes('"\'- 以减号开头的正常简介"')
+  && text.includes('"\'@SUM(1)"'), text.split('\r\n')[1]?.slice(0, 120));
+reset();
+r = run(['--raw'], { io: evilIo });
+text = firstOut();
+check('X2 --raw 产出原样单元格（直接导入 Base 用）', r.code === 0
+  && text.includes('"=HYPERLINK(""http://e"",""c"")"') && !text.includes('"\''), text.split('\r\n')[1]?.slice(0, 120));
+reset();
+r = run(['--raw=false'], { io: evilIo });
+check('X3 --raw 是裸开关，带值按拼错拒绝（不让人以为关掉了）', r.code === 1 && r.out.includes('--raw 是开关')
+  && outFiles().length === 0, r.out.trim().slice(0, 60));
+reset();
+r = run(['--format=tsv'], { io: evilIo });
+text = firstOut();
+check('X4 TSV 不加撇号（粘进 Base 的撇号会原样显示）', r.code === 0
+  && text.split('\t')[2] === '=HYPERLINK("http://e","c")' && !text.includes("\t'"), JSON.stringify(text.slice(0, 80)));
+
 reset();
 r = run(['--input=' + path.join(workDir, 'nope.json')]);
 check('O10 输入缺失给出可操作提示', r.code === 1 && r.out.includes('npm run sync'), r.out.trim().slice(0, 80));

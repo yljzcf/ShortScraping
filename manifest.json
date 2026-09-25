@@ -1,13 +1,12 @@
 {
   "manifest_version": 3,
   "name": "ShortScraping - 短剧监控助手",
-  "version": "1.6.16",
+  "version": "1.6.17",
   "description": "监控IMDB等平台的爆款短剧榜单，支持时间线展示和自动翻译",
   "permissions": [
     "storage",
     "alarms",
     "notifications",
-    "tabs",
     "scripting",
     "unlimitedStorage"
   ],
@@ -31,10 +30,12 @@
   "content_scripts": [
     {
       "matches": [
-        "*://*.imdb.com/*",
+        "*://*.imdb.com/search/title*",
+        "*://*.imdb.com/find*",
         "*://*.netflix.com/tudum/top10*",
         "*://tv.apple.com/us/collection/most-popular-now/*",
-        "*://store.steampowered.com/*",
+        "*://store.steampowered.com/category/*",
+        "*://store.steampowered.com/tags/*",
         "*://*.my-drama.com/*",
         "*://*.reelshort.com/*",
         "*://*.dramashorts.io/*",
@@ -45,7 +46,7 @@
         "*://*.shorttv.live/*",
         "*://*.dramabox.com/*",
         "*://*.dramaboxdb.com/*",
-        "*://*.royalroad.com/*",
+        "*://*.royalroad.com/fictions/*",
         "*://*.pinedrama.com/*"
       ],
       "js": ["src/shared/site-registry.js", "src/shared/translate-config.js", "src/content/content.js"],
