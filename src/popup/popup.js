@@ -271,13 +271,28 @@
     if (ok) {
       try {
         cacheSyncServerDir(result);
-        // 服务健康即让后台预热一次共享快照：服务比扩展后启动时，
-        // SW 启动时的预热推送已丢失，靠弹窗打开补喂（服务端同内容不广播）
-        chrome.runtime.sendMessage({ action: 'warmupCsvSync' }).catch(() => {});
+        // 服务健康即请后台补喂共享快照：服务比扩展后启动时，
+        // SW 启动时的预热推送已丢失，靠弹窗打开补喂（服务端同内容不广播）；
+        // 后台先比对冷启动指纹，服务上已是本地这一版就不推（见 warmupCsvSyncMessage）
+        chrome.runtime.sendMessage(warmupCsvSyncMessage(result)).catch(() => {});
       } catch (e) {
         // 弹窗开着时扩展被重载：chrome.* 同步抛「Extension context invalidated」，状态栏已按健康检查显示，忽略
       }
     }
+  }
+
+  /**
+   * 补喂消息带上刚读到的 /health 指纹（本机块的 contentHash / csvInSync，v1.6.21 起的同步服务才有）：
+   * 后台据此比对冷启动指纹，服务上已确认是本地这一版就不推（免得每开一次弹窗整表 POST 一次）。
+   * 旧版服务没有 contentHash 时不带，后台照旧强推。
+   */
+  function warmupCsvSyncMessage(health) {
+    const message = { action: 'warmupCsvSync' };
+    if (typeof health?.contentHash === 'string' && health.contentHash) {
+      message.contentHash = health.contentHash;
+      message.csvInSync = health.csvInSync === true;
+    }
+    return message;
   }
 
   /**

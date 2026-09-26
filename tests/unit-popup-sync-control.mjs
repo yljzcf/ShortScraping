@@ -17,6 +17,7 @@ import './bootstrap.cjs';
 //   P 组：postSyncControl 非 ok 一律抛错（HTTP 非 2xx 或 body.ok 不为 true）
 //   R 组：重启——进程号变了才算成功；失败时刷新状态栏；logPath 提示按 mode 区分
 //   S 组：停止——轮询到 /health 不再应答才算停止
+//   W 组：服务健康时发给后台的补喂消息带上 /health 的 contentHash / csvInSync（v1.6.22 冷启动指纹），旧版服务不带
 // 用法：node tests/unit-popup-sync-control.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -137,6 +138,7 @@ function popupFixture() {
   };
 
   const clipboard = [];
+  const messages = []; // chrome.runtime.sendMessage 收到的消息（W 组断言补喂消息的形状）
   const window = { location: { href: '' } };
   const qrDraws = [];
   const context = vm.createContext({
@@ -145,7 +147,7 @@ function popupFixture() {
     window,
     navigator: { platform: 'MacIntel', clipboard: { writeText: async text => { clipboard.push(text); } } },
     chrome: {
-      runtime: { sendMessage: () => Promise.resolve(undefined), getURL: p => `chrome-extension://unit-test/${p}` },
+      runtime: { sendMessage: message => { messages.push(structuredClone(message)); return Promise.resolve(undefined); }, getURL: p => `chrome-extension://unit-test/${p}` },
       storage: { local: { get: async () => ({}), set: async () => {} }, onChanged: { addListener() {} } },
       tabs: { create() {} }
     },
@@ -208,7 +210,7 @@ function popupFixture() {
   const statusText = () => byId.syncServiceText.textContent;
   const hidden = id => byId[id].classes.has('hidden');
   return {
-    fx, byId, server, calls, posts, healthCalls, toasts, clipboard, window, qrDraws,
+    fx, byId, server, calls, posts, healthCalls, toasts, clipboard, window, qrDraws, messages,
     idle, drive, statusText, hidden, now: () => now
   };
 }
@@ -464,6 +466,38 @@ function scheduleRestart(h, { body, oldMs = 1500, downMs = 1000, newPid = 200 })
   check('S2 服务仍在应答 → 错误提示且状态栏如实显示「已开启」',
     h.toasts.at(-1)?.type === 'error' && h.toasts.at(-1)?.message.includes('仍在响应') && h.statusText() === '同步服务：已开启',
     JSON.stringify({ toasts: h.toasts, text: h.statusText() }));
+}
+
+// ============ W 组：补喂消息带 /health 指纹 ============
+{
+  const h = popupFixture();
+  h.server.health = () => ({ ok: true, pid: 100, lanUrls: [], contentHash: 'abc123', csvInSync: true });
+  await h.drive(h.fx.checkSyncServiceStatus());
+  const warm = h.messages.filter(m => m.action === 'warmupCsvSync');
+  check('W1 服务健康：补喂消息带上 /health 的 contentHash 与 csvInSync（后台据此比对冷启动指纹）',
+    warm.length === 1 && JSON.stringify(warm[0]) === JSON.stringify({ action: 'warmupCsvSync', contentHash: 'abc123', csvInSync: true }),
+    JSON.stringify(h.messages));
+}
+{
+  const h = popupFixture();
+  h.server.health = () => ({ ok: true, pid: 100, lanUrls: [], contentHash: 'abc123' });
+  await h.drive(h.fx.checkSyncServiceStatus());
+  const warm = h.messages.filter(m => m.action === 'warmupCsvSync');
+  check('W2 /health 没给 csvInSync：按 false 带过去（后台照旧推）',
+    warm.length === 1 && warm[0].contentHash === 'abc123' && warm[0].csvInSync === false, JSON.stringify(h.messages));
+}
+{
+  const h = popupFixture(); // 默认 /health 没有 contentHash：旧版同步服务
+  await h.drive(h.fx.checkSyncServiceStatus());
+  const warm = h.messages.filter(m => m.action === 'warmupCsvSync');
+  check('W3 旧版同步服务（/health 没有 contentHash）：补喂消息不带指纹，后台维持强推',
+    warm.length === 1 && JSON.stringify(warm[0]) === JSON.stringify({ action: 'warmupCsvSync' }), JSON.stringify(h.messages));
+}
+{
+  const h = popupFixture();
+  h.server.health = () => null;
+  await h.drive(h.fx.checkSyncServiceStatus());
+  check('W4 服务不在：不发补喂消息', !h.messages.some(m => m.action === 'warmupCsvSync'), JSON.stringify(h.messages));
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

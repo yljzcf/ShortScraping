@@ -76,7 +76,7 @@ let latestDramas = [];
 let latestSerialized = '[]';
 // 快照内容指纹：latestSerialized 的 sha1（hex），只经 commitSnapshotContent 与前两者一起前进。
 // 不写进 timeline.json：重启时 loadSnapshot 从同一份内容重算，天然跨重启稳定。
-// 供 /health 本机块、/sync 响应（扩展下一版的冷启动指纹比对）与 /api/timeline 的 ETag 使用
+// 供 /health 本机块、/sync 响应（扩展 v1.6.22 起的冷启动指纹比对）与 /api/timeline 的 ETag 使用
 let contentHash = sha1Hex(latestSerialized);
 let dataVersion = 0;
 let updatedAt = null;
@@ -101,10 +101,14 @@ function commitSnapshotContent(dramas, serialized) {
   contentHash = sha1Hex(serialized);
 }
 
-// 磁盘上的 CSV 已知与快照一致：签名相同且文件还在（运行期间被手删的，下一次推送由 existsSync 守卫补写）。
+// 磁盘上的 CSV 与快照文件都已知与内存快照一致：CSV 签名相同且两份文件都还在。任一份运行期间被手删，
+// 这里即为 false——扩展冷启动指纹比对（v1.6.22）据此判定过期并补推，/sync 的 existsSync 守卫与
+// timeline.json 自愈随即补写。只看 CSV 的话，timeline.json 被删后指纹仍判一致，要等时间线变化才补写。
+// 空快照从不落 timeline.json（首启只建空 CSV），文件不在不算落后。
 // csvSerialized 为 null（见 loadSnapshot）或落后于快照时都是 false
 function csvInSync() {
-  return csvSerialized === latestSerialized && fs.existsSync(CSV_PATH);
+  const snapshotOnDisk = latestSerialized === '[]' || fs.existsSync(TIMELINE_JSON_PATH);
+  return csvSerialized === latestSerialized && fs.existsSync(CSV_PATH) && snapshotOnDisk;
 }
 
 function ensureDb() {
@@ -870,7 +874,7 @@ async function handleRequest(req, res) {
         return sendJson(res, 409, { ok: false, code: 'EMPTY_REJECTED', error });
       }
       const configured = filterDramasByTagConfig(dramas);
-      // 同内容跳过 CSV 重写：扩展 SW 每次唤醒都预热推送，绝大多数与上次内容一致，
+      // 同内容跳过 CSV 重写：扩展唤醒、打开弹窗时的补推（旧版扩展每次唤醒都推）绝大多数与上次内容一致，
       // 无谓的磁盘重写全部拦在这里；existsSync 守卫保住「服务运行期间 CSV 被手删后下次推送自愈」的行为
       //（停机期间被删的见 loadSnapshot）
       const serialized = JSON.stringify(configured);
@@ -909,7 +913,7 @@ async function handleRequest(req, res) {
       // 先落 json 快照再写 CSV：共享页只依赖快照，CSV 被 Excel 锁住时共享页照常更新。
       // 两份都是「落盘成功才提交内存签名」——先改签名的话，落盘失败后扩展重推同一内容会被当成
       // 未变化直接跳过，磁盘就一直停在旧版本。内容未变化时不 bump 版本、不广播：
-      // 扩展 SW 每次唤醒都会预热推送，避免共享页无谓重渲染
+      // 扩展唤醒 / 弹窗补推多为同内容（旧版扩展每次唤醒都推），避免共享页无谓重渲染
       if (snapshotChanged) {
         const snapshot = { version: dataVersion + 1, updatedAt: new Date().toISOString(), dramas: configured };
         saveSnapshot(snapshot);

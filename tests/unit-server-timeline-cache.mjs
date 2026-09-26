@@ -237,6 +237,14 @@ try {
     check('S1b 同内容推送补写后 csvInSync 回到 true', healed.ok === true && (await localHealth())?.csvInSync === true
       && dataRows(fs.readFileSync(csvPath, 'utf8')) === current.length, JSON.stringify(healed));
 
+    // 运行中删掉 timeline.json：扩展冷启动指纹（v1.6.22）靠 csvInSync 判过期，只看 CSV 会一直判「一致」而不补推
+    fs.rmSync(jsonPath);
+    const jsonGone = await localHealth();
+    check('S1c 运行中删掉 timeline.json：csvInSync 也变 false', jsonGone?.csvInSync === false, JSON.stringify(jsonGone));
+    const jsonHealed = await server.postSync(current);
+    check('S1d 同内容推送补写 timeline.json 后 csvInSync 回到 true', jsonHealed.ok === true && fs.existsSync(jsonPath)
+      && (await localHealth())?.csvInSync === true, JSON.stringify(jsonHealed));
+
     await server.restart(() => fs.rmSync(csvPath));
     const afterRestart = await localHealth();
     check('S2a 停机期间删掉 CSV：启动即按快照补写，不等推送', afterRestart?.csvInSync === true

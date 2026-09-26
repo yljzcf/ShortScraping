@@ -374,7 +374,8 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
     assert.deepEqual(bg.data.dramas, []);
     assert.equal(bg.data.lastScrape, null);
     assert.equal('lastTranslate' in bg.data, false, 'lastTranslate 无读取方，清库不再写它');
-    const clearAt = bg.log.indexOf('set:dramas,lastScrape');
+    // 整表写同一次 set 连带换 dramasStamp（v1.6.22 冷启动指纹），放在调用方的连带键之后
+    const clearAt = bg.log.indexOf('set:dramas,lastScrape,dramasStamp');
     const lastMigrationAt = bg.log.indexOf('set:shorticalCanonicalIdsMigrated');
     const alarmsAt = bg.log.indexOf('alarm:translate-task');
     assert.ok(lastMigrationAt >= 0 && alarmsAt >= 0, bg.log.join(' | '));
@@ -384,15 +385,21 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
     assert.ok(bg.log.indexOf(SETTINGS_TAB) > clearAt);
   }
 
-  // 扩展升级：顶层初始化已覆盖，onInstalled 不清库、不开页、不重跑
+  // 扩展升级：顶层初始化已覆盖，onInstalled 不清库、不开页、不重跑，只作废冷启动指纹（v1.6.22，
+  // 强推由 unit-csv-coldstart U 组覆盖）
   {
-    const bg = await background({ settle: false, data: { dramas: [card('tt1')] } });
+    const bg = await background({
+      settle: false,
+      data: { dramas: [card('tt1')], dramasStamp: { rev: 'old', pending: 1 }, csvLastPush: { rev: 'old', tagsKey: '', serverHash: 'h' } }
+    });
     await bg.listeners.installed({ reason: 'update' });
     await drain();
     assert.equal(configLoads(bg), 1);
     assert.equal(watchdogInstalls(bg), 1);
     assert.equal(bg.data.dramas.length, 1);
     assert.equal(bg.log.some(e => e.startsWith('tab:')), false);
+    assert.equal('csvLastPush' in bg.data, false, bg.log.join(' | '));
+    assert.notEqual(bg.data.dramasStamp?.rev, 'old', '旧指纹须作废（清掉，或已被本版本的写换成新 rev）');
   }
 }
 

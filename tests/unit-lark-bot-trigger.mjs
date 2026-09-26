@@ -460,6 +460,48 @@ check('S1 同批多条推送之间有节流间隔（≥240ms，即 ≤4 次/秒�
   botPostTimes.length === 3 && gaps.every(g => g >= 240),
   `times=${botPostTimes.length} gaps=${JSON.stringify(gaps)}`);
 
+// ---------- A 组：AI 批量线整批回填（v1.6.22）后的触发点① ----------
+// 成功批改成一次队列操作写整批（一次 dramas 整表 set，而不是每条一次）；推群仍在落库之后按批内顺序
+// 逐条走、只推这次翻成 trans 的卡、照样过 250ms 节流，水位线前的存量与半成品照旧不推。
+// 上面各组都是 API 模式（逐条翻译逐条写），这组钉住 AI 整批写路径的推送条数与顺序
+await resetDramasCache(); await setupBot();
+store.data.translateConfig = { translateMode: 'ai', aiEndpoint: 'https://x.test/v1', aiApiKey: 'k', batchSize: 10, delayMs: 1 };
+botPosts.length = 0; botPostTimes.length = 0; alarmStore.clear();
+botFailCount = 0;
+const aiBatchCalls = [];
+globalThis.Translator = {
+  async translateBatchAI(items) {
+    aiBatchCalls.push(items.length);
+    return items.map(it => (it.title === 'T-ai-half' ? { title: '', desc: '只有简介' } : { title: `中·${it.title}`, desc: '中文简介' }));
+  },
+  async translateTitleAndDesc(title) { return { title: `中·${title}`, desc: '中文简介' }; }
+};
+store.seedDramas([mk('ai1'), mk('ai-old', { scrapedAt: BEFORE }), mk('ai2'), mk('ai-half'), mk('ai3'), mk('ai4')]);
+let aiDramaWrites = 0;
+const setBeforeAi = store.local.set;
+store.local.set = (values, callback) => {
+  if (store.writesDramas(values)) aiDramaWrites++;
+  return setBeforeAi(values, callback);
+};
+await runTranslateRound();
+store.local.set = setBeforeAi;
+{
+  const posted = botPosts.map(p => (JSON.stringify(p).match(/中·T-(ai[\w-]*)/) || [])[1] || '?');
+  const aiGaps = botPostTimes.slice(1).map((t, i) => t - botPostTimes[i]);
+  check('A1 AI 整批回填：推群 4 次、按批内顺序（存量 ai-old、半成品 ai-half 不推）',
+    aiBatchCalls.join(',') === '6' && posted.join(',') === 'ai1,ai2,ai3,ai4',
+    `calls=${aiBatchCalls} posted=${posted}`);
+  check('A2 整批落库后的连续推送仍有节流间隔（≥240ms）', aiGaps.length === 3 && aiGaps.every(g => g >= 240),
+    `gaps=${JSON.stringify(aiGaps)}`);
+  check('A3 这一批 6 条（含半成品）只写一次 dramas 整表', aiDramaWrites === 1, `writes=${aiDramaWrites}`);
+  const ds = Object.fromEntries((store.dramas() || []).map(d => [d.id, d]));
+  check('A4 落库照旧：5 条 trans（含存量），半成品保持 new 并计次',
+    ['ai1', 'ai-old', 'ai2', 'ai3', 'ai4'].every(id => ds[id]?.status === 'trans')
+      && ds['ai-half']?.status === 'new' && ds['ai-half']?.translateAttempts === 1,
+    JSON.stringify(Object.values(ds).map(d => [d.id, d.status, d.translateAttempts])));
+}
+globalThis.Translator = { async translateTitleAndDesc(title) { return { title: `中·${title}`, desc: '中文简介' }; } };
+
 /// ---------- B 组：订阅 URL 首轮抓取只入库不推送（v1.6.7，2026-09-17 用户定；取代 v1.6.6 站点级规则） ----------
 // 刚订阅的 URL 第一轮会一次抓进几十条（FlickReels 首轮 24 条、IMDB 新加 9 条出品公司筛选约 300 条），是存量底座
 // 不是新动态，全推即刷屏。粒度是订阅 URL 而非站点——IMDB 库里已有 482 条，按站点永远判不出「新」；新站点只是

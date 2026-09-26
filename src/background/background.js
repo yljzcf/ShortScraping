@@ -30,7 +30,9 @@ let postScrapeTranslateTimer = null;
 let postScrapeTranslateRunning = false;
 let csvSyncTimer = null;
 // 上次成功推送的时间线序列化内容（SW 内存签名，刻意不持久化——SW 回收后首推
-// 即同步服务重启场景的天然恢复机制）。同内容跳过 POST，省去数 MB 的冗余传输
+// 即同步服务重启场景的天然恢复机制）。同内容跳过 POST，省去数 MB 的冗余传输。
+// 跨 SW 生命周期的「服务端已有这一版」由持久化的冷启动指纹另行判定（csvLastPush，见 csvSyncUpToDate）：
+// 它比对的是服务端此刻的 contentHash，同步服务重启丢了快照时对不上，照样会推
 let lastCsvSyncSerialized = null;
 // 推送单飞（审查 sync-no-ordering）：csvSyncInFlight 是在飞那次推送（runCsvSync 包出来的
 // promise）。此前防抖只管「何时发」不管「在不在飞」：一次数 MB 的推送还没回，新变化 500ms 后
@@ -71,6 +73,10 @@ const CSV_SYNC_DEBOUNCE_MS = 500;
 const CSV_SYNC_BUSY_WINDOW_MS = 8000;
 // 单次推送的超时：单飞之下一个挂住的请求会堵住之后所有推送，直到 SW 被回收
 const CSV_SYNC_TIMEOUT_MS = 60000;
+// 冷启动指纹比对问的 /health（本机块带 contentHash / csvInSync）与它的期限：服务没开或挂住时最多拖 3 秒，
+// 超时即按「拿不到」处理、照旧推送
+const CSV_SYNC_HEALTH_ENDPOINT = 'http://127.0.0.1:31919/health';
+const CSV_SYNC_HEALTH_TIMEOUT_MS = 3000;
 
 // 四个配置文件 ↔ storage 键 ↔ 同步服务写回端点 POST /config/<key>。请求体 { <storage 键>: 值 }
 // 与设置页 trySyncConfig 同形；configAheadOfFile（设置页写了 storage 但写回文件失败的标记）
@@ -90,8 +96,8 @@ const PRUNE_TRASH_MAX_BATCHES = 3;
 
 // 本文件的 setTimeout 延时（本常量与 CSV 500ms 防抖 / 8s 忙碌节流）均远小于 MV3 SW 的
 // ~30s 空闲回收阈值；极端情况下 SW 连同定时器被杀时，SW 下次唤醒的顶层
-// scheduleCsvSync 与 translate-task alarm 会兜底。评估后不迁移 chrome.alarms
-// （其最小粒度 30s，反而更差）。
+// warmupCsvSyncIfStale（没推出去的那次写已换了 dramasStamp.rev，指纹必然对不上、照推）与
+// translate-task alarm 会兜底。评估后不迁移 chrome.alarms（其最小粒度 30s，反而更差）。
 const POST_SCRAPE_TRANSLATE_DELAY_MS = 10000;
 
 // dramas 表全局单写者队列：内容脚本/弹窗的写请求经消息转到这里，与后台
@@ -115,6 +121,9 @@ function enqueueDramaWrite(label, operation) {
 // 此处不记数——增删写路径后数字即过期），且
 // 缓存数组视为只读——写一律 copy-on-write 构造新数组。SW 回收即缓存消失。
 let dramasCache = null;
+// 本生命周期里缓存是否填过（读表回填或写成功）：翻译扫描的指纹捷径只给「SW 冷启动、还没碰过表」的那一刻用
+// （见 noPendingTranslationsByStamp）。填过之后缓存只会因写失败而清空，届时照常重读一次表，不走捷径
+let dramasCacheFilledOnce = false;
 
 // 前向兼容护栏（为日后按站点分片存储预留，本版本不分片）：更新版本改用分片布局时会写
 // dramasMeta = { layout: 2, … }，旧键 dramas 冻结、不再更新。从那样的版本回退到本版本时，
@@ -144,10 +153,41 @@ function warnDramasReadOnlyOnce(what) {
   console.warn(`[ShortScraping] ${what}跳过：${dramasReadOnlyMessage()}`);
 }
 
-/** 缓存未命中时读 dramas 表，连带读布局标记（同一次 get，不多一次读） */
+// 冷启动指纹（v1.6.22）：每次整表写在同一次 set 里连带写 dramasStamp = { rev, pending }——rev 每写一次换一个
+// （crypto.randomUUID），标识「这一版表内容」；pending＝表里 status==='new' 的条数。推送成功且服务端回了
+// contentHash 时，把被推出去那一版的 rev 连同订阅指纹、服务端指纹记进 csvLastPush（见 recordCsvLastPush）。
+// SW 冷唤醒只读这几个小键 + 问一次 /health 就能判断「同步服务上是不是正是本地这一版」，对得上才跳过预热推送
+// （csvSyncUpToDate），不必为此整表读；翻译扫描在冷缓存时也凭 pending===0 直接收工、不读表。
+// 内存副本按数组引用挂在 WeakMap 上：表的每一版（dramasCache 指向的数组）各自带着自己的 stamp，推送读到
+// 哪个数组就取哪个数组的 rev——推送途中又有写入时缓存换成新数组，已取到的那一对不受影响
+const dramasStamps = new WeakMap();
+
+function validDramasStamp(stamp) {
+  return Boolean(stamp) && typeof stamp === 'object' && typeof stamp.rev === 'string' && stamp.rev !== ''
+    && Number.isInteger(stamp.pending) && stamp.pending >= 0;
+}
+
+/** 表的某一版对应的 stamp（内存副本）；没有（旧版本写的表 / 版本更新刚清掉）时为 null */
+function dramasStampOf(dramas) {
+  return (dramas && typeof dramas === 'object' && dramasStamps.get(dramas)) || null;
+}
+
+function newDramasStamp(dramas) {
+  let pending = 0;
+  for (const drama of Array.isArray(dramas) ? dramas : []) {
+    if (drama?.status === 'new') pending++;
+  }
+  const rev = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+  return { rev, pending };
+}
+
+/** 缓存未命中时读 dramas 表，连带读布局标记与指纹（同一次 get，不多一次读；同一次读出来的表与指纹必然配对） */
 async function readDramasFromStorage() {
-  const { dramas = [], dramasMeta } = await chrome.storage.local.get(['dramas', 'dramasMeta']);
+  const { dramas = [], dramasMeta, dramasStamp } = await chrome.storage.local.get(['dramas', 'dramasMeta', 'dramasStamp']);
   noteDramasLayout(dramasMeta);
+  if (validDramasStamp(dramasStamp) && dramas && typeof dramas === 'object') dramasStamps.set(dramas, dramasStamp);
   return dramas;
 }
 
@@ -155,6 +195,7 @@ async function readDramasFromStorage() {
 async function getDramasInQueue() {
   if (dramasCache === null) {
     dramasCache = await readDramasFromStorage();
+    dramasCacheFilledOnce = true;
   }
   return dramasCache;
 }
@@ -192,6 +233,7 @@ function recordDramasWrite(ms) {
  * 新数组；失败则缓存失效重读并向上抛——防「缓存已新、storage 仍旧」的分歧驻留。
  * 只读模式（见前向兼容护栏）直接拒写。缓存为空＝本生命周期还没读过表（清库这类不读先写的
  * 路径），先补读一次布局标记再判，免得绕过护栏。
+ * 同一次 set 换一个新的 dramasStamp（见冷启动指纹），放在 extra 之后，调用方的连带键盖不掉它。
  */
 async function writeDramasInQueue(next, extra = {}) {
   if (dramasCache === null) {
@@ -199,10 +241,13 @@ async function writeDramasInQueue(next, extra = {}) {
     noteDramasLayout(dramasMeta);
   }
   if (dramasLayoutAhead) throw new Error(dramasReadOnlyMessage());
+  const stamp = newDramasStamp(next);
   const startedAt = writeClockMs();
   try {
-    await chrome.storage.local.set({ dramas: next, ...extra });
+    await chrome.storage.local.set({ dramas: next, ...extra, dramasStamp: stamp });
     dramasCache = next;
+    dramasCacheFilledOnce = true;
+    if (next && typeof next === 'object') dramasStamps.set(next, stamp);
   } catch (e) {
     dramasCache = null;
     throw e;
@@ -292,6 +337,11 @@ const initPromise = loadConfigFromJsonFiles({ beforeMigrations: setupAlarms }).c
 });
 
 chrome.runtime.onInstalled.addListener(async (details) => {
+  if (details.reason === 'update') {
+    // 版本变了（含重载未打包扩展、回退后再升级）：冷启动指纹作废并强推一次，见 resetCsvSyncFingerprint
+    await resetCsvSyncFingerprint();
+    return;
+  }
   if (details.reason !== 'install') return;
   // 排在顶层初始化之后：清库不能与同一实例里的订阅外清理 / 迁移交错写 dramas
   await initPromise;
@@ -307,7 +357,9 @@ chrome.runtime.onStartup.addListener(() => initPromise);
 // SW 每次启动预热一次共享快照：扩展重载/同步服务重启后局域网共享页
 // 立即有数据，无需等下一次抓取；服务端对相同内容不会广播刷新。
 // 本地时间线为空且无 allowEmptySync 时不推（空库护栏，见 syncTimelineToCsv）。
-scheduleCsvSync();
+// v1.6.22 起先比对冷启动指纹：同步服务上已确认正是本地这一版时跳过——SW 每次被回收再唤醒都要整表读
+// 一遍、整表 POST 一遍，而绝大多数唤醒时两边本来就一致。任何一项对不上或拿不到都照旧推（csvSyncUpToDate）
+warmupCsvSyncIfStale();
 
 // SW 重启孤儿清理：storage 里 running:true 但本实例没有在跑的轮，说明上一
 // 实例连同其翻译轮已死（顶层代码只在新实例启动时求值一次），把状态归位，
@@ -1563,6 +1615,25 @@ async function readTranslateConfig() {
 }
 
 /**
+ * 冷缓存下翻译扫描的捷径判据（见冷启动指纹）：只读 dramasStamp / dramasMeta 两个小键，指纹在且
+ * pending===0 才返回 true——pending 数的是全表 status==='new'，比翻译扫描「订阅内且 new」的口径更宽，
+ * 为 0 时扫描必然为空。只给 SW 冷启动后还没碰过表的那一刻用（dramasCacheFilledOnce），且排进写队列读：
+ * 排在已入队的写（如唤醒时的迁移把译文退回 new）之后，读到的是已提交的最新指纹。**只许在队列回调之外调用**。
+ * 没有指纹（旧版本写的表 / 版本更新刚清掉）、布局标记显示本地数据已由更新版本升级、缓存已被填上、
+ * 或读取出错，一律返回 false，照常读表。
+ */
+async function noPendingTranslationsByStamp() {
+  if (dramasCache !== null || dramasCacheFilledOnce) return false;
+  return enqueueDramaWrite('翻译扫描读指纹', async () => {
+    if (dramasCache !== null) return false;
+    const { dramasStamp, dramasMeta } = await chrome.storage.local.get(['dramasStamp', 'dramasMeta']);
+    const layout = Number(dramasMeta?.layout);
+    const layoutAhead = Number.isFinite(layout) && layout > DRAMAS_LAYOUT_SUPPORTED;
+    return !layoutAhead && validDramasStamp(dramasStamp) && dramasStamp.pending === 0;
+  }).catch(() => false);
+}
+
+/**
  * 翻译轮实现。运行状态持久化到 translateRunState（弹窗按钮由它驱动）：
  * 非空轮 running:true → 每条进度（兼 SW 保活心跳）→ finally 终态；
  * 空扫描仅手动触发时写一次终态（弹窗等着收尾信号），
@@ -1585,6 +1656,12 @@ async function performTranslateOnce(source) {
   const writeStats = beginDramasWriteStats();
 
   try {
+    // 冷缓存且指纹说表里没有 new（pending===0）：本轮必是空扫描，直接收工、不为它整表读（见冷启动指纹）。
+    // 布局标记显示本地数据已是更新版本的布局时不走捷径，照下面的只读护栏报错
+    if (await noPendingTranslationsByStamp()) {
+      console.log('[ShortScraping] 没有需要翻译的内容（指纹 pending=0，未读表）');
+      return { pendingCount: 0, translatedCount: 0 };
+    }
     const { translateConfig, urlTags = [] } = await chrome.storage.local.get(['translateConfig', 'urlTags']);
     // 翻译线每轮扫描：缓存命中零全表读；SW 冷唤醒（缓存为空）时经队列读一次并回填缓存，
     // 随后的 CSV 同步与本轮回填译文都不必再整表读
@@ -1678,15 +1755,18 @@ async function performTranslateOnce(source) {
 
     // 回填一条翻译结果并计进度：按 drama.id 精确定位，不依赖数组顺序（批量保对应的锚点）
     //
-    // 完成判据（「该翻的都翻出来了」）在 updateSingleDramaTranslation 队列内按合并后的
-    // 记录统一计算：只回一半的留 status='new' 下轮补另一半（updated=false），不再像
-    // 此前那样一律标 trans 把半成品永久定格。
+    // 完成判据（「该翻的都翻出来了」）在写队列内按合并后的记录统一计算（mergeTranslation，
+    // 逐条 / 整批两条落库路径共用）：只回一半的留 status='new' 下轮补另一半（updated=false），
+    // 不再像此前那样一律标 trans 把半成品永久定格。
     //
     // 调用前提：这条的请求拿到了应答。空结果＝服务答了却没给出这条的译文（漏 id / 回显
     // 英文被语言守卫洗掉 / 译文与原文相同被滤掉），暂记为失败；有译文则打断连败链。
-    const applyOne = async (drama, result) => {
-      const hasTranslation = Boolean(result?.title || result?.desc);
-      if (!hasTranslation) {
+    //
+    // commit：落库这一步，返回 { done, becameTrans }。缺省逐条落库（拆单重试 / API 模式）；AI 成功批传入
+    // 整批落库的那一份（updateBatchDramaTranslations，见下方批量分支），记账、计数与推群照旧逐条走
+    const hasTranslation = result => Boolean(result?.title || result?.desc);
+    const applyOne = async (drama, result, commit = () => updateSingleDramaTranslation(drama.id, result, { fillOnly: true })) => {
+      if (!hasTranslation(result)) {
         noteFailure([drama], { attributable: true, streak: false });
         return;
       }
@@ -1694,7 +1774,7 @@ async function performTranslateOnce(source) {
       failures.push(...streakFailures);
       streakFailures = [];
 
-      const { done: updated, becameTrans } = await updateSingleDramaTranslation(drama.id, result, { fillOnly: true });
+      const { done: updated, becameTrans } = await commit();
       progressedCount++;
       if (updated) {
         translatedCount++;
@@ -1796,9 +1876,26 @@ async function performTranslateOnce(source) {
           console.warn('[ShortScraping] 批量翻译异常:', batchError);
           requestFailed(batchError, chunk);
         } else {
-          // 按批内下标 j 取 results[j]（translateBatchAI 保证等长、同序，缺失填空串）
+          // 按批内下标 j 取 results[j]（translateBatchAI 保证等长、同序，缺失填空串）。
+          // 拿到译文的条目合成一次队列操作整批落库（一次整表写，而不是每条一次），仍按批内顺序逐条走
+          // applyOne：失败暂记、连败链打断、计数与触发点①推群的先后都与逐条落库时一致。整批写在第一条
+          // 有译文的条目走到落库那一步时才发出——与逐条写时第一次落库同一时点（排在它前面的空结果已照旧
+          // 暂记），写失败就在这里抛出，同逐条写时第一条就写失败；后面各条直接取这一次的结果
+          const batchResults = chunk.map((_, j) => results[j] || { title: '', desc: '' });
+          const slotOf = new Map();
+          const entries = [];
+          chunk.forEach((drama, j) => {
+            if (!hasTranslation(batchResults[j])) return;
+            slotOf.set(j, entries.length);
+            entries.push({ dramaId: drama.id, result: batchResults[j] });
+          });
+          let batchWrite = null;
+          const commitFromBatch = j => async () => {
+            if (!batchWrite) batchWrite = updateBatchDramaTranslations(entries, { fillOnly: true });
+            return (await batchWrite)[slotOf.get(j)];
+          };
           for (let j = 0; j < chunk.length; j++) {
-            await applyOne(chunk[j], results[j] || { title: '', desc: '' });
+            await applyOne(chunk[j], batchResults[j], commitFromBatch(j));
           }
         }
 
@@ -1916,7 +2013,7 @@ const MAX_PARTIAL_TRANSLATE_ATTEMPTS = 3;
  * titleZh，简介非空须有 descriptionZh（既有值也算数）。没翻全的半成品**保持 status='new'**
  * 让下一轮继续补、translateAttempts 累加，达上限才收口。此前无论多残缺都直接标 trans，
  * 导致「有简介无标题」的条目被永久定格、再也不进翻译队列（全库实测 660 条这样卡死）。
- * 两个写入口（批量线 / translateSingle）共用这一份判据，不由调用方各算。
+ * 三个写入口（批量线逐条 / 批量线整批 / translateSingle）共用 mergeTranslation 这一份判据，不由调用方各算。
  * 返回 { done, becameTrans }：done＝是否收口为 trans（半成品 / 卡片不存在为 false）；
  * becameTrans＝本次写入把它从非 trans 翻成 trans——群机器人只在这一刻推（见 Lark 群机器人段
  * 头注释）。在队列内按当前记录判定，批量线与 🌍 同时翻同一张卡时只有先落库的那一方为 true。
@@ -1928,33 +2025,74 @@ function updateSingleDramaTranslation(dramaId, result, options = {}) {
 
     if (index === -1) return { done: false, becameTrans: false };
 
-    const current = dramas[index];
-    const titleZh = options.fillOnly
-      ? (current.titleZh || result.title || '')
-      : (result.title || current.titleZh);
-    const descriptionZh = options.fillOnly
-      ? (current.descriptionZh || result.desc || '')
-      : (result.desc || current.descriptionZh);
-
-    const needTitle = Boolean(String(current.title || '').trim());
-    const needDesc = Boolean(String(current.description || '').trim());
-    const complete = (!needTitle || Boolean(titleZh)) && (!needDesc || Boolean(descriptionZh));
-    const attempts = complete ? 0 : (Number(current.translateAttempts) || 0) + 1;
-    const done = complete || attempts >= MAX_PARTIAL_TRANSLATE_ATTEMPTS;
-
+    const { record, done, becameTrans } = mergeTranslation(dramas[index], result, options);
     // copy-on-write：缓存数组只读，不就地突变（快照读者可能正持有旧引用）
     const next = dramas.slice();
-    const record = { ...current, titleZh, descriptionZh, status: done ? 'trans' : 'new' };
-    if (done) {
-      record.translatedAt = new Date().toISOString();
-      delete record.translateAttempts;
-    } else {
-      record.translateAttempts = attempts;
-    }
     next[index] = record;
 
     await writeDramasInQueue(next);
-    return { done, becameTrans: done && current.status !== 'trans' };
+    return { done, becameTrans };
+  });
+}
+
+/**
+ * 一条翻译结果合并进一条记录（纯函数：不读写 storage、不碰队列，不改动 current）。字段规则见
+ * updateSingleDramaTranslation 的注释：fillOnly 只补空缺；完成判据按合并后的记录算；没翻全的
+ * 保持 new、translateAttempts 累加，达 MAX_PARTIAL_TRANSLATE_ATTEMPTS 收口 trans；收口写
+ * translatedAt、清计数。options.now（ISO 串）给整批共用一个落库时刻，缺省取当前时间。
+ * 返回 { record, done, becameTrans }，record 是新对象。
+ */
+function mergeTranslation(current, result, options = {}) {
+  const titleZh = options.fillOnly
+    ? (current.titleZh || result.title || '')
+    : (result.title || current.titleZh);
+  const descriptionZh = options.fillOnly
+    ? (current.descriptionZh || result.desc || '')
+    : (result.desc || current.descriptionZh);
+
+  const needTitle = Boolean(String(current.title || '').trim());
+  const needDesc = Boolean(String(current.description || '').trim());
+  const complete = (!needTitle || Boolean(titleZh)) && (!needDesc || Boolean(descriptionZh));
+  const attempts = complete ? 0 : (Number(current.translateAttempts) || 0) + 1;
+  const done = complete || attempts >= MAX_PARTIAL_TRANSLATE_ATTEMPTS;
+
+  const record = { ...current, titleZh, descriptionZh, status: done ? 'trans' : 'new' };
+  if (done) {
+    record.translatedAt = options.now || new Date().toISOString();
+    delete record.translateAttempts;
+  } else {
+    record.translateAttempts = attempts;
+  }
+  return { record, done, becameTrans: done && current.status !== 'trans' };
+}
+
+/**
+ * AI 成功批的整批回填（v1.6.22）：一批里拿到译文的条目在**一次**队列操作里逐条 mergeTranslation、
+ * 只写一次整表（一次 set、换一个 dramasStamp）。此前每条各排一次队列、各写一次整表，一批最多 10 次
+ * 数 MB 的 set，每次还各触发一轮 onChanged → CSV 调度。
+ * entries：[{ dramaId, result }]，按批内顺序；返回等长数组，每项同 updateSingleDramaTranslation 的
+ * { done, becameTrans }（卡片不存在为 false/false）。与逐条写逐项等价：各条按顺序合并在上一条合并后的
+ * 表上（同一 id 出现两次时第二次看到第一次的结果），becameTrans 同样在队列内按当前记录判定——🌍 抢先
+ * 落库的卡这里 fillOnly 照样算完成，但 becameTrans 为 false。一条都没找到（卡已被删）时不写。
+ * 记账、计数、推群不在这里：调用方拿返回值按批内顺序逐条走原来的流程（见 performTranslateOnce）。
+ */
+function updateBatchDramaTranslations(entries, options = {}) {
+  return enqueueDramaWrite('翻译整批更新', async () => {
+    const dramas = await getDramasInQueue();
+    const indexById = new Map();
+    dramas.forEach((d, i) => { if (!indexById.has(d.id)) indexById.set(d.id, i); }); // 同 findIndex：取第一条
+    const mergeOptions = { ...options, now: new Date().toISOString() };
+    let next = null;
+    const outcomes = entries.map(({ dramaId, result }) => {
+      const index = indexById.get(dramaId);
+      if (index === undefined) return { done: false, becameTrans: false };
+      if (!next) next = dramas.slice(); // copy-on-write，同 updateSingleDramaTranslation
+      const { record, done, becameTrans } = mergeTranslation(next[index], result, mergeOptions);
+      next[index] = record;
+      return { done, becameTrans };
+    });
+    if (next) await writeDramasInQueue(next);
+    return outcomes;
   });
 }
 
@@ -2409,6 +2547,9 @@ async function syncTimelineToCsv() {
   const { urlTags = [], allowEmptySync } = await chrome.storage.local.get(['urlTags', 'allowEmptySync']);
   // 经队列读表：缓存为空（SW 冷唤醒）时这次读顺带回填缓存，翻译扫描不必再整表读一遍
   const dramas = await readDramasThroughQueue('CSV 同步读表');
+  // 与本次要序列化的这一版表配对的指纹 rev（按数组引用取，见冷启动指纹）：推送途中又有写入时缓存换成了
+  // 新数组，这里取到的仍是被推出去的那一版，csvLastPush 不会把没推上去的新版本记成「服务端已有」
+  const pushedRev = dramasStampOf(dramas)?.rev ?? null;
   // 前向兼容护栏：本地数据已是更新版本的布局，冻结的旧表不能再推给服务端（会把新版本推上去的更新内容盖回去）
   if (dramasLayoutAhead) {
     warnDramasReadOnlyOnce('CSV 同步');
@@ -2470,6 +2611,9 @@ async function syncTimelineToCsv() {
   lastCsvSyncSerialized = serialized;
   const result = await response.json();
   console.log(`[ShortScraping] CSV 同步完成：${result.count} 条 -> ${result.csvPath}`);
+  // 冷启动指纹：只在 200 且服务端回了 contentHash（v1.6.21 起的同步服务）、且它正是这份推送体的指纹时记；
+  // 409 / 其余状态码 / 旧版服务 / 服务端另行过滤掉了一部分都不记
+  if (response.status === 200) await recordCsvLastPush(dramas, pushedRev, urlTags, result?.contentHash, serialized);
 
   // 非空推送成功＝库回到有内容的常态，一次性的清空授权作废，免得日后某条非用户操作的路径
   // （如 tag.json 回读清库）借着残留标记把空时间线推上去。推送在飞期间 dramas 又变了
@@ -2478,6 +2622,121 @@ async function syncTimelineToCsv() {
   if (!isEmpty && allowEmptySync !== undefined && !csvSyncTimer && !csvSyncRerun && scheduleSeq === csvSyncScheduleSeq) {
     await chrome.storage.local.remove('allowEmptySync');
   }
+}
+
+/**
+ * 推送成功后记冷启动指纹 csvLastPush = { rev, tagsKey, serverHash }：rev 是被推出去那一版表的
+ * dramasStamp.rev，tagsKey 是这次过滤用的订阅指纹（configuredUrlFingerprint，与订阅外清理同口径），
+ * serverHash 是服务端这次回的 contentHash。服务端没回 contentHash（旧版同步服务）就不记。
+ * serverHash 必须正是这份推送体 serialized 的指纹（与服务端同算法，见 sha1HexOf）才记：服务端存快照前还要按
+ * 它自己的 config/tag.json 再过滤一遍，两边订阅对不上时（设置页写回 tag.json 失败留下 configAheadOfFile、
+ * 手改过 tag.json）它存下的比推上去的少。那样记下的指纹日后照样「对得上」——tag.json 追平之后本该重推补上
+ * 被滤掉的卡，冷启动却会跳过。对不上时连旧记录一并作废，下次冷启动照旧推。
+ * 表还没有指纹（升级后首推、版本更新刚清掉）时在写队列里补记一个：只有缓存仍是这次推出去的数组、它也还
+ * 没有指纹（＝推送以来没有任何写入，storage 里的表正是被推出去的这一版）才补，与 csvLastPush 同一次 set；
+ * 期间有写入就不补，交给那次写带出的指纹与随后的推送。记录失败只告警：推送本身已经成功，
+ * 下次冷启动无非照旧再推一次。
+ */
+async function recordCsvLastPush(dramas, rev, urlTags, serverHash, serialized) {
+  if (typeof serverHash !== 'string' || serverHash === '') return;
+  const tagsKey = configuredUrlFingerprint(urlTags);
+  try {
+    if (typeof serialized !== 'string' || await sha1HexOf(serialized) !== serverHash) {
+      console.warn('[ShortScraping] 同步服务存下的时间线与本次推送不一致（服务端 config/tag.json 与扩展订阅不同步？），不记推送指纹，下次唤醒照旧推送');
+      await chrome.storage.local.remove('csvLastPush');
+      return;
+    }
+    if (rev) {
+      await chrome.storage.local.set({ csvLastPush: { rev, tagsKey, serverHash } });
+      return;
+    }
+    await enqueueDramaWrite('补记时间线指纹', async () => {
+      if (dramasCache !== dramas || dramasStampOf(dramas)) return;
+      const stamp = newDramasStamp(dramas);
+      await chrome.storage.local.set({ dramasStamp: stamp, csvLastPush: { rev: stamp.rev, tagsKey, serverHash } });
+      dramasStamps.set(dramas, stamp);
+    });
+  } catch (e) {
+    console.warn('[ShortScraping] 记录 CSV 推送指纹失败（下次冷启动照旧推送）:', e?.message || e);
+  }
+}
+
+/**
+ * 与同步服务 contentHash 同一算法：JSON 串按 UTF-8 编码后的 sha1，小写 hex（sync-server.js 的 sha1Hex）。
+ * 服务端对原样存下的推送体重新 JSON.stringify，与这边的 serialized 逐字相同，指纹因而可比（服务端一侧的
+ * 「contentHash＝sha1(快照序列化)」由 unit-server-timeline-cache H1a 钉住）。算法日后若改，这里对不上只会
+ * 让指纹一直记不下、退回每次唤醒都推，不会误跳过
+ */
+async function sha1HexOf(text) {
+  const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * 冷启动指纹比对：同步服务上是否正是本地这一版时间线。只读小键 dramasStamp / csvLastPush / urlTags /
+ * allowEmptySync，**从不读 dramas**；本地这几项都对得上才去问 /health（3 秒期限）。以下全部成立才返回 true：
+ *   · dramasStamp.rev === csvLastPush.rev（上次成功推送之后表没有再写过）；
+ *   · csvLastPush.tagsKey 等于现在的订阅指纹（订阅变了，推送体的过滤口径跟着变）；
+ *   · /health 的 contentHash === csvLastPush.serverHash（服务端此刻的内容就是我们推上去的那份，
+ *     同步服务重启丢了快照、或被别的版本推过都对不上）；
+ *   · /health 的 csvInSync === true（CSV 已知与快照一致，否则推一次让服务端重写 CSV）；
+ *   · 没有 allowEmptySync（用户确认过的清空还等着推）。
+ * 任何一项缺失、对不上、请求失败或超时都返回 false——宁可多推一次，不可误判一致而不推。
+ * health 给定时（弹窗刚读到的 /health 结果）直接用它，不再自己请求。
+ */
+async function csvSyncUpToDate({ health = null } = {}) {
+  try {
+    const { dramasStamp, csvLastPush, urlTags = [], allowEmptySync } = await chrome.storage.local.get(['dramasStamp', 'csvLastPush', 'urlTags', 'allowEmptySync']);
+    if (allowEmptySync !== undefined) return false;
+    if (!validDramasStamp(dramasStamp) || !csvLastPush || typeof csvLastPush !== 'object') return false;
+    if (csvLastPush.rev !== dramasStamp.rev) return false;
+    if (typeof csvLastPush.tagsKey !== 'string' || csvLastPush.tagsKey !== configuredUrlFingerprint(urlTags)) return false;
+    if (typeof csvLastPush.serverHash !== 'string' || csvLastPush.serverHash === '') return false;
+    const status = health || await fetchCsvSyncHealth();
+    return status?.csvInSync === true && status.contentHash === csvLastPush.serverHash;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 读一次同步服务 /health（3 秒期限，连正文一起算）；非 2xx 为 null，连不上 / 超时向上抛（由调用方按「拿不到」处理） */
+async function fetchCsvSyncHealth() {
+  const response = await fetch(CSV_SYNC_HEALTH_ENDPOINT, {
+    cache: 'no-store',
+    signal: AbortSignal.timeout(CSV_SYNC_HEALTH_TIMEOUT_MS)
+  });
+  if (!response.ok) return null;
+  return response.json();
+}
+
+/**
+ * SW 唤醒的预热推送：冷启动指纹确认同步服务上已是本地这一版就跳过，否则照旧排一次推送（空库护栏、
+ * 内容签名等仍由 syncTimelineToCsv 把关）。返回是否排了推送。不会 reject。
+ */
+async function warmupCsvSyncIfStale(options) {
+  if (await csvSyncUpToDate(options)) {
+    console.log('[ShortScraping] 跳过预热推送：同步服务上已是本地这一版时间线（冷启动指纹一致）');
+    return false;
+  }
+  scheduleCsvSync();
+  return true;
+}
+
+/**
+ * 扩展版本变了（onInstalled reason==='update'：升级、重载未打包扩展、回退后再升级都算）：清掉冷启动指纹
+ * （csvLastPush、dramasStamp），然后强推一次。旧版本不认识 dramasStamp，回退期间它写表不会换 rev，
+ * 留下的指纹会与没变的 csvLastPush「对得上」——冷启动误判一致而不推，翻译扫描误信 pending===0 而不读表。
+ * 版本一变就作废，比拿 getBytesInUse 之类的旁证猜「表有没有被别的版本写过」可靠。
+ * 在写队列里清：与同一实例里迁移 / 订阅外清理的写串行，内存里当前那一版表的指纹一并作废（之后首次成功
+ * 推送时由 recordCsvLastPush 补记）。清除失败也照样强推。
+ */
+async function resetCsvSyncFingerprint() {
+  await enqueueDramaWrite('版本更新作废推送指纹', async () => {
+    await chrome.storage.local.remove(['csvLastPush', 'dramasStamp']);
+    if (dramasCache !== null) dramasStamps.delete(dramasCache);
+  }).catch(() => {}); // 失败已由 enqueueDramaWrite 记日志
+  lastCsvSyncSerialized = null;
+  scheduleCsvSync();
 }
 
 /* —— Lark 群机器人：有新内容即时推一张卡到群（v1.5.14） ——————————————
@@ -2489,7 +2748,8 @@ async function syncTimelineToCsv() {
  *   ① 翻译线把一条从 new 补成 trans（走 AI 翻译的站点；含连续失败收口为 trans）；
  *   ② 抓取入库时该卡已是 trans（平台自带中文齐全，压根不进翻译线）；
  *   ③ 弹窗单卡 🌍 把一条从 new 翻成 trans（handleTranslateSingle）。
- * ①③ 的判据 becameTrans 在 dramas 写队列内按当前记录算（updateSingleDramaTranslation），
+ * ①③ 的判据 becameTrans 在 dramas 写队列内按当前记录算（mergeTranslation：逐条走
+ * updateSingleDramaTranslation，① 的 AI 成功批走 updateBatchDramaTranslations），
  * 两条线同时翻同一张卡时只有先落库的一方推；② 只推新入库的卡（去重命中不推）。
  * 所以**不设持久的「已推送」标记**。剩下的重复面只有 trans→new 复位后重译再推：存量机器上
  * 几个一次性复位迁移早已跑完，眼下只剩导入恢复——导入跳过库里已有的 itemId，只有「删掉后
@@ -3000,8 +3260,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // 快照会一直空着，打开弹窗即可把当前时间线重新推给服务。
     // 必须先清内容签名强制推送——「服务重启丢快照 + SW 在世签名命中」
     // 的组合会让补喂被签名跳过、共享页永久空白
-    lastCsvSyncSerialized = null;
-    scheduleCsvSync();
+    const forcePush = () => {
+      lastCsvSyncSerialized = null;
+      scheduleCsvSync();
+    };
+    // v1.6.22：弹窗带来了它刚读到的 /health 指纹（contentHash / csvInSync，v1.6.21 起的同步服务才有）时先比对
+    // 冷启动指纹，服务上已确认是本地这一版就不推；对不上照旧强推。没带（旧版服务 / 旧版弹窗）维持强推
+    if (typeof request.contentHash === 'string' && request.contentHash !== '') {
+      const health = { contentHash: request.contentHash, csvInSync: request.csvInSync === true };
+      csvSyncUpToDate({ health }).then(upToDate => {
+        if (upToDate) console.log('[ShortScraping] 弹窗补喂跳过：同步服务上已是本地这一版时间线（指纹一致）');
+        else forcePush();
+        sendResponse({ success: true, pushed: !upToDate });
+      });
+      return true;
+    }
+    forcePush();
     sendResponse({ success: true });
     return false;
   }
