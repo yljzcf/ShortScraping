@@ -8,6 +8,7 @@ import './bootstrap.cjs';
 //   C 组 / M2c-M2e：内容脚本不再直连 storage（storage-secrets-exposed-to-content / full-table-read-per-scrape）——
 //     抓取上下文经 getScrapeContext 向后台要，只给 itemId 与「是否已有 genres」；后台顶层尝试把
 //     storage.local 收成 TRUSTED_CONTEXTS，该 API 不支持 / 同步抛错 / 异步拒绝都不能挡住初始化。
+//     M2f（v1.6.21）：known 只给发送方标签页所在站点的条目，取不到站点时照旧给全部。
 //   D 组：死代码 applyTranslation 处理器与 loadTranslator 已删除（applytranslation-dead-handler）。
 //   F 组：scrapeUrlInTab 快路径失败后的「强制注入 + 轮询」兜底只对注册表站点放行
 //     （host-permissions-overbroad）：订阅 URL 或标签页当前 URL 不属于 SiteRegistry 时报错、不注入。
@@ -148,6 +149,28 @@ const PRIVILEGED = [
   check('M2e 上下文走写队列：并发的 saveDrama 先提交，known 里已含新卡',
     saved.resp?.saved === true && JSON.stringify([...(ctx.resp?.known || [])].sort()) === JSON.stringify([['tt20', false], ['tt21', true]]),
     JSON.stringify({ saved: saved.resp, known: ctx.resp?.known }));
+}
+
+{
+  // M2f（v1.6.21）known 只给发送方标签页所在站点的条目：内容脚本只拿本站列表项的 itemId 查 known。
+  // 本站按 source 或 sourceListUrl 所属站点任一命中；取不到站点时照旧给全部
+  const RS = 'https://www.reelshort.com/';
+  const { bg, send } = await setup();
+  // SW 启动之后再种表：启动时 tag.json 回读只订了 IMDB，订阅外清理会先把 ReelShort 条目清掉
+  bg.seedDramas([
+    card('tt30'),
+    card('tt31', { source: undefined }), // 缺 source：按 sourceListUrl 归 imdb
+    card('rs32', { source: 'reelshort', sourceListUrl: RS }),
+    card('rs33', { source: 'reelshort', sourceListUrl: 'https://unknown.example/legacy' }) // 按 source 归 reelshort
+  ]);
+  const knownIds = async sender => ((await send({ action: 'getScrapeContext' }, sender)).resp?.known || []).map(e => e[0]).sort().join(',');
+  const imdbTab = await knownIds({ ...SENDERS.content, tab: { id: 7, url: 'https://www.imdb.com/search/title/?genres=short' } });
+  const rsTab = await knownIds({ id: EXT_ID, url: `${RS}?list=hot`, tab: { id: 8, url: `${RS}?list=hot` }, frameId: 0 });
+  const urlOnly = await knownIds({ id: EXT_ID, url: `${RS}?list=hot`, tab: { id: 9 }, frameId: 0 }); // 没给 tab.url：退回 sender.url
+  const unknown = await knownIds({ id: EXT_ID, url: 'https://unknown.example/list', tab: { id: 10, url: 'https://unknown.example/list' }, frameId: 0 });
+  check('M2f 抓取上下文的 known 只给发送方所在站点（source 或 sourceListUrl 命中），取不到站点时给全部',
+    imdbTab === 'tt30,tt31' && rsTab === 'rs32,rs33' && urlOnly === 'rs32,rs33' && unknown === 'rs32,rs33,tt30,tt31',
+    JSON.stringify({ imdbTab, rsTab, urlOnly, unknown }));
 }
 
 // ---------- C storage.local 访问级别收窄：尽力而为，绝不挡初始化 ----------

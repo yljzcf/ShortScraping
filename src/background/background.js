@@ -30,8 +30,16 @@ let postScrapeTranslateTimer = null;
 let postScrapeTranslateRunning = false;
 let csvSyncTimer = null;
 // 上次成功推送的时间线序列化内容（SW 内存签名，刻意不持久化——SW 回收后首推
-// 即同步服务重启场景的天然恢复机制）。同内容跳过 POST，省去约 1.5MB 冗余传输
+// 即同步服务重启场景的天然恢复机制）。同内容跳过 POST，省去数 MB 的冗余传输
 let lastCsvSyncSerialized = null;
+// 推送单飞（审查 sync-no-ordering）：csvSyncInFlight 是在飞那次推送（runCsvSync 包出来的
+// promise）。此前防抖只管「何时发」不管「在不在飞」：一次数 MB 的推送还没回，新变化 500ms 后
+// 又发一次，两个 POST 并行、到达服务端的先后不定，旧内容可能后到、把新内容盖回去。在飞期间
+// 到点的定时器只置 csvSyncRerun，在飞那次结束后补排一次——补跑时读的是最新缓存，最后落到
+// 服务端的必是最新内容。csvSyncLastRunAt：最近一次推送开跑的时刻，忙碌期节流按它算间隔
+let csvSyncInFlight = null;
+let csvSyncRerun = false;
+let csvSyncLastRunAt = 0;
 
 // 翻译轮 in-flight 共享：同一时刻只跑一轮，手动/定时/抓取后翻译线的并发调用
 // join 同一 promise，消灭重复翻译同一批条目。
@@ -54,6 +62,15 @@ let emptySyncSkipWarned = false;
 // scheduleCsvSync 的调用序号：一次推送结束时序号没变＝推送期间没有新的同步被安排，
 // 这时才可摘 allowEmptySync（见 syncTimelineToCsv 末尾）
 let csvSyncScheduleSeq = 0;
+// 空闲时的尾随防抖：dramas 连写（导入、批量清理）合并成一次推送
+const CSV_SYNC_DEBOUNCE_MS = 500;
+// 忙碌期（抓取或翻译轮进行中）两次推送开跑的最小间隔：每存一张卡、每回填一条译文 dramas 都变
+// 一次，照 500ms 防抖推，一轮抓取就是几十次整表 POST、服务端几十次整份重写 json + CSV；
+// 单纯拉长防抖又会在持续写入时一直推不出去。改成前沿节流：空闲后的第一次变化仍 500ms 推出，
+// 之后至少隔这么久再推；忙碌结束时收尾强推（flushCsvSyncAfterBusy），共享页与 CSV 最多落后这么久
+const CSV_SYNC_BUSY_WINDOW_MS = 8000;
+// 单次推送的超时：单飞之下一个挂住的请求会堵住之后所有推送，直到 SW 被回收
+const CSV_SYNC_TIMEOUT_MS = 60000;
 
 // 四个配置文件 ↔ storage 键 ↔ 同步服务写回端点 POST /config/<key>。请求体 { <storage 键>: 值 }
 // 与设置页 trySyncConfig 同形；configAheadOfFile（设置页写了 storage 但写回文件失败的标记）
@@ -71,7 +88,7 @@ const CONFIG_WRITE_BACK_TIMEOUT_MS = 3000;
 // 订阅外清理的回收站（storage.pruneTrash）只留最近几批：一批可能是整库，攒多了占空间
 const PRUNE_TRASH_MAX_BATCHES = 3;
 
-// 本文件的 setTimeout 延时（本常量与 CSV 500ms 防抖）均远小于 MV3 SW 的
+// 本文件的 setTimeout 延时（本常量与 CSV 500ms 防抖 / 8s 忙碌节流）均远小于 MV3 SW 的
 // ~30s 空闲回收阈值；极端情况下 SW 连同定时器被杀时，SW 下次唤醒的顶层
 // scheduleCsvSync 与 translate-task alarm 会兜底。评估后不迁移 chrome.alarms
 // （其最小粒度 30s，反而更差）。
@@ -93,44 +110,128 @@ function enqueueDramaWrite(label, operation) {
 }
 
 // SW 生命周期内的 dramas 表内存缓存：首个队列操作 get 一次后回填，后续队列内
-// 读写零 get（抓 N 条从 N 次约 1.5MB 的全表反序列化降为 1 次）。一致性前提：
+// 读写零 get（抓 N 条从 N 次数 MB 的全表反序列化降为 1 次）。一致性前提：
 // dramas 的全部写路径都收口在 enqueueDramaWrite 队列内（逐个 grep enqueueDramaWrite 核对，
 // 此处不记数——增删写路径后数字即过期），且
 // 缓存数组视为只读——写一律 copy-on-write 构造新数组。SW 回收即缓存消失。
 let dramasCache = null;
 
+// 前向兼容护栏（为日后按站点分片存储预留，本版本不分片）：更新版本改用分片布局时会写
+// dramasMeta = { layout: 2, … }，旧键 dramas 冻结、不再更新。从那样的版本回退到本版本时，
+// 若照常在冻结快照上跑：冻结后才翻完的卡在快照里还是 new，会被重新 AI 翻译（花钱）；冻结后
+// 才抓到的卡本版本不认识，会重新入库、重新推群（maybeBotPush 不按 id 去重）。所以读到
+// layout 高于本版本认识的布局就进入只读：writeDramasInQueue 拒写，CSV 推送、翻译扫描与抓取轮（开轮读表后、
+// 开订阅页前）直接返回并告警一次，弹窗状态栏提示升级（popup.js 同一判据）。没有 dramasMeta 时行为不变。
+// 布局标记在每次 dramas 缓存未命中的读（getDramasInQueue / getDramasSnapshot）时一并读取更新
+const DRAMAS_LAYOUT_SUPPORTED = 1;
+let dramasLayoutAhead = null; // null＝没有更新版本的布局标记；否则为读到的 dramasMeta
+const dramasReadOnlyWarned = new Set();
+
+function noteDramasLayout(meta) {
+  const layout = Number(meta?.layout);
+  dramasLayoutAhead = Number.isFinite(layout) && layout > DRAMAS_LAYOUT_SUPPORTED ? meta : null;
+}
+
+function dramasReadOnlyMessage() {
+  return `本地数据已由更新版本的扩展升级为新的存储布局（dramasMeta.layout=${dramasLayoutAhead?.layout}），`
+    + '当前版本只读、不再写入、推送与翻译，请升级扩展';
+}
+
+/** 只读模式下各路径（CSV 推送 / 翻译扫描）各告警一次：推送每次 dramas 变化都会走到，翻译线每秒扫一轮 */
+function warnDramasReadOnlyOnce(what) {
+  if (dramasReadOnlyWarned.has(what)) return;
+  dramasReadOnlyWarned.add(what);
+  console.warn(`[ShortScraping] ${what}跳过：${dramasReadOnlyMessage()}`);
+}
+
+/** 缓存未命中时读 dramas 表，连带读布局标记（同一次 get，不多一次读） */
+async function readDramasFromStorage() {
+  const { dramas = [], dramasMeta } = await chrome.storage.local.get(['dramas', 'dramasMeta']);
+  noteDramasLayout(dramasMeta);
+  return dramas;
+}
+
 /** 仅队列内调用：读当前 dramas 表，缓存命中零 get。 */
 async function getDramasInQueue() {
   if (dramasCache === null) {
-    const { dramas = [] } = await chrome.storage.local.get('dramas');
-    dramasCache = dramas;
+    dramasCache = await readDramasFromStorage();
   }
   return dramasCache;
+}
+
+// dramas 整表写的耗时埋点（只打日志、不落 storage）：每次 set 计时，抓取轮与翻译轮收尾各打一行
+// 汇总（次数 / 平均 / 最长）。整表写的开销随表线性增长，这行日志是日后评估要不要按站点分片的
+// 前后对比依据。一轮开始时 beginDramasWriteStats 登记一个收集器，期间的每次写记进所有在册的
+// 收集器——抓取轮与抓取后翻译线并行时，同一次写会同时算进两边（分不清是谁引起的，按「轮内发生」算）
+const dramasWriteCollectors = new Set();
+const writeClockMs = () => (typeof performance !== 'undefined' && performance?.now ? performance.now() : Date.now());
+
+function beginDramasWriteStats() {
+  const stats = { count: 0, totalMs: 0, maxMs: 0 };
+  dramasWriteCollectors.add(stats);
+  return stats;
+}
+
+function endDramasWriteStats(stats, label) {
+  dramasWriteCollectors.delete(stats);
+  if (!stats || stats.count === 0) return; // 空轮（翻译线空扫描每秒一轮）不刷日志
+  const avg = stats.totalMs / stats.count;
+  console.log(`[ShortScraping] ${label} dramas 整表写入 ${stats.count} 次，平均 ${avg.toFixed(1)}ms，最长 ${stats.maxMs.toFixed(1)}ms（表 ${dramasCache?.length ?? '?'} 条）`);
+}
+
+function recordDramasWrite(ms) {
+  for (const stats of dramasWriteCollectors) {
+    stats.count++;
+    stats.totalMs += ms;
+    if (ms > stats.maxMs) stats.maxMs = ms;
+  }
 }
 
 /**
  * 仅队列内调用：写 dramas 表（连带键经 extra 同次 set）。set 成功后缓存指向
  * 新数组；失败则缓存失效重读并向上抛——防「缓存已新、storage 仍旧」的分歧驻留。
+ * 只读模式（见前向兼容护栏）直接拒写。缓存为空＝本生命周期还没读过表（清库这类不读先写的
+ * 路径），先补读一次布局标记再判，免得绕过护栏。
  */
 async function writeDramasInQueue(next, extra = {}) {
+  if (dramasCache === null) {
+    const { dramasMeta } = await chrome.storage.local.get('dramasMeta');
+    noteDramasLayout(dramasMeta);
+  }
+  if (dramasLayoutAhead) throw new Error(dramasReadOnlyMessage());
+  const startedAt = writeClockMs();
   try {
     await chrome.storage.local.set({ dramas: next, ...extra });
     dramasCache = next;
   } catch (e) {
     dramasCache = null;
     throw e;
+  } finally {
+    recordDramasWrite(writeClockMs() - startedAt);
   }
 }
 
 /**
- * 队列外只读快照（翻译线扫描/CSV 同步/Lark 推送用）：缓存非 null 直接返回引用，
+ * 队列外只读快照（Lark 推送 / 单卡 🌍 / 回填后读回等用；翻译扫描与 CSV 同步改走
+ * readDramasThroughQueue）：缓存非 null 直接返回引用，
  * 调用方不得改动；缓存为空时直读 storage 且不回填——await 期间队列可能已提交
  * 新值，旧读回填会把缓存拽回过去。
  */
 async function getDramasSnapshot() {
   if (dramasCache !== null) return dramasCache;
-  const { dramas = [] } = await chrome.storage.local.get('dramas');
-  return dramas;
+  return readDramasFromStorage();
+}
+
+/**
+ * 队列外读表且回填缓存：缓存命中直接返回引用（只读约定同 getDramasSnapshot）；未命中时排进
+ * 写队列读一次，由 getDramasInQueue 回填——排在已入队的写之后，读到的是已提交的最新表，不会
+ * 把缓存拽回过去（同 scrapeContextForContent）。SW 冷唤醒时翻译扫描、CSV 同步此前各自整表读一遍
+ * （getDramasSnapshot 不回填），现在合计只读一次。
+ * **只许在队列回调之外调用**：队列回调里 await 它等的是自己所在的队列，死锁。
+ */
+async function readDramasThroughQueue(label) {
+  if (dramasCache !== null) return dramasCache;
+  return enqueueDramaWrite(label, getDramasInQueue);
 }
 
 const SCHEDULE_TASKS = {
@@ -628,6 +729,8 @@ function performScrape(options = {}) {
     activeScrapeCount--;
     // 最后一个抓取收尾时翻译线若已提前退出，再安排一次（见 resumePostScrapeTranslateLoop）
     resumePostScrapeTranslateLoop();
+    // 抓取期间 CSV 推送走 8 秒节流，收尾时把攒着的那次提前到 500ms 后推出（还有抓取或翻译轮在跑就不动）
+    flushCsvSyncAfterBusy();
   });
   if (isFull) pendingFullScrape = tracked;
   return tracked;
@@ -648,6 +751,7 @@ function fullScrapeWillCoverSite(site) {
 
 async function performScrapeOnce({ site = null } = {}, progress = null) {
   console.log(site ? `[ShortScraping] 开始站点抓取: ${site}` : '[ShortScraping] 开始全量抓取...');
+  const writeStats = beginDramasWriteStats();
 
   try {
     const { urlTags = [] } = await chrome.storage.local.get('urlTags');
@@ -666,14 +770,23 @@ async function performScrapeOnce({ site = null } = {}, progress = null) {
     // 订阅 URL 首轮只入库不推送：开轮时库里零条的订阅 URL 挂「进行中」，收轮时基线定在完成时刻。
     // 经队列读表顺带把缓存预热给随后的入库写，不多付一次全表读
     try {
-      const populated = new Set(
-        (await enqueueDramaWrite('订阅首轮判定', getDramasInQueue))
-          .map(d => UrlMatch.normalizeListUrl(d.sourceListUrl))
-          .filter(Boolean)
-      );
-      await markUrlBaselines(scrapeUrls.filter(url => !populated.has(UrlMatch.normalizeListUrl(url))));
+      const existing = await enqueueDramaWrite('订阅首轮判定', getDramasInQueue);
+      // 只读模式（见下）本轮不开抓：标了「进行中」也等不到收轮，不标
+      if (!dramasLayoutAhead) {
+        const populated = new Set(existing.map(d => UrlMatch.normalizeListUrl(d.sourceListUrl)).filter(Boolean));
+        await markUrlBaselines(scrapeUrls.filter(url => !populated.has(UrlMatch.normalizeListUrl(url))));
+      }
     } catch (e) {
       console.warn('[ShortScraping] 订阅首轮基线标记失败（不影响抓取）:', e?.message || e);
+    }
+
+    // 前向兼容护栏：上面这次读表在缓存未命中时已连带读了布局标记（缓存热着时标记早在填缓存时读过）。
+    // 只读模式下入库必被拒，不再逐个打开订阅页、请求详情页——每个标签页白跑一遍、每张新卡被拒一次，
+    // 每轮重来。不抛错：定时轮的闹钟监听器不接 rejection，只留一条告警；弹窗手动刷新由 triggerScrape
+    // 按 readOnly 回报错
+    if (dramasLayoutAhead) {
+      warnDramasReadOnlyOnce('抓取');
+      return { urlCount: 0, totalNewCount: 0, results: [], readOnly: true, error: dramasReadOnlyMessage() };
     }
 
     let totalNewCount = 0;
@@ -735,6 +848,8 @@ async function performScrapeOnce({ site = null } = {}, progress = null) {
   } catch (e) {
     console.error('[ShortScraping] 抓取失败:', e);
     throw e;
+  } finally {
+    endDramasWriteStats(writeStats, site ? `站点抓取（${site}）` : '全量抓取');
   }
 }
 
@@ -1346,6 +1461,8 @@ function performTranslate({ source = 'auto' } = {}) {
   // 在第一个 await 之前同步赋值，同 tick 的并发调用不会穿过 null 检查
   translateRun = performTranslateOnce(source).finally(() => {
     translateRun = null;
+    // 翻译轮期间 CSV 推送走 8 秒节流，轮末把攒着的那次提前到 500ms 后推出（抓取仍在跑就不动）
+    flushCsvSyncAfterBusy();
   });
   return translateRun;
 }
@@ -1465,10 +1582,20 @@ async function performTranslateOnce(source) {
   let stateWritten = false;
   let lastError = null;
   let stopKeepAlive = null;
+  const writeStats = beginDramasWriteStats();
 
   try {
     const { translateConfig, urlTags = [] } = await chrome.storage.local.get(['translateConfig', 'urlTags']);
-    const dramas = await getDramasSnapshot(); // 翻译线每轮扫描，缓存命中零全表读
+    // 翻译线每轮扫描：缓存命中零全表读；SW 冷唤醒（缓存为空）时经队列读一次并回填缓存，
+    // 随后的 CSV 同步与本轮回填译文都不必再整表读
+    const dramas = await readDramasThroughQueue('翻译扫描读表');
+    // 前向兼容护栏：本地数据已是更新版本的布局，冻结快照里的 new 可能早被新版本翻过，再翻只是白花钱。
+    // 带 error 返回：手动触发时弹窗收到终态报错；自动线按空扫描收尾
+    if (dramasLayoutAhead) {
+      warnDramasReadOnlyOnce('翻译扫描');
+      runError = dramasReadOnlyMessage();
+      return { pendingCount: 0, translatedCount: 0, error: runError };
+    }
     const config = TranslateConfig.normalizeConfig(translateConfig);
     const configuredDramas = filterDramasByConfiguredUrls(dramas, urlTags);
     const newDramas = configuredDramas.filter(d => d.status === 'new');
@@ -1748,6 +1875,7 @@ async function performTranslateOnce(source) {
     return { pendingCount: pendingCount || null, translatedCount, error: e.message };
   } finally {
     stopKeepAlive?.();
+    endDramasWriteStats(writeStats, '翻译轮');
     // 终态写进 finally，封死中途意外 throw 留下孤儿 running:true 的口。
     // translateManualWaiter：手动触发 join 到本轮（自动空扫描不写终态）时，
     // 也必须写终态给弹窗收尾；标记消费后复位。
@@ -1846,6 +1974,10 @@ async function handleTranslateSingle(dramaId) {
   const drama = (await getDramasSnapshot()).find(d => d.id === dramaId);
   if (!drama) {
     return { success: false, error: '未找到该卡片数据' };
+  }
+  // 前向兼容护栏：只读模式下回填必被拒写，先拦下，别白发一次付费翻译请求
+  if (dramasLayoutAhead) {
+    return { success: false, error: dramasReadOnlyMessage() };
   }
 
   // 单卡请求最长也要等满 requestTimeoutSec（默认 60s），同批量线一样保活
@@ -2181,15 +2313,64 @@ function resumePostScrapeTranslateLoop() {
  */
 function scheduleCsvSync() {
   csvSyncScheduleSeq++;
+  // 忙碌期（抓取或翻译轮进行中）前沿节流：已有待发的推送就不重置它——照防抖那样每次变化都
+  // 往后推，抓取洪峰期会一直推不出去；没有待发的，距上次推送开跑不足 CSV_SYNC_BUSY_WINDOW_MS
+  // 就等到满，否则（空闲后的第一次变化）照常 500ms 推出。空闲时保持 500ms 尾随防抖
+  const busy = isCsvSyncBusy();
+  if (busy && csvSyncTimer) return;
   if (csvSyncTimer) clearTimeout(csvSyncTimer);
+  // 上限夹在一个窗口内：系统时钟回拨（手动改时间、NTP 校正）时 csvSyncLastRunAt 落在「未来」，
+  // 算出的等待会长达回拨量，而忙碌期又不重置已排的定时器——整段抓取期间一次都推不出去
+  const delay = busy
+    ? Math.min(CSV_SYNC_BUSY_WINDOW_MS,
+      Math.max(CSV_SYNC_DEBOUNCE_MS, csvSyncLastRunAt + CSV_SYNC_BUSY_WINDOW_MS - Date.now()))
+    : CSV_SYNC_DEBOUNCE_MS;
   csvSyncTimer = setTimeout(() => {
     csvSyncTimer = null;
-    // 报错文案按失败形态在 syncTimelineToCsv 里定：连不上才提示确认服务已启动，服务端
-    // 回了错误（如 413 超限）就打印它给的原因——/health 正常时再叫人去启动服务只会误导
-    syncTimelineToCsv().catch(error => {
+    runCsvSync();
+  }, delay);
+}
+
+/** 抓取（含排队中）或翻译轮进行中：dramas 会持续变化，推送走节流 */
+function isCsvSyncBusy() {
+  return activeScrapeCount > 0 || translateRun !== null;
+}
+
+/**
+ * 定时器回调层的单飞：已有推送在飞就只记「还要再推一次」，在飞那次结束后补排（此时读的是
+ * 最新缓存）。守卫刻意不放进 syncTimelineToCsv——测试直接调用它断言单次推送的语义。
+ * 报错文案按失败形态在 syncTimelineToCsv 里定：连不上才提示确认服务已启动，服务端
+ * 回了错误（如 413 超限）就打印它给的原因——/health 正常时再叫人去启动服务只会误导。
+ */
+function runCsvSync() {
+  if (csvSyncInFlight) {
+    csvSyncRerun = true;
+    return csvSyncInFlight;
+  }
+  csvSyncLastRunAt = Date.now();
+  csvSyncInFlight = syncTimelineToCsv()
+    .catch(error => {
       console.warn('[ShortScraping] CSV 同步失败:', error.message);
+    })
+    .finally(() => {
+      csvSyncInFlight = null;
+      if (csvSyncRerun) {
+        csvSyncRerun = false;
+        scheduleCsvSync(); // 仍在忙碌期就照节流间隔排，空闲了 500ms 后推
+      }
     });
-  }, 500);
+  return csvSyncInFlight;
+}
+
+/**
+ * 忙碌期结束时的收尾强推：最后一个抓取收尾（performScrape 的 activeScrapeCount-- 之后）、
+ * 翻译轮结束（translateRun 置回 null 之后）各调一次。节流窗口里攒着的待发推送不必等满
+ * 8 秒，改成 500ms 后推出；推送在飞、又有待补跑的，由 runCsvSync 收尾时按空闲口径补排。
+ * 还在忙（另一条线没结束）或没有待发的就不动。
+ */
+function flushCsvSyncAfterBusy() {
+  if (isCsvSyncBusy() || !csvSyncTimer) return;
+  scheduleCsvSync();
 }
 
 function formatSyncBodySize(bytes) {
@@ -2200,6 +2381,12 @@ function formatSyncBodySize(bytes) {
 function csvSyncNetworkError(error, body) {
   const bytes = new TextEncoder().encode(body).length;
   const reason = error?.message || String(error);
+  // AbortSignal.timeout 到点：服务连上了却迟迟不应答（卡在写盘 / 进程挂住）。不叫人去启动服务——
+  // 它多半正在运行；本次不记签名，下次数据变化或打开弹窗时照常重推
+  if (error?.name === 'TimeoutError') {
+    return new Error(`同步服务 ${Math.round(CSV_SYNC_TIMEOUT_MS / 1000)} 秒内没有应答（本次推送约 ${formatSyncBodySize(bytes)}），`
+      + '已放弃本次推送，下次数据变化或打开弹窗时重推；若反复超时，请检查同步服务日志或重启同步服务');
+  }
   if (bytes >= CSV_SYNC_LEGACY_BODY_LIMIT_BYTES) {
     return new Error(`连接同步服务失败（${reason}）。本次推送约 ${formatSyncBodySize(bytes)}，已超过旧版同步服务 20MB 的请求体上限：`
       + '服务若已在运行（弹窗显示在线），多半是超限被断开连接，请更新并重启同步服务；否则请确认本地同步服务已启动');
@@ -2220,7 +2407,13 @@ function csvSyncHttpError(status, result, body) {
 async function syncTimelineToCsv() {
   const scheduleSeq = csvSyncScheduleSeq;
   const { urlTags = [], allowEmptySync } = await chrome.storage.local.get(['urlTags', 'allowEmptySync']);
-  const dramas = await getDramasSnapshot();
+  // 经队列读表：缓存为空（SW 冷唤醒）时这次读顺带回填缓存，翻译扫描不必再整表读一遍
+  const dramas = await readDramasThroughQueue('CSV 同步读表');
+  // 前向兼容护栏：本地数据已是更新版本的布局，冻结的旧表不能再推给服务端（会把新版本推上去的更新内容盖回去）
+  if (dramasLayoutAhead) {
+    warnDramasReadOnlyOnce('CSV 同步');
+    return;
+  }
   const configuredDramas = filterDramasByConfiguredUrls(dramas, urlTags);
   const isEmpty = configuredDramas.length === 0;
 
@@ -2243,14 +2436,17 @@ async function syncTimelineToCsv() {
     return;
   }
 
-  // 字符串拼接复用 serialized，免对约 1.5MB 的数组做第二次 stringify
+  // 字符串拼接复用 serialized，免对数 MB 的数组做第二次 stringify
   const body = `{"dramas":${serialized}${isEmpty ? ',"allowEmpty":true' : ''},"syncedAt":${JSON.stringify(new Date().toISOString())}}`;
   let response;
   try {
     response = await fetch(CSV_SYNC_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body
+      body,
+      // 单飞之下必须有超时：一个挂住的请求会堵住之后所有推送（见 runCsvSync）。超时抛
+      // TimeoutError，走下面 catch 的专门文案，签名不记、下次照常重推
+      signal: AbortSignal.timeout(CSV_SYNC_TIMEOUT_MS)
     });
   } catch (error) {
     throw csvSyncNetworkError(error, body);
@@ -2277,9 +2473,9 @@ async function syncTimelineToCsv() {
 
   // 非空推送成功＝库回到有内容的常态，一次性的清空授权作废，免得日后某条非用户操作的路径
   // （如 tag.json 回读清库）借着残留标记把空时间线推上去。推送在飞期间 dramas 又变了
-  // （防抖同步待发，或已发出、与本次并行在飞）时不删，交给那一次判定：它可能正是用户这次
-  // 确认的清空——并行的那次若失败，残留标记还要留给下次唤醒的重推
-  if (!isEmpty && allowEmptySync !== undefined && !csvSyncTimer && scheduleSeq === csvSyncScheduleSeq) {
+  // （防抖 / 节流同步待发，或到点时撞上本次在飞、记了待补跑）时不删，交给那一次判定：它可能
+  // 正是用户这次确认的清空——那次若失败，残留标记还要留给下次唤醒的重推
+  if (!isEmpty && allowEmptySync !== undefined && !csvSyncTimer && !csvSyncRerun && scheduleSeq === csvSyncScheduleSeq) {
     await chrome.storage.local.remove('allowEmptySync');
   }
 }
@@ -2748,13 +2944,22 @@ function showNotification(message) {
  * 去重集合与「要不要回填 genres」的判断，所以不给整条记录（简介、译文都不出后台）；几千条也只有
  * 一两百 KB，而以前每个抓取标签页都要把整张 dramas（约 5MB）跨进程反序列化一遍。
  * dramas 走写队列读（命中 dramasCache 时零 get），排在已入队的写之后，看到的是已提交的最新表。
+ *
+ * known 只给发送方标签页所在站点的条目：内容脚本按 location.hostname 选适配器（与
+ * SiteRegistry.siteOfUrl 同一判据），只拿本站列表项的 itemId 去查 known，别站条目用不上，每个
+ * 标签页白跨进程传一遍全库。本站条目按 source 或 sourceListUrl 所属站点任一命中即给（取并集，
+ * 宁多勿漏——漏了只会多请求一次详情、再被后台 saveDramaRecord 的全局 itemId 去重挡下）。
+ * 取不到站点（标签页 URL 缺失 / 不在注册表）时照旧给全部。
  */
-async function scrapeContextForContent() {
+async function scrapeContextForContent(sender) {
   const dramas = await enqueueDramaWrite('抓取上下文', getDramasInQueue);
   const { urlTags } = await chrome.storage.local.get('urlTags');
+  const site = siteOfUrl(sender?.tab?.url || sender?.url || '');
   const known = [];
   for (const drama of Array.isArray(dramas) ? dramas : []) {
-    if (drama && drama.itemId) known.push([drama.itemId, Array.isArray(drama.genres) && drama.genres.length > 0]);
+    if (!drama || !drama.itemId) continue;
+    if (site && drama.source !== site && siteOfUrl(drama.sourceListUrl) !== site) continue;
+    known.push([drama.itemId, Array.isArray(drama.genres) && drama.genres.length > 0]);
   }
   return { success: true, urlTags: Array.isArray(urlTags) ? urlTags : [], known };
 }
@@ -2819,7 +3024,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return false;
     }
     performScrape({ site: request.site }).then((summary) => {
-      sendResponse({ success: true, summary });
+      // 只读模式（前向兼容护栏）本轮没开抓：按失败回，弹窗 toast 显示升级提示而不是「新增 0 部」
+      sendResponse(summary?.readOnly ? { success: false, error: summary.error } : { success: true, summary });
     }).catch((error) => {
       sendResponse({ success: false, error: error.message });
     });
@@ -2846,7 +3052,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'getScrapeContext') {
-    scrapeContextForContent().then(sendResponse).catch((error) => {
+    scrapeContextForContent(sender).then(sendResponse).catch((error) => {
       sendResponse({ success: false, error: error.message });
     });
     return true;

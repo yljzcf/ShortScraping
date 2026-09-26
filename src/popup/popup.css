@@ -447,6 +447,12 @@ body {
   color: var(--danger);
 }
 
+/* 本地数据已由更新版本升级（dramasMeta.layout 高于本版本）：状态栏换成升级提示，后台只读停摆 */
+#statusText.is-warning {
+  color: var(--danger);
+  font-weight: 600;
+}
+
 /* 底栏局域网共享区块（与翻译状态、抓取时间同一行） */
 .lan-share {
   display: flex;

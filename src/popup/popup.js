@@ -22,8 +22,21 @@
     groupPins: {},
     refreshingSite: null,
     lanUrls: [],
-    syncServerDir: null
+    syncServerDir: null,
+    // 本地数据已由更新版本升级为新的存储布局（dramasMeta.layout 高于本版本认识的）：后台只读停摆，
+    // 状态栏提示升级（见 background.js 前向兼容护栏）
+    dramasLayoutAhead: false
   };
+
+  // 本版本认识的 dramas 存储布局，与 background.js 的 DRAMAS_LAYOUT_SUPPORTED 同值：更新版本改用按站点
+  // 分片的布局时会写 dramasMeta.layout=2，旧键 dramas 冻结不再更新，后台据此拒写、停推送与翻译
+  const DRAMAS_LAYOUT_SUPPORTED = 1;
+  const DRAMAS_LAYOUT_AHEAD_HINT = '数据已由更新版本升级，请升级扩展';
+
+  function isDramasLayoutAhead(meta) {
+    const layout = Number(meta?.layout);
+    return Number.isFinite(layout) && layout > DRAMAS_LAYOUT_SUPPORTED;
+  }
 
   // DOM 元素
   const elements = {};
@@ -71,6 +84,10 @@
         state.urlTags = changes.urlTags.newValue || [];
       }
 
+      if (changes.dramasMeta) {
+        state.dramasLayoutAhead = isDramasLayoutAhead(changes.dramasMeta.newValue);
+      }
+
       if (changes.dramas) {
         state.dramas = filterDramasByConfiguredUrls(changes.dramas.newValue || []);
       } else if (changes.urlTags) {
@@ -81,8 +98,8 @@
       if (changes.dramas || changes.urlTags) {
         // 抓取洪峰期 storage 每保存一张卡变更一次，整树重渲染合并为 ≤1 次/秒
         scheduleRender();
-      } else if (changes.lastScrape || changes.lastScrapeFailure) {
-        // 只有抓取时间变了（收轮时单独写）：刷底栏即可，不重建时间线
+      } else if (changes.lastScrape || changes.lastScrapeFailure || changes.dramasMeta) {
+        // 只有抓取时间（收轮时单独写）或布局标记变了：刷底栏即可，不重建时间线
         updateStats();
       }
     });
@@ -693,8 +710,9 @@
     showLoading(true);
 
     try {
-      const result = await chrome.storage.local.get(['dramas', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'syncServerDir', 'siteTabPrefs']);
+      const result = await chrome.storage.local.get(['dramas', 'dramasMeta', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'syncServerDir', 'siteTabPrefs']);
 
+      state.dramasLayoutAhead = isDramasLayoutAhead(result.dramasMeta);
       state.urlTags = result.urlTags || [];
       state.dramas = filterDramasByConfiguredUrls(result.dramas || []);
       state.lastScrape = result.lastScrape;
@@ -1284,9 +1302,18 @@
       ? `${TimelineRender.formatRelativeTime(failure.at)}那一轮${counts}全部失败：${failure.error || '未知错误'}`
       : '';
     elements.stats.lastUpdate.classList.toggle('is-failed', Boolean(failure));
-    elements.stats.status.textContent = pending > 0
-      ? `${translated} 已翻译, ${pending} 待翻译`
-      : (total > 0 ? '全部已翻译' : '暂无数据');
+    // 数据已是更新版本的布局：后台只读停摆（不入库、不推送、不翻译），翻译计数也已冻结不再变化，
+    // 状态栏改成升级提示，免得用户以为扩展还在正常工作
+    const ahead = state.dramasLayoutAhead;
+    elements.stats.status.textContent = ahead
+      ? DRAMAS_LAYOUT_AHEAD_HINT
+      : (pending > 0
+        ? `${translated} 已翻译, ${pending} 待翻译`
+        : (total > 0 ? '全部已翻译' : '暂无数据'));
+    elements.stats.status.title = ahead
+      ? '本地数据已被更新版本的扩展升级为新的存储格式，当前版本只读：不再抓取入库、同步与翻译。请安装最新版扩展'
+      : '';
+    elements.stats.status.classList.toggle('is-warning', ahead);
   }
 
   /** 比最近一次成功抓取更新的「整轮全失败」记录；没有或已被成功轮盖过时为 null。 */

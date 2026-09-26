@@ -152,6 +152,8 @@ try {
   check('B9e 快照内容未变：版本号不再 bump', (await getTimeline()).version === lockedView.version, '');
 
   // ---------- B10 CSV 写失败后没等到补写就重启：CSV 比快照旧，重启后首次同内容推送仍要补写 ----------
+  // v1.6.21 起启动时就按快照补写（healCsvFromSnapshot，细节见 unit-server-timeline-cache S 组），
+  // 这里只钉结果：推送之后 CSV 必与快照一致；启动补写失败时仍由这次推送兜底
   fs.mkdirSync(`${csvPath}.tmp`);
   const b10a = await postSync(many(4));
   check('B10a 前提：快照已是 4 条、CSV 仍是 3 条', b10a.ok === false && jsonRows() === 4

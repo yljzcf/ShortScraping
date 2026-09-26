@@ -20,12 +20,16 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const os = require('os');
+const zlib = require('zlib');
+const crypto = require('crypto');
+const { promisify } = require('util');
 const { spawn, spawnSync } = require('child_process');
 const SubscriptionConfig = require('../src/shared/subscription-config.js');
 const Lark = require('../src/shared/lark.js');
 const TimelineCsv = require('../src/shared/timeline-csv.js');
 const ScheduleConfig = require('../src/shared/schedule-config.js');
 const TranslateConfig = require('../src/shared/translate-config.js');
+const SiteRegistry = require('../src/shared/site-registry.js');
 
 const DEFAULT_PORT = 31919;
 // 专用变量名而不是通用的 PORT：开发者在 ~/.zshrc / direnv / Windows 用户变量里给别的项目设的 PORT
@@ -70,6 +74,10 @@ const LOG_PATH = process.env.SHORTSCRAPING_LOG_FILE
 // —— 局域网共享状态：最新时间线快照（内存 + db/timeline.json 持久化） ——
 let latestDramas = [];
 let latestSerialized = '[]';
+// 快照内容指纹：latestSerialized 的 sha1（hex），只经 commitSnapshotContent 与前两者一起前进。
+// 不写进 timeline.json：重启时 loadSnapshot 从同一份内容重算，天然跨重启稳定。
+// 供 /health 本机块、/sync 响应（扩展下一版的冷启动指纹比对）与 /api/timeline 的 ETag 使用
+let contentHash = sha1Hex(latestSerialized);
 let dataVersion = 0;
 let updatedAt = null;
 // CSV 单独记签名：json 快照落盘成功而 CSV 失败（Windows 上被 Excel 锁住）时，
@@ -79,8 +87,25 @@ let csvSerialized = '[]';
 const sseClients = new Set();
 
 // 本次启动时 CSV 不存在、由 ensureDb 新建了只有表头的空文件：停机期间被手删（或首次运行）。
-// loadSnapshot 据此让首次推送补写——新建文件比快照新，单看 mtime 认不出它落后
+// loadSnapshot 据此判定 CSV 落后于快照（启动时由 healCsvFromSnapshot 补写）——新建文件比快照新，单看 mtime 认不出它落后
 let csvCreatedAtStartup = false;
+
+function sha1Hex(text) {
+  return crypto.createHash('sha1').update(text, 'utf8').digest('hex');
+}
+
+// latestDramas / latestSerialized / contentHash 三者必须同步前进（ETag、/health 指纹都依赖它们一致），只经这里改
+function commitSnapshotContent(dramas, serialized) {
+  latestDramas = dramas;
+  latestSerialized = serialized;
+  contentHash = sha1Hex(serialized);
+}
+
+// 磁盘上的 CSV 已知与快照一致：签名相同且文件还在（运行期间被手删的，下一次推送由 existsSync 守卫补写）。
+// csvSerialized 为 null（见 loadSnapshot）或落后于快照时都是 false
+function csvInSync() {
+  return csvSerialized === latestSerialized && fs.existsSync(CSV_PATH);
+}
 
 function ensureDb() {
   fs.mkdirSync(DB_DIR, { recursive: true });
@@ -153,12 +178,42 @@ function parseJsonText(text) {
 // 所以 SW 每次唤醒的预热推送不会刷屏：
 //   每日档 timeline-YYYYMMDD.{csv,json}   当天第一次改写前的状态，保留最近 14 天；
 //   drop 档 timeline-YYYYMMDD-HHMMSS-mmm-drop.{csv,json}
-//                                        条数清空或跌超 20% 时额外留一份，保留最近 10 份。
+//                                        条数清空或跌超 20%、或任一站点（原有 ≥10 条）跌超 20% 时
+//                                        额外留一份，保留最近 10 份。
 // 事故形态必定落在 drop 档；日常改写只多出每天两个文件。
 const HISTORY_DIR = path.join(DB_DIR, 'history');
 const HISTORY_KEEP_DAILY = 14;
 const HISTORY_KEEP_DROP = 10;
 const HISTORY_DROP_RATIO = 0.8;
+// 分站点口径（v1.6.21）：整表 80% 看不见「只清空一个站」——2026-09 实测清空 royalroad（430/2239，占 19.2%）
+// 不留任何 drop 档。站点原有不足 10 条时不算：小站换榜、下架几条就是 20%，会把 10 份 drop 档挤成噪声
+const HISTORY_SITE_DROP_MIN = 10;
+
+// 站点归属与共享页标签同口径（TimelineRender.dramaSource：注册表外的 source 归 imdb）。
+// timeline-render.js 在 Node 里加载不了（加载即读全局 TranslateConfig），这里直接用注册表
+function siteOfDrama(drama) {
+  return SiteRegistry.CATEGORY_SOURCES.includes(drama.source) ? drama.source : 'imdb';
+}
+
+function countBySite(dramas) {
+  const counts = new Map();
+  for (const drama of dramas) {
+    const site = siteOfDrama(drama);
+    counts.set(site, (counts.get(site) || 0) + 1);
+  }
+  return counts;
+}
+
+/** 条数骤降的站点：[{ site, prev, next }]，按站点在旧快照里首次出现的顺序。 */
+function findSiteDrops(nextDramas, prevDramas) {
+  const nextCounts = countBySite(nextDramas);
+  const drops = [];
+  for (const [site, prev] of countBySite(prevDramas)) {
+    const next = nextCounts.get(site) || 0;
+    if (prev >= HISTORY_SITE_DROP_MIN && next < prev * HISTORY_DROP_RATIO) drops.push({ site, prev, next });
+  }
+  return drops;
+}
 
 // drop 档的时刻带毫秒：退订那一刻扩展可能在同一秒内连推两次（清理后紧跟一次预热），
 // 只到秒会让后一份覆盖前一份、正好丢掉最该留的那一版。字典序仍等于时间序。
@@ -196,10 +251,10 @@ function rotateHistory(pattern, keep) {
 let lastDrop = { signature: null, paths: [] };
 
 /**
- * 返回 drop 档路径（未触发则空数组）供调用方写进告警。
+ * 返回 drop 档路径（未触发则空数组）供调用方写进告警。siteDrops 是 findSiteDrops 的结果，非空也触发 drop 档。
  * 备份失败只警告不抛——留痕是保险，不该成为同步的前置条件。
  */
-function backupBeforeOverwrite(nextCount, prevCount, prevSignature) {
+function backupBeforeOverwrite(nextCount, prevCount, prevSignature, siteDrops = []) {
   try {
     fs.mkdirSync(HISTORY_DIR, { recursive: true });
     const { day, time } = stampParts();
@@ -212,7 +267,8 @@ function backupBeforeOverwrite(nextCount, prevCount, prevSignature) {
       rotateHistory(/^timeline-\d{8}\.json$/, HISTORY_KEEP_DAILY);
     }
 
-    if (!(prevCount > 0 && nextCount < prevCount * HISTORY_DROP_RATIO)) return [];
+    const tableDropped = prevCount > 0 && nextCount < prevCount * HISTORY_DROP_RATIO;
+    if (!tableDropped && siteDrops.length === 0) return [];
     // 同一源状态已留过 drop 档：它是最新一份、不会被轮转掉，直接复用路径写进告警
     if (prevSignature === lastDrop.signature) return lastDrop.paths;
     const dropPaths = copyTimelinePair(`timeline-${day}-${time}-drop`);
@@ -345,12 +401,13 @@ function loadSnapshot() {
   try {
     if (!fs.existsSync(TIMELINE_JSON_PATH)) return;
     const raw = parseJsonText(fs.readFileSync(TIMELINE_JSON_PATH, 'utf8'));
-    latestDramas = Array.isArray(raw.dramas) ? raw.dramas : [];
-    latestSerialized = JSON.stringify(latestDramas);
+    const dramas = Array.isArray(raw.dramas) ? raw.dramas : [];
+    commitSnapshotContent(dramas, JSON.stringify(dramas));
     // /sync 先写 json 再写 CSV，正常情况下 CSV 不会比快照旧；旧了说明上次运行里 CSV 写失败
-    // （Windows 上被 Excel 锁住）后没等到补写就重启了——签名留空让首次推送补写，否则重启后
-    // 同内容推送会一直跳过它。服务运行期间 CSV 被手删，由 /sync 的 existsSync 守卫兜底；停机期间
-    // 被删的，启动时 ensureDb 已先建出只有表头的新文件（比快照新、mtime 认不出），靠 csvCreatedAtStartup 补上
+    // （Windows 上被 Excel 锁住）后没等到补写就重启了——签名留空，启动时 healCsvFromSnapshot 按快照补写
+    // （补写失败则由首次推送补写），否则重启后同内容推送会一直跳过它。服务运行期间 CSV 被手删，由 /sync 的
+    // existsSync 守卫兜底；停机期间被删的，启动时 ensureDb 已先建出只有表头的新文件（比快照新、mtime 认不出），
+    // 靠 csvCreatedAtStartup 补上
     csvSerialized = csvCreatedAtStartup || csvOlderThanSnapshot() ? null : latestSerialized;
     dataVersion = Number.isInteger(raw.version) ? raw.version : 0;
     updatedAt = raw.updatedAt || null;
@@ -365,6 +422,21 @@ function csvOlderThanSnapshot() {
     return fs.statSync(CSV_PATH).mtimeMs < fs.statSync(TIMELINE_JSON_PATH).mtimeMs;
   } catch (_) {
     return false; // CSV 不存在交给 existsSync 守卫
+  }
+}
+
+// 启动自愈（v1.6.21）：loadSnapshot 判定 CSV 落后于快照（停机期间被删 / 上次 CSV 写失败后没等到补写就重启）时，
+// 直接按内存快照补写，不必等扩展下一次推送；/health 的 csvInSync 随即回到 true，扩展冷启动比对指纹时
+// 不会因此白推一次整表。快照为空时不动：ensureDb 刚建的表头文件本就与空快照一致，另一种情形（旧 CSV 有行、
+// 快照已清空）交给推送，启动时不凭空删行。写失败只告警，csvSerialized 留 null，下一次推送照旧补写
+function healCsvFromSnapshot() {
+  if (csvSerialized !== null || latestDramas.length === 0) return;
+  try {
+    const count = writeTimelineCsv(latestDramas);
+    csvSerialized = latestSerialized;
+    console.log(`[ShortScraping Sync] CSV 落后于时间线快照，已按快照补写：${count} 条`);
+  } catch (error) {
+    console.warn('[ShortScraping Sync] 按快照补写 CSV 失败，等扩展下一次推送再补:', error.message);
   }
 }
 
@@ -519,6 +591,88 @@ function sendJson(res, statusCode, body) {
   res.end(JSON.stringify(body));
 }
 
+// —— GET /api/timeline：响应体按 (version, contentHash) 缓存（v1.6.21） ——
+// 整表 3.7MB 起步、按月增长，共享页每次打开 / 回到前台 / 收到 SSE 都来拉：旧写法每个请求整表
+// JSON.stringify 一次、明文发出。现在同一版本只拼一次明文、压一次 gzip（异步，不堵事件循环；
+// 同一版本的并发请求共用同一个压缩 Promise），并带 ETag 让回到前台的条件请求直接 304。
+// 只留最新一份：旧版本的条目在飞的请求用完即被回收
+const gzipAsync = promisify(zlib.gzip);
+// 实测 3.7MB 的表：level 1 约 34ms / 1616KB，level 6 约 86ms / 1479KB；4 取两者之间，一个版本只压一次
+const TIMELINE_GZIP_LEVEL = 4;
+let timelineCache = null;
+
+function timelineCacheEntry() {
+  const key = `${dataVersion}:${contentHash}`;
+  if (!timelineCache || timelineCache.key !== key) {
+    // 与旧写法 JSON.stringify({ ok: true, version, updatedAt, dramas: latestDramas }) 逐字节相同：
+    // 键序照旧，version / updatedAt（字符串或 null）仍经 JSON.stringify 产出，dramas 直接复用
+    // 与 latestDramas 同步维护的 latestSerialized（见 commitSnapshotContent），省掉每请求一次整表序列化。
+    // updatedAt 只随版本前进（json 自愈补写不改它），所以键里不必带它
+    const body = `{"ok":true,"version":${JSON.stringify(dataVersion)},"updatedAt":${JSON.stringify(updatedAt)},"dramas":${latestSerialized}}`;
+    timelineCache = {
+      key,
+      // 弱校验器：同一份内容换了压缩方式（明文 / gzip）字节不同但语义相同，按 RFC 9110 只能用 W/
+      etag: `W/"${contentHash.slice(0, 16)}-${dataVersion}"`,
+      plain: Buffer.from(body, 'utf8'),
+      gzip: null
+    };
+  }
+  return timelineCache;
+}
+
+function timelineGzip(entry) {
+  if (!entry.gzip) {
+    entry.gzip = gzipAsync(entry.plain, { level: TIMELINE_GZIP_LEVEL });
+    // 失败不缓存：这一批请求退回明文，下一个请求重新压缩
+    entry.gzip.catch(() => { entry.gzip = null; });
+  }
+  return entry.gzip;
+}
+
+// Accept-Encoding：显式列出 gzip 的按它自己的 q 值，没列出才看 *；解析不了一律回明文——明文永远正确
+function acceptsGzip(header) {
+  const qualities = new Map();
+  for (const part of String(header || '').toLowerCase().split(',')) {
+    const [coding, ...params] = part.split(';').map(item => item.trim());
+    if (!coding) continue;
+    const q = params.find(item => item.startsWith('q='));
+    qualities.set(coding, q ? Number(q.slice(2)) : 1);
+  }
+  const q = qualities.has('gzip') ? qualities.get('gzip') : qualities.get('*');
+  return q > 0;
+}
+
+// If-None-Match 用弱比较（RFC 9110 §13.1.2）：去掉 W/ 前缀后相等即命中；* 匹配任何现存表示
+function etagMatches(header, etag) {
+  if (!header) return false;
+  const opaque = tag => tag.trim().replace(/^W\//, '');
+  const target = opaque(etag);
+  return header.split(',').some(tag => tag.trim() === '*' || opaque(tag) === target);
+}
+
+async function sendTimeline(req, res) {
+  const entry = timelineCacheEntry();
+  // no-cache＝可以缓存但每次都要回源校验：浏览器带 If-None-Match 来问，内容没变只回 304 头
+  const headers = { 'Cache-Control': 'no-cache', 'ETag': entry.etag, 'Vary': 'Accept-Encoding' };
+  if (etagMatches(req.headers['if-none-match'], entry.etag)) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+  let body = entry.plain;
+  if (acceptsGzip(req.headers['accept-encoding'])) {
+    try {
+      body = await timelineGzip(entry);
+      headers['Content-Encoding'] = 'gzip';
+    } catch (error) {
+      console.warn('[ShortScraping Sync] 时间线压缩失败，本次回明文:', error.message);
+    }
+  }
+  // 不设置 CORS 头，理由同 sendJson
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': body.length, ...headers });
+  res.end(body);
+}
+
 // 写接口请求体上限。/sync 每次推送订阅内的整表，体积随数据只增不减（2026-09 时 db/timeline.json
 // 约 3.7MB、按月增长），旧的 20MB 约一年触顶；64MB 留出数年余量。只拦异常体积，不是配额
 const MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
@@ -617,6 +771,9 @@ async function handleRequest(req, res) {
       body.csvPath = CSV_PATH;
       body.serverDir = __dirname;
       body.pid = process.pid; // 重启后据此确认已换成新进程
+      // 扩展冷启动指纹比对用（v1.6.21 起提供）：内容指纹 + CSV 是否已知与快照一致，两者都对得上才可能跳过推送
+      body.contentHash = contentHash;
+      body.csvInSync = csvInSync();
     }
     return sendJson(res, 200, body);
   }
@@ -664,7 +821,7 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && pathname === '/api/timeline') {
-    return sendJson(res, 200, { ok: true, version: dataVersion, updatedAt, dramas: latestDramas });
+    return sendTimeline(req, res);
   }
 
   if (req.method === 'GET' && pathname === '/api/events') {
@@ -719,10 +876,16 @@ async function handleRequest(req, res) {
       const serialized = JSON.stringify(configured);
       const snapshotChanged = serialized !== latestSerialized;
       const csvStale = serialized !== csvSerialized || !fs.existsSync(CSV_PATH);
+      // 服务运行期间 timeline.json 被手删（与 CSV 的 existsSync 守卫对称）：内容没变也按当前版本补写，
+      // 不 bump 版本、不广播——共享页看到的内容没变。内存里没有可恢复的快照（首启、从未推送过）时不凭空建文件
+      const jsonMissing = !snapshotChanged && (dataVersion > 0 || latestDramas.length > 0)
+        && !fs.existsSync(TIMELINE_JSON_PATH);
       let dropBackups = [];
+      let siteDrops = [];
       if (snapshotChanged || csvStale) {
         // 覆盖前留痕；备份只在真会重写时发生，同内容的预热推送不触发
-        dropBackups = backupBeforeOverwrite(configured.length, latestDramas.length, latestSerialized);
+        siteDrops = findSiteDrops(configured, latestDramas);
+        dropBackups = backupBeforeOverwrite(configured.length, latestDramas.length, latestSerialized, siteDrops);
       }
 
       // 带 allowEmpty 的空推送或订阅已取消导致清空时留痕；配置读取失败已在过滤阶段拒绝。
@@ -731,6 +894,14 @@ async function handleRequest(req, res) {
           `[ShortScraping Sync] 警告：收到空时间线推送（原始 ${dramas.length} 条 / 过滤后 0 条），` +
           `现有快照 ${latestDramas.length} 条即将被清空——` +
           (dramas.length === 0 ? '扩展声明为用户主动清空（allowEmpty）' : '若非主动清空订阅，请检查扩展数据与 config/tag.json') +
+          (dropBackups.length > 0 ? `；覆盖前的快照已备份到 ${dropBackups.join('、')}` : '')
+        );
+      } else if (siteDrops.length > 0) {
+        // 整表还在、只是个别站点骤降（清空一个站、退订其中一个列表页）：点名站点，整表口径看不出是哪个
+        const detail = siteDrops.map(({ site, prev, next }) => `${site} ${prev}→${next} 条`).join('、');
+        console.warn(
+          `[ShortScraping Sync] 警告：站点条数骤降（${detail}；整表 ${latestDramas.length}→${configured.length} 条）——` +
+          '若非主动清空或退订，请检查扩展数据与 config/tag.json' +
           (dropBackups.length > 0 ? `；覆盖前的快照已备份到 ${dropBackups.join('、')}` : '')
         );
       }
@@ -742,11 +913,13 @@ async function handleRequest(req, res) {
       if (snapshotChanged) {
         const snapshot = { version: dataVersion + 1, updatedAt: new Date().toISOString(), dramas: configured };
         saveSnapshot(snapshot);
-        latestSerialized = serialized;
-        latestDramas = configured;
+        commitSnapshotContent(configured, serialized);
         dataVersion = snapshot.version;
         updatedAt = snapshot.updatedAt;
         broadcastUpdate();
+      } else if (jsonMissing) {
+        saveSnapshot({ version: dataVersion, updatedAt, dramas: latestDramas });
+        console.log(`[ShortScraping Sync] timeline.json 不在磁盘上，已按当前快照补写（version ${dataVersion}，不变）`);
       }
 
       // 不重写时 CSV 就是这份内容写出的，条数照 buildTimelineCsv 同一去重口径现算
@@ -759,7 +932,7 @@ async function handleRequest(req, res) {
         count = TimelineCsv.countTimelineRows(configured);
       }
 
-      return sendJson(res, 200, { ok: true, count, csvPath: CSV_PATH });
+      return sendJson(res, 200, { ok: true, count, csvPath: CSV_PATH, contentHash });
     } catch (error) {
       return sendRouteError(res, '同步失败', error);
     }
@@ -847,6 +1020,7 @@ function exitIfLaunchdAgentLoaded() {
 exitIfLaunchdAgentLoaded();
 ensureDb();
 loadSnapshot();
+healCsvFromSnapshot();
 loadPinnedWriteOrigin();
 
 // SSE 心跳：防止空闲长连接被中间设备掐断
