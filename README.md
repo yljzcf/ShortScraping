@@ -255,7 +255,7 @@ ShortScraping/
 │   ├── content/                  # 内容脚本：十五个站点适配器（16 个域名；content.js + content.css）
 │   ├── popup/                    # 扩展弹窗（popup.html/css/js）
 │   ├── settings/                 # 设置中心：配置文件/网页订阅/定时任务/翻译接口/Lark 推送/数据存档
-│   └── shared/                   # 共享模块（UMD 多端共用）：site-registry（站点元数据单一真源）、scrape-rules（内容脚本与后台共用的采集口径：fandom 临时键前缀、类型标签清洗、Shortical sitemap 解析）、site-tabs（分组折叠标签条）、timeline-render（时间线渲染）、timeline-cards.css（弹窗与共享页共用的时间线/卡片样式）、timeline-csv（CSV 序列化/导入校验）、schedule-config（cron 解析）、translate-config（翻译配置与文本判据）、subscription-config（订阅规范化）、url-match（订阅 URL 归属）、translator（翻译）、lark（Lark 推送/多维表格导出/群机器人卡片）、qrcode（二维码）
+│   └── shared/                   # 共享模块。UMD 多端共用（后台 importScripts / 页面 <script> / Node require）：site-registry（站点元数据单一真源）、scrape-rules（内容脚本与后台共用的采集口径：fandom 临时键前缀、类型标签清洗、Shortical sitemap 解析）、site-tabs（分组折叠标签条）、timeline-csv（CSV 序列化/导入校验）、schedule-config（cron 解析）、translate-config（翻译配置与文本判据）、subscription-config（订阅规范化）、url-match（订阅 URL 归属）、lark（Lark 推送/多维表格导出/群机器人卡片）；仅后台 SW（importScripts，UMD 外壳只为测试能 require）：translator（翻译，配置由后台读取后传入）；浏览器端：timeline-render（时间线渲染，弹窗＋共享页）、timeline-cards.css（弹窗与共享页共用的时间线/卡片样式）、qrcode（二维码，弹窗）
 ├── assets/icons/                 # 扩展图标、站点图标与默认海报
 ├── config/                       # 本地配置（gitignore）与 example 模板
 ├── server/                       # 本地同步服务；根目录仅日常入口 start-sync.bat/.command、setup-launcher.bat、setup-autostart.command
@@ -263,7 +263,12 @@ ShortScraping/
 │   ├── public/                   # 局域网共享页（share.html/css/js；共用的 src/shared 渲染脚本与 timeline-cards.css 由服务经 /shared/ 白名单伺服）
 │   └── tools/                    # 管理脚本：stop-sync/restart-sync（.bat + .command，都调用 stop.js）、Node 助手 stop.js（停止/重启单一实现）、remove-launcher.bat、remove-autostart.command、launcher.vbs
 ├── scripts/                      # update-site-matches.mjs（由 site-registry 生成 manifest 内容脚本匹配清单）、export-lark-csv.mjs（多维表格导入文件，`npm run export-lark`；`--since=YYYY-MM-DD` 按本地 0 点切、比的是入库时间 `savedAt`（旧条目退回 `scrapedAt`），与设置页日期框一致；`.csv` 默认加公式撇号，`--raw` 关掉）
-├── tests/                       # 隔离回归测试 unit-*.mjs 与夹具；run.mjs 逐套串行跑（npm test），单套超过 60 秒连同它派生的进程一起结束
+├── tests/                        # 隔离回归测试；run.mjs 逐套串行跑 unit-*.mjs（npm test），单套超过 60 秒连同它派生的进程一起结束
+│   ├── unit-*.mjs                # 各测试套件；unit-test-infra-guard 是测试基建棘轮（见「验证与升级」）
+│   ├── storage-stub.mjs          # chrome.storage.local 的共用替身（v1.6.20）
+│   ├── background-fixture.mjs    # 后台夹具：vm 里加载真实 background.js 与全部共享模块，存储走 storage-stub
+│   ├── server-fixture.mjs        # 同步服务夹具（v1.6.20）：临时目录隔离树 + 随机端口，拒绝 31919
+│   └── content-fixture.mjs / dom-fixture.mjs / free-port.mjs / bootstrap.cjs  # 内容脚本应答桩、极小 DOM、空闲端口、预加载与临时目录清理护栏
 ├── db/timeline.csv               # CSV 输出（运行时生成）
 ├── db/timeline.json              # 时间线快照（共享页数据源，服务重启后回读）
 ├── db/history/                   # 覆盖前的留痕备份（v1.6.7，运行时生成）：每日档保留 14 天、条数骤降的 drop 档保留 10 份
@@ -278,7 +283,15 @@ ShortScraping/
 
 ## 验证与升级
 
-使用 Node.js 22 或更新版本运行 `npm test`（当前 56 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+使用 Node.js 22 或更新版本运行 `npm test`（当前 58 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+
+测试基建（v1.6.20，用户侧无变化）：新写的测试一律用下面的共用夹具，不再每个套件各抄一份桩。
+
+- `tests/storage-stub.mjs` 的 `createChromeStorage` 是 `chrome.storage.local` 唯一的替身，行为尽量贴近 Chrome：`get` 接受字符串、数组、默认值对象或空参（全部键），带不带回调都返回 Promise；值按结构化克隆存取；`onChanged` 只派发值真正变了的键。另有按键读计数、注入一次写失败、把下一次写挂起等钩子。时间线条目表一律经 `seedDramas` / `dramas` / `dramasReadCount` / `writesDramas` 访问，存储键名只写在这一个文件里，日后按站点分片换键时只改这里。
+- `tests/background-fixture.mjs` 的 `background()` 在 vm 里加载真实的 `background.js`，存储走上面的替身。可选可控时钟（`timers: 'manual'`，`bg.timers.advance` 拨表）或真定时器，可注入 Translator 替身；`bg.send` 以扩展页面身份发消息。
+- `tests/server-fixture.mjs` 的 `startIsolatedServer` 把 `sync-server.js` 与 `src/shared` 复制进系统临时目录下的隔离树，用随机端口启动。端口是 31919 时直接抛错；子进程固定 `SHORTSCRAPING_NO_LAUNCHD=1`、清空 `XPC_SERVICE_NAME`，日志写进隔离树；收尾时结束进程并删掉隔离树。6 个服务端套件都走它。
+- 棘轮 `tests/unit-test-infra-guard.mjs`：自带手搓 storage 桩（`pickKeys`）的套件、自己 spawn `sync-server.js` 的测试，都只许留在白名单里。白名单必须是冻结的最初名单的子集，只能删不能加，想放宽就得同时改两处，一眼就能看出来。
+- `src/shared/translator.js` 是 UMD 模块，配置由后台读取后作尾参传入、模块内不调用任何扩展 API，Node 里可直接 `require`（`tests/unit-translator-umd.mjs` 覆盖）。
 
 更新文件后，在 Chrome 扩展管理页重新加载扩展，并重启本地同步服务（`npm run restart` 或弹窗 `🔄`）以启用服务端修复。站点元数据仍只维护 `src/shared/site-registry.js`；新增站点后运行 `npm run update-sites`，由注册表生成 manifest 的内容脚本匹配清单（域名，及个别站点的订阅页路径），测试会检查两者一致。
 

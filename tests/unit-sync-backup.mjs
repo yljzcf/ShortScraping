@@ -1,5 +1,5 @@
 import './bootstrap.cjs';
-import { freePort } from './free-port.mjs';
+import { startIsolatedServer } from './server-fixture.mjs';
 // 同步服务落盘前备份回归测试（v1.6.7）。
 //
 // 背景（2026-09-17 事故）：退订后扩展推来的新快照少了 1847 条，同步服务原样覆盖
@@ -11,70 +11,23 @@ import { freePort } from './free-port.mjs';
 // 先写 json 快照再写 CSV（CSV 被锁不冻结共享页）、同一源状态的 drop 档不重复留、
 // CSV 落后于快照时重启后首次推送照样补写。
 //
-// 隔离方式沿用 unit-c6-sync：sync-server.js + src/shared 复制到 os.tmpdir() 隔离树，
+// 隔离方式：tests/server-fixture.mjs 把 sync-server.js + src/shared 复制到 os.tmpdir() 隔离树，
 // 随机端口子进程——全程不触碰真实 31919 与真实 db/（2026-07-15 事故预防纪律）。
 // 用法：node tests/unit-sync-backup.mjs
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 
-const PORT = await freePort();
-const BASE = `http://127.0.0.1:${PORT}`;
 const SUB = 'https://unit.test/list';
-const worktreeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shortscraping-backup-'));
-for (const rel of ['server', 'src/shared', 'config', 'db']) {
-  fs.mkdirSync(path.join(tmpRoot, rel), { recursive: true });
-}
-fs.copyFileSync(path.join(worktreeRoot, 'server/sync-server.js'), path.join(tmpRoot, 'server/sync-server.js'));
-for (const name of fs.readdirSync(path.join(worktreeRoot, 'src/shared'))) {
-  fs.copyFileSync(path.join(worktreeRoot, 'src/shared', name), path.join(tmpRoot, 'src/shared', name));
-}
-fs.writeFileSync(path.join(tmpRoot, 'config/tag.json'), JSON.stringify([{ url: SUB, tags: ['T'] }], null, 2));
-const csvPath = path.join(tmpRoot, 'db/timeline.csv');
-const jsonPath = path.join(tmpRoot, 'db/timeline.json');
-const historyDir = path.join(tmpRoot, 'db/history');
+const server = await startIsolatedServer({ prefix: 'shortscraping-backup-', config: { 'tag.json': [{ url: SUB, tags: ['T'] }] } });
+const csvPath = server.tree.p('db/timeline.csv');
+const jsonPath = server.tree.p('db/timeline.json');
+const historyDir = server.tree.p('db/history');
 
-let serverOut = '';
-function startServer() {
-  const proc = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
-    cwd: tmpRoot,
-    env: { ...process.env, SHORTSCRAPING_PORT: String(PORT) },
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-  proc.stdout.on('data', (d) => { serverOut += d.toString(); });
-  proc.stderr.on('data', (d) => { serverOut += d.toString(); });
-  return proc;
-}
-let child = startServer();
-// B10 要验证「重启后」的行为：停掉旧进程、清空输出（waitHealthy 认的是启动行）再起一个
-async function restartServer(whileStopped) {
-  const exited = new Promise((r) => child.once('exit', r));
-  child.kill();
-  await exited;
-  if (whileStopped) whileStopped();
-  serverOut = '';
-  child = startServer();
-  await waitHealthy();
-}
+// B10 要验证「重启后」的行为：同一棵树、同一端口停掉旧进程再起一个（新实例输出从空开始），等启动行与 /health
+const restartServer = (whileStopped) => server.restart(whileStopped);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitHealthy() {
-  for (let i = 0; i < 40; i++) {
-    if (child.exitCode !== null) throw new Error(`隔离服务退出: ${serverOut}`);
-    if (!serverOut.includes(`服务已启动：${BASE}`)) { await sleep(250); continue; }
-    try {
-      const res = await fetch(`${BASE}/health`);
-      if (res.ok) return;
-    } catch { /* 未就绪，继续等 */ }
-    await sleep(250);
-  }
-  throw new Error('隔离服务 40 次探测内未就绪');
-}
 
 const mk = (n) => ({
   id: `id-${n}`, itemId: `tt000${n}`, title: `Title ${n}`, titleZh: '', tags: ['T'],
@@ -84,14 +37,7 @@ const mk = (n) => ({
 });
 const many = (n) => Array.from({ length: n }, (_, i) => mk(i + 1));
 // extra 合入请求体：空推送要清空非空快照必须带 allowEmpty:true，否则 409（批次 A1）
-const postSync = async (dramas, extra = {}) => {
-  const res = await fetch(`${BASE}/sync`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dramas, syncedAt: '2026-08-01T00:00:00.000Z', ...extra })
-  });
-  return { status: res.status, ...(await res.json()) };
-};
+const postSync = server.postSync;
 
 const today = (() => {
   const d = new Date();
@@ -107,8 +53,6 @@ const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
 
 try {
-  await waitHealthy();
-
   // ---------- B1 首次真实改写 → 生成当天的每日档（内容＝改写前的状态） ----------
   await postSync(many(10));
   check('B1a 生成当日每日档 CSV', fs.existsSync(path.join(historyDir, `timeline-${today}.csv`)), ls().join(','));
@@ -139,12 +83,12 @@ try {
     fs.existsSync(path.join(historyDir, drops[0].replace(/\.csv$/, '.json'))), ls().join(','));
 
   // ---------- B5 空推送（带 allowEmpty，用户确认过的清空）→ drop 档 + 警告行指明备份路径 ----------
-  serverOut = '';
+  server.clearOutput();
   await postSync([], { allowEmpty: true });
   await sleep(300);
   check('B5a 空推送再留一份 drop 档', dropCsvs().length === 2, ls().join(','));
-  check('B5b 既有的空推送警告仍在', /警告：收到空时间线推送/.test(serverOut), serverOut.trim().slice(0, 200));
-  check('B5c 警告点名备份文件', /已备份到[\s\S]*db[\\/]history/.test(serverOut), serverOut.trim().slice(0, 300));
+  check('B5b 既有的空推送警告仍在', /警告：收到空时间线推送/.test(server.output), server.output.trim().slice(0, 200));
+  check('B5c 警告点名备份文件', /已备份到[\s\S]*db[\\/]history/.test(server.output), server.output.trim().slice(0, 300));
   check('B5d 清空行为不变（CSV 只剩表头）', dataRows(fs.readFileSync(csvPath, 'utf8')) === 0, '');
 
   // ---------- B6 轮转：每日档保留 14 份、drop 档保留 10 份 ----------
@@ -178,7 +122,7 @@ try {
   // ---------- B8 快照落盘失败：内存签名不前进，重推同内容必须真正写入；drop 档不重复 ----------
   // 用同名 .tmp 目录让原子写的第一步失败（源文件本身完好，备份照常能拷）
   const jsonRows = () => JSON.parse(fs.readFileSync(jsonPath, 'utf8')).dramas.length;
-  const getTimeline = async () => (await fetch(`${BASE}/api/timeline`)).json();
+  const getTimeline = server.timeline;
   for (const name of ls().filter(n => /-drop\.(csv|json)$/.test(n))) fs.rmSync(path.join(historyDir, name));
   await postSync(many(10));
   fs.mkdirSync(`${jsonPath}.tmp`);
@@ -246,9 +190,7 @@ try {
   check('B11c 拒绝时不留任何备份', ls().join(',') === historyBefore, `${historyBefore} -> ${ls().join(',')}`);
   check('B11d 共享页仍是 4 条', (await getTimeline()).dramas.length === 4, '');
 } finally {
-  child.kill();
-  await sleep(200);
-  fs.rmSync(tmpRoot, { recursive: true, force: true });
+  await server.stop();
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

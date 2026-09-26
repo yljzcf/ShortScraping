@@ -5,78 +5,28 @@ import './bootstrap.cjs';
 // 域/协议/路径/参数越界一律拒且零网络请求；网络失败与非 2xx 均回 success:false 不抛错。
 // 用法：node tests/unit-fetch-proxy.mjs
 import fs from 'node:fs';
+import { background } from './background-fixture.mjs';
 
-// ---------- chrome 桩（对齐 unit-dramas-race 范式，去掉本测不需要的暂停机关） ----------
-const rawStore = {};
-const listeners = { runtimeMessage: [] };
+// ---------- 后台夹具（v1.6.20 起走共用 background-fixture，不再手搓 chrome 桩） ----------
+// 发送方按真实内容脚本构造（fandom 子域页面、带 tab）：fetchDetailHtml 在后台
+// onMessage 的内容脚本白名单里，发送方闸门不应拦它。id 取夹具的扩展 id（本扩展自己的内容脚本）
+const CONTENT_SENDER = { id: 'fixture', url: 'https://fandom.my-drama.com/', tab: { id: 7 }, frameId: 0 };
 
-function pickKeys(keys) {
-  const wanted = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys ?? rawStore);
-  const out = {};
-  for (const k of wanted) if (k in rawStore) out[k] = structuredClone(rawStore[k]);
-  return out;
-}
-
-globalThis.chrome = {
-  storage: {
-    local: {
-      async get(keys) { await Promise.resolve(); return pickKeys(keys); },
-      async set(obj) { await Promise.resolve(); for (const [k, v] of Object.entries(obj)) rawStore[k] = structuredClone(v); }
-    },
-    onChanged: { addListener() {} }
-  },
-  runtime: {
-    id: 'unit-test',
-    getURL: p => `chrome-extension://unit-test/${p}`,
-    onInstalled: { addListener() {} },
-    onStartup: { addListener() {} },
-    onMessage: { addListener(fn) { listeners.runtimeMessage.push(fn); } },
-    sendMessage(message, callback) {
-      const deliver = new Promise((resolve) => {
-        let settled = false;
-        const sendResponse = (resp) => { if (!settled) { settled = true; resolve(resp); } };
-        let keepOpen = false;
-        // 发送方按真实内容脚本构造（fandom 子域页面、带 tab）：fetchDetailHtml 在后台
-        // onMessage 的内容脚本白名单里，发送方闸门不应拦它
-        const sender = { id: 'unit-test', url: 'https://fandom.my-drama.com/', tab: { id: 7 }, frameId: 0 };
-        for (const fn of listeners.runtimeMessage) {
-          if (fn(message, sender, sendResponse) === true) keepOpen = true;
-        }
-        if (!keepOpen && !settled) { settled = true; resolve(undefined); }
-      });
-      if (typeof callback === 'function') { deliver.then(callback); return; }
-      return deliver;
-    }
-  },
-  alarms: {
-    async get() { return undefined; },
-    async clear() { return true; },
-    create() {},
-    onAlarm: { addListener() {} }
-  },
-  tabs: { create() {}, onUpdated: { addListener() {}, removeListener() {} } },
-  notifications: { create() {} },
-  scripting: { async executeScript() { return []; } }
-};
-
-// fetch 桩：记录调用，按测试用例切换行为
+// fetch 桩：记录调用，按测试用例切换行为（后台所有请求都经它，初始化期的也不例外）
 const fetchCalls = [];
 let fetchBehavior = async () => ({ ok: true, status: 200, text: async () => '<html>FULL-PAGE</html>' });
-globalThis.fetch = async (url, options) => {
-  fetchCalls.push({ url: String(url), options });
-  return fetchBehavior(url, options);
-};
-globalThis.importScripts = () => {};
 
-// 压掉后台脚本自身的日志噪音（含顶层初始化对共享模块缺席的 console.error 抱怨——
-// importScripts 为 noop 桩，本测只关心 fetchDetailHtml 消息路径，与共享模块无关）
-const origLog = console.log, origWarn = console.warn, origError = console.error;
-console.log = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origLog(...a); };
-console.warn = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origWarn(...a); };
-console.error = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origError(...a); };
-
+// timers:'real'：P12 要让代理期限的计时器真跑（只把 25s 那一档缩成 30ms）；tick:1 保持手搓桩
+// 「让出一拍再读写」的时序
+const bg = await background({
+  timers: 'real',
+  storage: { tick: 1 },
+  fetch: async (url, options) => {
+    fetchCalls.push({ url: String(url), options });
+    return fetchBehavior(url, options);
+  }
+});
 const bgSrc = fs.readFileSync(new URL('../src/background/background.js', import.meta.url), 'utf8');
-(0, eval)(bgSrc);
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 await sleep(150); // 等后台顶层初始化落定
@@ -84,7 +34,7 @@ fetchCalls.length = 0; // 丢弃初始化期的 fetch（远端版本检查等）
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
-const ask = (url) => chrome.runtime.sendMessage({ action: 'fetchDetailHtml', url });
+const ask = (url) => bg.send({ action: 'fetchDetailHtml', url }, CONTENT_SENDER);
 
 const GOOD = 'https://my-drama.com/video/a36a7fe3-0e89-45ff-a409-f75093c5144f';
 
@@ -223,11 +173,12 @@ const ATV_MOVIE = 'https://tv.apple.com/us/movie/the-gorge/umc.cmc.26o403koqo2kl
 //     这里挂住＝那一页的抓取跟着挂住。期限 25 秒、正文读完才算完；超时 abort 底层请求并回
 //     success:false。测试里只把这一个延时缩成 30ms 真定时器
 {
-  // 间接 eval 的顶层 const 不外泄到全局，期限值从源码读
+  // 期限值从源码读：钉住声明处的字面量
   const proxyTimeoutMs = Number(bgSrc.match(/const DETAIL_HTML_PROXY_TIMEOUT_MS = (\d+);/)?.[1]);
   check('P12a 代理期限为 25 秒（与内容脚本 fetchWithTimeout 同口径）', proxyTimeoutMs === 25000, String(proxyTimeoutMs));
-  const realSetTimeout = globalThis.setTimeout;
-  globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms === 25000 ? 30 : ms, ...args);
+  // 后台跑在夹具的 vm 上下文里，按名解析的是上下文全局的 setTimeout：只替换那一份
+  const realSetTimeout = bg.context.setTimeout;
+  bg.context.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms === 25000 ? 30 : ms, ...args);
   const within = (promise, ms = 1500) => Promise.race([promise, sleep(ms).then(() => 'hung')]);
   try {
     // 响应头回了、正文永远不发完
@@ -253,11 +204,10 @@ const ATV_MOVIE = 'https://tv.apple.com/us/movie/the-gorge/umc.cmc.26o403koqo2kl
     const inTime = await within(ask(GOOD));
     check('P12e 期限内读完的响应照常透传', inTime?.success === true && inTime?.html === '<html>IN-TIME</html>', JSON.stringify(inTime));
   } finally {
-    globalThis.setTimeout = realSetTimeout;
+    bg.context.setTimeout = realSetTimeout;
   }
 }
 
-console.log = origLog; console.warn = origWarn;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

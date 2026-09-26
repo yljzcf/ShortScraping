@@ -1,50 +1,30 @@
 import './bootstrap.cjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { card, SUB } from './background-fixture.mjs';
-import { freePort } from './free-port.mjs';
+import { ROOT as root, SERVER_ARGS, card, SUB, freePort, makeIsolatedTree, launch, waitStarted, httpClient, terminate } from './server-fixture.mjs';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// 隔离树与子进程走 tests/server-fixture.mjs（端口护栏、环境变量、tmpdir 校验只写一处）；
+// Host 头、畸形路径与半截请求体这些用例要逐字节控制请求，仍用本文件自己的原始 http.request
 const require = createRequire(import.meta.url);
 const TranslateConfig = require('../src/shared/translate-config.js');
 const Lark = require('../src/shared/lark.js');
 const ScheduleConfig = require('../src/shared/schedule-config.js');
-const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'shortscraping-safety-'));
-for (const rel of ['server', 'src/shared', 'config', 'db']) fs.mkdirSync(path.join(directory, rel), { recursive: true });
-fs.copyFileSync(path.join(root, 'server/sync-server.js'), path.join(directory, 'server/sync-server.js'));
-for (const file of fs.readdirSync(path.join(root, 'src/shared'))) fs.copyFileSync(path.join(root, 'src/shared', file), path.join(directory, 'src/shared', file));
-const tagFile = path.join(directory, 'config/tag.json');
 const tags = [{ url: SUB, tags: ['IMDB'] }];
-fs.writeFileSync(tagFile, JSON.stringify(tags));
+const tree = makeIsolatedTree({ prefix: 'shortscraping-safety-', config: { 'tag.json': tags } });
+const directory = tree.dir;
+const tagFile = path.join(directory, 'config/tag.json');
 const port = await freePort();
-const child = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
-  cwd: directory, env: { ...process.env, SHORTSCRAPING_PORT: String(port) }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
-});
-let output = '';
-child.stdout.on('data', chunk => { output += chunk; });
-child.stderr.on('data', chunk => { output += chunk; });
-const base = `http://127.0.0.1:${port}`;
+const child = launch(tree, SERVER_ARGS, { port });
+const base = child.base;
 const extensionOrigin = `chrome-extension://${'a'.repeat(32)}`;
-async function post(route, payload, headers = {}) {
-  const response = await fetch(base + route, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
-    body: JSON.stringify(payload), signal: AbortSignal.timeout(3000)
-  });
-  return { status: response.status, body: await response.json() };
-}
+// JSON 体、Content-Type 默认 application/json 且可被 headers 覆盖、3 秒超时，返回 {status, body}
+const { post } = httpClient(base);
 try {
-  const deadline = Date.now() + 5000;
-  while (!output.includes(`服务已启动：${base}`)) {
-    if (child.exitCode !== null || Date.now() > deadline) throw new Error(`Fixture startup failed: ${output}`);
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
+  await waitStarted(child, { timeoutMs: 5000 });
   // Both the extension's JSON request and the local Node tools remain supported.
   assert.equal((await post('/config/tag', { urlTags: tags }, { Origin: extensionOrigin })).status, 200);
   assert.equal((await post('/config/trans', { translateConfig: { delayMs: 0 } }, { Origin: extensionOrigin })).status, 200);
@@ -265,7 +245,7 @@ try {
   assert.equal((await post('/sync', { dramas: mixedKeys })).body.count, 2);
   assert.equal(child.exitCode, null);
   // A test port is not the extension's port: say so at startup.
-  assert.match(output, new RegExp(`当前监听非默认端口 ${port}（来自环境变量 SHORTSCRAPING_PORT），扩展只连 31919`));
+  assert.match(child.output, new RegExp(`当前监听非默认端口 ${port}（来自环境变量 SHORTSCRAPING_PORT），扩展只连 31919`));
 
   // The share page's card/tab styles are shared with the popup and served from src/shared.
   const sharedCss = await fetch(base + '/shared/timeline-cards.css');
@@ -279,8 +259,6 @@ try {
   assert.equal((await exited)[0], 0);
   console.log('Server origin, host, request, persistence and shutdown checks passed');
 } finally {
-  if (child.exitCode === null && child.signalCode === null) {
-    const exited = once(child, 'exit'); child.kill(); await exited;
-  }
-  fs.rmSync(directory, { recursive: true, force: true });
+  await terminate(child);
+  tree.cleanup();
 }

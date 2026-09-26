@@ -13,86 +13,36 @@ import './bootstrap.cjs';
 //   ④ 批量线 fillOnly：只补空缺，绝不覆盖平台官方译名（Steam 官方中文）或既有译文；
 //      弹窗单卡 🌍 重译不受此限，仍是新结果优先。
 // 用法：node tests/unit-translate-partial.mjs（实现前跑 P2/P3/P5 应 RED）
-import fs from 'node:fs';
+// v1.6.20：手搓的 chrome 桩换成 background-fixture（storage 走共用的 storage-stub）。
+import { background } from './background-fixture.mjs';
 
-// ---------- chrome 桩（unit-translate-all 同款） ----------
-const rawStore = {};
-let failNextSet = false;
+// 弹窗发送方（不带 tab）：沿用迁移前手搓桩的口径，后台 isExtensionPageSender 放行
+const POPUP_SENDER = { id: 'fixture', url: 'chrome-extension://fixture/src/popup/popup.html' };
 
-function pickKeys(keys) {
-  const wanted = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys ?? rawStore);
-  const out = {};
-  for (const k of wanted) if (k in rawStore) out[k] = structuredClone(rawStore[k]);
-  return out;
-}
-
-const chromeStub = {
-  storage: {
-    local: {
-      async get(keys) { await Promise.resolve(); return pickKeys(keys); },
-      async set(obj) {
-        if (failNextSet) { failNextSet = false; throw new Error('unit stub: 注入的 set 失败'); }
-        await Promise.resolve();
-        for (const [k, v] of Object.entries(obj)) rawStore[k] = structuredClone(v);
-      },
-      async remove(keys) {
-        const list = Array.isArray(keys) ? keys : [keys];
-        for (const k of list) delete rawStore[k];
-      }
-    },
-    onChanged: { addListener() {} }
-  },
-  runtime: {
-    id: 'unit-test',
-    getURL: p => `chrome-extension://unit-test/${p}`,
-    onInstalled: { addListener() {} },
-    onStartup: { addListener() {} },
-    onMessage: { addListener(fn) { chromeStub.__msg = fn; } },
-    sendMessage(message) {
-      return new Promise((resolve) => {
-        const handled = chromeStub.__msg?.(message, { id: 'unit-test', url: 'chrome-extension://unit-test/src/popup/popup.html' }, resolve);
-        if (!handled) resolve(undefined);
-      });
-    },
-    lastError: null
-  },
-  alarms: { async getAll() { return []; }, async clear() { return true; }, create() {}, onAlarm: { addListener() {} } },
-  tabs: { create() {}, onUpdated: { addListener() {}, removeListener() {} } },
-  notifications: { create() {} },
-  scripting: { async executeScript() { return []; } }
-};
-globalThis.chrome = chromeStub;
-
-globalThis.importScripts = (...paths) => {
-  for (const p of paths) {
-    if (String(p).includes('translator')) continue;
-    const rel = String(p).replace('../shared/', '../src/shared/');
-    (0, eval)(fs.readFileSync(new URL(rel, import.meta.url), 'utf8'));
-  }
-};
-globalThis.fetch = async () => { throw new TypeError('unit stub: no network'); };
-
-// Translator 桩：按标题决定返回什么，用来构造「半成品」
+// Translator 桩：按标题决定返回什么，用来构造「半成品」（注入后 fixture 不加载真实 translator.js）
 const stubPlan = new Map();          // title -> {title, desc}
-globalThis.Translator = {
+const Translator = {
   async translateTitleAndDesc(title) {
     return stubPlan.get(title) || { title: `中·${title}`, desc: '中文简介' };
   }
 };
 
-const origLog = console.log, origWarn = console.warn, origError = console.error;
-console.log = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origLog(...a); };
-console.warn = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origWarn(...a); };
-console.error = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origError(...a); };
-
-(0, eval)(fs.readFileSync(new URL('../src/background/background.js', import.meta.url), 'utf8'));
+// 真定时器：批间 delayMs 与轮询靠真时间走；tick:1 保持手搓桩「先让一拍再读写」的时序；
+// 外网一律拒（与迁移前同口径：config/*.json 也读不到）
+const bg = await background({
+  translator: Translator,
+  timers: 'real',
+  storage: { tick: 1 },
+  fetch: () => Promise.reject(new TypeError('unit stub: no network'))
+});
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 await sleep(150);
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
-const resetDramasCache = async () => { failNextSet = true; await clearAllDramas().catch(() => {}); }; // eslint-disable-line no-undef
+// 等队列排空再让 dramas 内存缓存失效，随后直改 storage 等价「SW 冷启动前 storage 被外部改写」
+const resetDramasCache = () => bg.resetDramasCache();
 
 const SUB = 'https://unit.test/list';
 const mk = (id, over = {}) => ({
@@ -102,31 +52,33 @@ const mk = (id, over = {}) => ({
 });
 
 async function runTranslateRound() {
-  await chromeStub.runtime.sendMessage({ action: 'triggerTranslate' });
+  await bg.send({ action: 'triggerTranslate' }, POPUP_SENDER);
   for (let i = 0; i < 60; i++) {
     await sleep(80);
-    const st = rawStore.translateRunState;
+    const st = bg.data.translateRunState;
     if (st && st.running === false) break;
   }
   await sleep(200);
 }
-const byId = () => Object.fromEntries((rawStore.dramas || []).map(d => [d.id, d]));
+const byId = () => Object.fromEntries((bg.dramas() || []).map(d => [d.id, d]));
 
 // ---------- 第一轮：完整 / 半成品 / 无简介 / 全空 ----------
 await resetDramasCache();
-rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
-rawStore.translateConfig = { translateMode: 'api', delayMs: 1 };
+bg.storage.seed({
+  urlTags: [{ urlPattern: SUB, tags: ['T'] }],
+  translateConfig: { translateMode: 'api', delayMs: 1 }
+});
 stubPlan.clear();
 stubPlan.set('T-full', { title: '中文标题', desc: '中文简介' });
 stubPlan.set('T-partial', { title: '', desc: '只回了简介' });        // 模型漏片名
 stubPlan.set('T-nodesc', { title: '中文标题', desc: '' });            // 原文本就无简介
 stubPlan.set('T-empty', { title: '', desc: '' });                     // 整条没回
-rawStore.dramas = [
+bg.seedDramas([
   mk('full'),
   mk('partial'),
   mk('nodesc', { description: '' }),
   mk('empty')
-];
+]);
 await runTranslateRound();
 
 {
@@ -168,7 +120,7 @@ await runTranslateRound();
 await resetDramasCache();
 stubPlan.clear();
 stubPlan.set('T-official', { title: 'AI 翻的标题', desc: 'AI 翻的简介' });
-rawStore.dramas = [mk('official', { titleZh: '官方中文名', descriptionZh: '' })];
+bg.seedDramas([mk('official', { titleZh: '官方中文名', descriptionZh: '' })]);
 await runTranslateRound();
 {
   const m = byId();
@@ -182,7 +134,7 @@ await runTranslateRound();
 await resetDramasCache();
 stubPlan.clear();
 stubPlan.set('T-stuck', { title: '', desc: '永远只有简介' });
-rawStore.dramas = [mk('stuck')];
+bg.seedDramas([mk('stuck')]);
 let rounds = 0;
 for (; rounds < 6; rounds++) {
   await runTranslateRound();
@@ -199,9 +151,9 @@ for (; rounds < 6; rounds++) {
 
 // ---------- 单卡路径不受 fillOnly 约束 ----------
 await resetDramasCache();
-rawStore.dramas = [mk('recard', { status: 'trans', titleZh: '旧译名', descriptionZh: '旧简介', translatedAt: '2026-07-01T00:00:00.000Z' })];
+bg.seedDramas([mk('recard', { status: 'trans', titleZh: '旧译名', descriptionZh: '旧简介', translatedAt: '2026-07-01T00:00:00.000Z' })]);
 // applyTranslation 入口已删除（2026-09-25 审查）：单卡路径（translateSingle）即不带 fillOnly 调这里
-await updateSingleDramaTranslation('recard', { title: '新译名', desc: '新简介' }); // eslint-disable-line no-undef
+await bg.context.updateSingleDramaTranslation('recard', { title: '新译名', desc: '新简介' });
 await sleep(200);
 {
   const m = byId();
@@ -210,7 +162,6 @@ await sleep(200);
     JSON.stringify(m.recard));
 }
 
-console.log = origLog; console.warn = origWarn; console.error = origError;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

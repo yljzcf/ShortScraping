@@ -4,35 +4,15 @@ import './bootstrap.cjs';
 // （SW 唤醒的迁移路径全在该函数内，unit-maint-batch1 同范式）。
 // 用法：node tests/unit-migrate-skip.mjs（改造前跑应在 T2 低读断言上 RED=每轮 4+ 次全表读）
 import fs from 'node:fs';
+import { createChromeStorage } from './storage-stub.mjs';
 
-// ---------- chrome 桩（get 记录仪 + set 失败注入） ----------
-const rawStore = {};
-let getLog = [];            // 每次 get 的 keys（展平为数组）
-let failNextSet = false;
-
-function pickKeys(keys) {
-  const wanted = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys ?? rawStore);
-  const out = {};
-  for (const k of wanted) if (k in rawStore) out[k] = structuredClone(rawStore[k]);
-  return out;
-}
+// ---------- chrome 桩（storage 走共用 storage-stub：get 记录仪 reads + set 失败注入 failNextSet） ----------
+// 后台在本进程全局作用域 eval（不进 background-fixture：它预置了迁移完成标记，而 T1 要的正是
+// 「标记全无时顶层首轮」的迁移）。tick:1 保持手搓桩「让出一拍再读写」的时序；onChanged 从不派发
+const store = createChromeStorage({}, { tick: 1, dispatchChanges: false });
 
 globalThis.chrome = {
-  storage: {
-    local: {
-      async get(keys) {
-        getLog.push(typeof keys === 'string' ? [keys] : Array.isArray(keys) ? [...keys] : Object.keys(keys ?? {}));
-        await Promise.resolve();
-        return pickKeys(keys);
-      },
-      async set(obj) {
-        if (failNextSet) { failNextSet = false; throw new Error('unit stub: 注入的 set 失败'); }
-        await Promise.resolve();
-        for (const [k, v] of Object.entries(obj)) rawStore[k] = structuredClone(v);
-      }
-    },
-    onChanged: { addListener() {} }
-  },
+  storage: { local: store.local, onChanged: store.onChanged },
   runtime: {
     getURL: p => `chrome-extension://unit-test/${p}`,
     onInstalled: { addListener() {} },
@@ -79,21 +59,22 @@ console.error = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origE
 for (const rel of ['../src/shared/url-match.js', '../src/shared/site-registry.js', '../src/shared/timeline-csv.js', '../src/shared/schedule-config.js', '../src/shared/lark.js']) {
   (0, eval)(fs.readFileSync(new URL(rel, import.meta.url), 'utf8'));
 }
-// 直改 rawStore.dramas 前须让队列内存缓存失效（模拟 SW 冷启动首读）。缓存变量
+// 直改 storage 里的 dramas 表前须让队列内存缓存失效（模拟 SW 冷启动首读）。缓存变量
 // 是 background.js 那次 eval 的私有词法环境成员、外部触不到，借用生产自身语义：
-// 注入一次 set 失败，writeDramasInQueue 的 catch 置缓存 null（失败不落 rawStore）。
-// eval 前调用为 no-op（clearAllDramas 尚未定义）。
+// 注入一次 set 失败，writeDramasInQueue 的 catch 置缓存 null（失败不落盘）。
+// eval 前调用为 no-op（clearAllDramas 尚未定义）。那次 set 万一没走到，收尾撤掉钩子，免得误伤后面的写。
 const resetDramasCache = async () => {
   if (typeof globalThis.clearAllDramas !== 'function') return;
-  failNextSet = true;
+  let armed = true;
+  store.failNextSet(() => armed);
   await globalThis.clearAllDramas().catch(() => {});
-  failNextSet = false;
+  armed = false;
 };
 // 种入条数（条数断言一律由它推导，加夹具时不必再逐处改数字）
 const SEEDED = 12;
 const seedLegacy = async () => {
   await resetDramasCache();
-  rawStore.dramas = [
+  store.seedDramas([
     { id: 'id-1', imdbId: 'tt0001', title: 'Old Field', tags: ['T'], source: 'unittest', status: 'trans', sourceListUrl: SUB },
     { id: 'id-2', itemId: 'rr123', title: 'RR Tag', tags: ['RR'], company: 'Some Author', source: 'royalroad', status: 'trans', sourceListUrl: SUB },
     { id: 'id-3', itemId: 'mdf-orphan-slug', title: 'Unmapped Fandom', tags: ['T'], source: 'mydrama', status: 'new', sourceListUrl: SUB },
@@ -125,15 +106,15 @@ const seedLegacy = async () => {
     { id: 'id-12', itemId: 'ns2092788755268141058', title: 'Caf\uFFFD Love', description: 'She didn\uFFFD\uFFFDt know',
       titleZh: '咖啡之恋', descriptionZh: '她并不知道', tags: ['T', '视觉\uFFFD\uFFFD'],
       source: 'netshort', status: 'trans', translatedAt: '2026-08-01T00:00:00.000Z', sourceListUrl: SUB }
-  ];
-  delete rawStore.legacyDramaMigrated;
-  delete rawStore.rsEpisodeUrlMigrated;
-  delete rawStore.companyFieldDropped;
-  delete rawStore.partialTranslationReset;
-  delete rawStore.nonChineseTitleZhReset;
-  delete rawStore.garbledTranslationReset;
-  delete rawStore.shorticalCanonicalIdsMigrated;
-  rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
+  ]);
+  delete store.data.legacyDramaMigrated;
+  delete store.data.rsEpisodeUrlMigrated;
+  delete store.data.companyFieldDropped;
+  delete store.data.partialTranslationReset;
+  delete store.data.nonChineseTitleZhReset;
+  delete store.data.garbledTranslationReset;
+  delete store.data.shorticalCanonicalIdsMigrated;
+  store.data.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
 };
 await seedLegacy();
 (0, eval)(fs.readFileSync(new URL('../src/background/background.js', import.meta.url), 'utf8'));
@@ -143,22 +124,24 @@ await sleep(700); // 等顶层首轮 loadConfigFromJsonFiles 落定
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
-const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).length;
+const dramasReadCount = () => store.dramasReadCount();
+// 请求过该键的 get（get(null) 读全部键，也算；本套件的断言要求「只读标记本身」，那种读法照样不过）
+const readsOf = key => store.reads.filter(keys => keys === null || keys.includes(key));
 
 // ---------- T1 首轮：三迁移生效 + 双标记落库 ----------
 {
-  const dramas = rawStore.dramas || [];
+  const dramas = store.dramas() || [];
   const byId = Object.fromEntries(dramas.map(d => [d.id, d]));
   check('T1a imdbId 字段已更名 itemId', byId['id-1'] && !('imdbId' in byId['id-1']) && byId['id-1'].itemId === 'tt0001', JSON.stringify(byId['id-1']));
   check('T1b RR 标签已改 RoyalRoad', byId['id-2']?.tags?.includes('RoyalRoad') && !byId['id-2']?.tags?.includes('RR'), JSON.stringify(byId['id-2']?.tags));
   check('T1c mdf- 未映射条目已清理', !byId['id-3'] && dramas.length === SEEDED - 1, `len=${dramas.length}`);
-  check('T1d legacyDramaMigrated 已置位', rawStore.legacyDramaMigrated === true, String(rawStore.legacyDramaMigrated));
-  check('T1e rsEpisodeUrlMigrated 已置位（无候选也收口）', rawStore.rsEpisodeUrlMigrated === true, String(rawStore.rsEpisodeUrlMigrated));
+  check('T1d legacyDramaMigrated 已置位', store.data.legacyDramaMigrated === true, String(store.data.legacyDramaMigrated));
+  check('T1e rsEpisodeUrlMigrated 已置位（无候选也收口）', store.data.rsEpisodeUrlMigrated === true, String(store.data.rsEpisodeUrlMigrated));
   // v1.5.13：company 彻底移除。挂在独立标记上——legacyDramaMigrated 在存量机器上早已
   // 置位，挂进 runLegacyDramaMigrations 的话这条迁移永远不会执行
   check('T1f company 字段已从存量记录摘除（含空串值）',
     dramas.every(d => !('company' in d)), JSON.stringify(dramas.map(d => d.company)));
-  check('T1g companyFieldDropped 已置位', rawStore.companyFieldDropped === true, String(rawStore.companyFieldDropped));
+  check('T1g companyFieldDropped 已置位', store.data.companyFieldDropped === true, String(store.data.companyFieldDropped));
   // v1.5.14：半成品翻译退回队列。缺中文标题与缺中文简介都要复位，齐全的不许动
   check('T1h 缺中文标题的半成品已退回 new', byId['id-5']?.status === 'new', JSON.stringify(byId['id-5']));
   check('T1i 缺中文简介的半成品已退回 new（官方译名保留）',
@@ -166,8 +149,8 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   check('T1j 译文齐全的条目不被误动',
     byId['id-7']?.status === 'trans' && byId['id-7']?.translatedAt === '2026-08-01T00:00:00.000Z',
     JSON.stringify(byId['id-7']));
-  check('T1k partialTranslationReset 已置位', rawStore.partialTranslationReset === true,
-    String(rawStore.partialTranslationReset));
+  check('T1k partialTranslationReset 已置位', store.data.partialTranslationReset === true,
+    String(store.data.partialTranslationReset));
   // v1.6.2：非中文译名退回队列。判据与适配器守卫同一个 hasChineseChars
   check('T1l 韩语译名已清空并退回 new（简介保留、重试计数清零）',
     byId['id-8']?.status === 'new' && byId['id-8']?.titleZh === ''
@@ -177,16 +160,16 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
     byId['id-9']?.status === 'new' && byId['id-9']?.titleZh === '', JSON.stringify(byId['id-9']));
   check('T1n 正常中文译名不被误动',
     byId['id-7']?.titleZh === '完整中文名' && byId['id-7']?.status === 'trans', JSON.stringify(byId['id-7']));
-  check('T1o nonChineseTitleZhReset 已置位', rawStore.nonChineseTitleZhReset === true,
-    String(rawStore.nonChineseTitleZhReset));
+  check('T1o nonChineseTitleZhReset 已置位', store.data.nonChineseTitleZhReset === true,
+    String(store.data.nonChineseTitleZhReset));
   check('T1p 乱码简介已清空并退回 new（完好译名保留、重试计数清零）',
     byId['id-10']?.status === 'new' && byId['id-10']?.descriptionZh === '' && byId['id-10']?.titleZh === '第二人生'
     && !('translateAttempts' in (byId['id-10'] || {})), JSON.stringify(byId['id-10']));
   check('T1q 乱码译名已清空并退回 new（完好简介保留）',
     byId['id-11']?.status === 'new' && byId['id-11']?.titleZh === '' && byId['id-11']?.descriptionZh === '中文简介',
     JSON.stringify(byId['id-11']));
-  check('T1r garbledTranslationReset 已置位', rawStore.garbledTranslationReset === true,
-    String(rawStore.garbledTranslationReset));
+  check('T1r garbledTranslationReset 已置位', store.data.garbledTranslationReset === true,
+    String(store.data.garbledTranslationReset));
   check('T1s 原文/标签含乱码而译文完好 → 原样保留（不清空原文、不退回 new）',
     byId['id-12']?.status === 'trans' && byId['id-12']?.title === 'Caf\uFFFD Love'
     && byId['id-12']?.description === 'She didn\uFFFD\uFFFDt know' && byId['id-12']?.titleZh === '咖啡之恋'
@@ -196,31 +179,31 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
 
 // ---------- T2 二次唤醒：dramas 全表读恰 1 次（仅 prune，不可标记项） ----------
 {
-  getLog = [];
+  store.reads.length = 0;
   await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
   const reads = dramasReadCount();
   // 缓存热态（同 SW 会话内二次唤醒等价路径）为 0 次；缓存冷态（真实 SW 重启）为 1 次（仅 prune）
-  check('T2a 二次唤醒 dramas 全表读 ≤1 次（旧代码 4+ 次）', reads <= 1, `reads=${reads} log=${JSON.stringify(getLog)}`);
-  const rsGets = getLog.filter(keys => keys.includes('rsEpisodeUrlMigrated'));
-  check('T2b rs 标记读取不连带 dramas', rsGets.length === 1 && rsGets[0].length === 1, JSON.stringify(rsGets));
-  check('T2c 数据未被误动', (rawStore.dramas || []).length === SEEDED - 1, `len=${rawStore.dramas?.length}`);
+  check('T2a 二次唤醒 dramas 全表读 ≤1 次（旧代码 4+ 次）', reads <= 1, `reads=${reads} log=${JSON.stringify(store.reads)}`);
+  const rsGets = readsOf('rsEpisodeUrlMigrated');
+  check('T2b rs 标记读取不连带 dramas', rsGets.length === 1 && rsGets[0]?.length === 1, JSON.stringify(rsGets));
+  check('T2c 数据未被误动', (store.dramas() || []).length === SEEDED - 1, `len=${store.dramas()?.length}`);
   // 四个逐条复位迁移共用 runOnceDramaMigration：标记各读一次、只读标记本身，置位后零写入
   const ONCE_FLAGS = ['companyFieldDropped', 'partialTranslationReset', 'nonChineseTitleZhReset', 'garbledTranslationReset'];
-  const flagGets = ONCE_FLAGS.map(flag => getLog.filter(keys => keys.includes(flag)));
+  const flagGets = ONCE_FLAGS.map(flag => readsOf(flag));
   check('T2d 逐条复位迁移的标记各单独读一次、不连带 dramas',
-    flagGets.every(gets => gets.length === 1 && gets[0].length === 1), JSON.stringify(flagGets));
+    flagGets.every(gets => gets.length === 1 && gets[0]?.length === 1), JSON.stringify(flagGets));
 }
 
 // ---------- T3 set 失败：标记不置位，下轮重试成功 ----------
 {
   await seedLegacy();
-  failNextSet = true; // 首个写（config 种子 set）失败，迁移线不达
+  store.failNextSet(); // 首个写（config 种子 set）失败，迁移线不达
   let threw = false;
   await loadConfigFromJsonFiles().catch(() => { threw = true; }); // eslint-disable-line no-undef
   check('T3a 迁移失败向上传播', threw === true, '');
-  check('T3b 失败后标记未置位', rawStore.legacyDramaMigrated === undefined, String(rawStore.legacyDramaMigrated));
+  check('T3b 失败后标记未置位', store.data.legacyDramaMigrated === undefined, String(store.data.legacyDramaMigrated));
   await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
-  check('T3c 下轮重试完成迁移并置标记', rawStore.legacyDramaMigrated === true && !('imdbId' in ((rawStore.dramas || [])[0] || {})), JSON.stringify(rawStore.dramas?.[0]));
+  check('T3c 下轮重试完成迁移并置标记', store.data.legacyDramaMigrated === true && !('imdbId' in ((store.dramas() || [])[0] || {})), JSON.stringify(store.dramas()?.[0]));
 }
 
 // ---------- T4 迁移/清理抛错不得阻断配置恢复（v1.6.7，2026-09-17 审计 H1） ----------
@@ -238,9 +221,9 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   check('T4a 单个迁移抛错时 loadConfigFromJsonFiles 仍正常完成（不掐掉 setupAlarms）',
     !threw && Array.isArray(result?.urlTags), `threw=${threw} result=${JSON.stringify(result)}`);
   check('T4b 排在它后面的迁移照常完成并置标（不是整条链一起死）',
-    rawStore.rsEpisodeUrlMigrated === true, String(rawStore.rsEpisodeUrlMigrated));
+    store.data.rsEpisodeUrlMigrated === true, String(store.data.rsEpisodeUrlMigrated));
   check('T4c 抛错的迁移标记未置位（下轮唤醒重试）',
-    rawStore.nonChineseTitleZhReset === undefined, String(rawStore.nonChineseTitleZhReset));
+    store.data.nonChineseTitleZhReset === undefined, String(store.data.nonChineseTitleZhReset));
 
   const origPrune = globalThis.pruneDramasOutsideConfiguredUrls;
   globalThis.pruneDramasOutsideConfiguredUrls = async () => { throw new Error('unit stub: 清理炸了'); };
@@ -257,9 +240,9 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
 {
   const seedShortical = async (dramas) => {
     await resetDramasCache();
-    rawStore.dramas = dramas;
-    delete rawStore.shorticalCanonicalIdsMigrated;
-    rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
+    store.seedDramas(dramas);
+    delete store.data.shorticalCanonicalIdsMigrated;
+    store.data.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
     shorticalSitemapCalls = 0;
   };
   const sc = (over) => ({ source: 'shortical', status: 'new', tags: ['T'], sourceListUrl: SUB, genres: [], ...over });
@@ -280,7 +263,7 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   await seedShortical(FULL());
   await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
   {
-    const dramas = rawStore.dramas || [];
+    const dramas = store.dramas() || [];
     const byId = Object.fromEntries(dramas.map(d => [d.id, d]));
     check('T5a 高号条目改写成 sitemap 的规范 itemId 与 url（点封面不再落 404）',
       byId['sc-early']?.itemId === 'sc163'
@@ -299,39 +282,39 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
       byId['sc-miss']?.itemId === 'sc2999' && byId['sc-miss']?.url === 'https://shortical.com/drama/not-published-yet-2999',
       JSON.stringify(byId['sc-miss']));
     check('T5f 非 Shortical 条目一律不碰', byId['other']?.itemId === 'ns001', JSON.stringify(byId['other']));
-    check('T5g shorticalCanonicalIdsMigrated 已置位', rawStore.shorticalCanonicalIdsMigrated === true,
-      String(rawStore.shorticalCanonicalIdsMigrated));
+    check('T5g shorticalCanonicalIdsMigrated 已置位', store.data.shorticalCanonicalIdsMigrated === true,
+      String(store.data.shorticalCanonicalIdsMigrated));
     check('T5h 迁移期间 sitemap 只取一次', shorticalSitemapCalls === 1, String(shorticalSitemapCalls));
   }
   {
     // 二次唤醒：标记置位后零成本跳过
-    getLog = [];
+    store.reads.length = 0;
     shorticalSitemapCalls = 0;
-    const before = JSON.stringify(rawStore.dramas);
+    const before = JSON.stringify(store.dramas());
     await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
-    const flagGets = getLog.filter(keys => keys.includes('shorticalCanonicalIdsMigrated'));
+    const flagGets = readsOf('shorticalCanonicalIdsMigrated');
     check('T5i 二次唤醒标记读取不连带 dramas、零网络、数据不动',
-      flagGets.length === 1 && flagGets[0].length === 1 && shorticalSitemapCalls === 0
-      && JSON.stringify(rawStore.dramas) === before,
+      flagGets.length === 1 && flagGets[0]?.length === 1 && shorticalSitemapCalls === 0
+      && JSON.stringify(store.dramas()) === before,
       JSON.stringify({ flagGets, calls: shorticalSitemapCalls }));
   }
   {
     // sitemap 取不到：标记不置位、数据一个字节不动，下轮唤醒重试（绝不退回 href 那个号）
     await seedShortical(FULL());
     shorticalSitemapFails = true;
-    const before = JSON.stringify(rawStore.dramas);
+    const before = JSON.stringify(store.dramas());
     let threw = false;
     await loadConfigFromJsonFiles().catch(() => { threw = true; }); // eslint-disable-line no-undef
     shorticalSitemapFails = false;
     check('T5j sitemap 取不到 → 不阻断配置恢复、标记不置位、数据不动',
-      threw === false && rawStore.shorticalCanonicalIdsMigrated === undefined
-      && JSON.stringify(rawStore.dramas) === before,
-      JSON.stringify({ threw, flag: rawStore.shorticalCanonicalIdsMigrated }));
+      threw === false && store.data.shorticalCanonicalIdsMigrated === undefined
+      && JSON.stringify(store.dramas()) === before,
+      JSON.stringify({ threw, flag: store.data.shorticalCanonicalIdsMigrated }));
     await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
     check('T5k 下轮重试完成迁移并置标',
-      rawStore.shorticalCanonicalIdsMigrated === true
-      && (rawStore.dramas || []).some(d => d.itemId === 'sc163'),
-      JSON.stringify((rawStore.dramas || []).map(d => d.itemId)));
+      store.data.shorticalCanonicalIdsMigrated === true
+      && (store.dramas() || []).some(d => d.itemId === 'sc163'),
+      JSON.stringify((store.dramas() || []).map(d => d.itemId)));
   }
   {
     // 库里没有 Shortical 条目（绝大多数用户）：直接收口，零网络请求
@@ -339,8 +322,8 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
       tags: ['T'], url: 'https://netshort.com/episode/x-1', genres: [], scrapedAt: '2026-09-17T14:00:00.000Z', sourceListUrl: SUB }]);
     await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
     check('T5l 无 Shortical 条目时零网络请求直接置标',
-      rawStore.shorticalCanonicalIdsMigrated === true && shorticalSitemapCalls === 0,
-      JSON.stringify({ flag: rawStore.shorticalCanonicalIdsMigrated, calls: shorticalSitemapCalls }));
+      store.data.shorticalCanonicalIdsMigrated === true && shorticalSitemapCalls === 0,
+      JSON.stringify({ flag: store.data.shorticalCanonicalIdsMigrated, calls: shorticalSitemapCalls }));
   }
 }
 
@@ -350,25 +333,25 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
 {
   // T6a/b 钩子抛错不挡迁移；种子配置在钩子执行前已落库（setupAlarms 读的是刚恢复的 scheduleConfig）
   await seedLegacy();
-  delete rawStore.scheduleConfig;
+  delete store.data.scheduleConfig;
   let seededAtHook = null;
   let result = null, threw = false;
   await loadConfigFromJsonFiles({ // eslint-disable-line no-undef
     beforeMigrations: async () => {
-      seededAtHook = rawStore.scheduleConfig !== undefined;
+      seededAtHook = store.data.scheduleConfig !== undefined;
       throw new Error('unit stub: 定时任务安装炸了');
     }
   }).then(r => { result = r; }, () => { threw = true; });
   check('T6a 钩子执行时配置种子已落库', seededAtHook === true, String(seededAtHook));
   check('T6b 钩子抛错不阻断配置恢复与后面的迁移',
-    !threw && Array.isArray(result?.urlTags) && rawStore.legacyDramaMigrated === true && rawStore.rsEpisodeUrlMigrated === true,
-    JSON.stringify({ threw, legacy: rawStore.legacyDramaMigrated, rs: rawStore.rsEpisodeUrlMigrated }));
+    !threw && Array.isArray(result?.urlTags) && store.data.legacyDramaMigrated === true && store.data.rsEpisodeUrlMigrated === true,
+    JSON.stringify({ threw, legacy: store.data.legacyDramaMigrated, rs: store.data.rsEpisodeUrlMigrated }));
 
   // T6c 联网迁移挂住：钩子已先跑完，不被 sitemap 请求拦住；请求带超时 signal
   await resetDramasCache();
-  rawStore.dramas = [{ id: 'sc-hang', itemId: 'sc2200', title: 'Bound by Fire', source: 'shortical', status: 'new',
-    tags: ['T'], sourceListUrl: SUB, url: 'https://shortical.com/drama/bound-by-fire-2200', scrapedAt: '2026-09-17T16:29:00.000Z' }];
-  delete rawStore.shorticalCanonicalIdsMigrated;
+  store.seedDramas([{ id: 'sc-hang', itemId: 'sc2200', title: 'Bound by Fire', source: 'shortical', status: 'new',
+    tags: ['T'], sourceListUrl: SUB, url: 'https://shortical.com/drama/bound-by-fire-2200', scrapedAt: '2026-09-17T16:29:00.000Z' }]);
+  delete store.data.shorticalCanonicalIdsMigrated;
   const origFetch = globalThis.fetch;
   let sitemapSignal = null;
   let sitemapRequested = false;
@@ -382,7 +365,7 @@ const dramasReadCount = () => getLog.filter(keys => keys.includes('dramas')).len
   loadConfigFromJsonFiles({ beforeMigrations: async () => { hookRanBeforeSitemap = !sitemapRequested; } }); // eslint-disable-line no-undef
   await sleep(200);
   check('T6c sitemap 请求挂住时钩子（setupAlarms）已先于它执行完',
-    hookRanBeforeSitemap === true && sitemapRequested && rawStore.shorticalCanonicalIdsMigrated === undefined,
+    hookRanBeforeSitemap === true && sitemapRequested && store.data.shorticalCanonicalIdsMigrated === undefined,
     JSON.stringify({ hookRanBeforeSitemap, sitemapRequested }));
   check('T6d sitemap 请求带超时 signal（小于 SW 30s 空闲阈值，超时即抛、下轮重试）',
     sitemapSignal instanceof AbortSignal && sitemapSignal.aborted === false, String(sitemapSignal));

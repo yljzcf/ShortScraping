@@ -1,20 +1,17 @@
 import './bootstrap.cjs';
-import { freePort } from './free-port.mjs';
+import { startIsolatedServer } from './server-fixture.mjs';
 // B4 回归测试：schedule-config.js 三端归一（require 直载）+ /config/cron 写回端点
 // （tmpdir 隔离服务，随机端口）。cron 解析语义与 background 原实现全等由
 // unit-maint-batch1（A-1/A-10 用例）复跑守护。
 // 用法：node tests/unit-schedule-config.mjs
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const worktreeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SC = require(path.join(worktreeRoot, 'src/shared/schedule-config.js'));
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
@@ -70,36 +67,11 @@ check('T3e DEFAULT_CONFIG 与旧 background/settings 副本同值',
 
 // ---------- T4 /config/cron 端点（隔离服务） ----------
 {
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shortscraping-cron-'));
-  for (const rel of ['server', 'src/shared', 'config', 'db']) fs.mkdirSync(path.join(tmpRoot, rel), { recursive: true });
-  // 整目录复制 src/shared：新增共享模块时不必再逐个套件维护复制清单
-  fs.copyFileSync(path.join(worktreeRoot, 'server/sync-server.js'), path.join(tmpRoot, 'server/sync-server.js'));
-  for (const name of fs.readdirSync(path.join(worktreeRoot, 'src/shared'))) {
-    fs.copyFileSync(path.join(worktreeRoot, 'src/shared', name), path.join(tmpRoot, 'src/shared', name));
-  }
-  const cronPath = path.join(tmpRoot, 'config/cron.json');
-  const port = await freePort();
-  const base = `http://127.0.0.1:${port}`;
-  let output = '';
-  const child = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
-    cwd: tmpRoot, env: { ...process.env, SHORTSCRAPING_PORT: String(port) }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
-  });
-  child.stdout.on('data', chunk => { output += chunk; });
-  child.stderr.on('data', chunk => { output += chunk; });
+  // 只要 cron 端点：不写 tag.json；与迁移前一样只等启动行，不额外探 /health
+  const server = await startIsolatedServer({ prefix: 'shortscraping-cron-', config: {}, probeHealth: false });
+  const cronPath = server.tree.p('config/cron.json');
   try {
-    for (let i = 0; i < 40; i++) {
-      if (child.exitCode !== null) throw new Error(`隔离服务退出: ${output}`);
-      if (output.includes(`服务已启动：${base}`)) break;
-      await sleep(250);
-    }
-    if (!output.includes(`服务已启动：${base}`)) throw new Error('隔离服务启动超时');
-    const post = async (scheduleConfig) => {
-      const res = await fetch(`${base}/config/cron`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scheduleConfig })
-      });
-      return { status: res.status, body: await res.json() };
-    };
+    const post = async (scheduleConfig) => server.post('/config/cron', { scheduleConfig });
 
     const good = await post({ scheduleMode: 'cron', scrapeCron: '10 3 * * *', translateCron: '20 3 * * *', scrapeInterval: 6, translateInterval: 1 });
     const written = JSON.parse(fs.readFileSync(cronPath, 'utf8'));
@@ -109,12 +81,10 @@ check('T3e DEFAULT_CONFIG 与旧 background/settings 副本同值',
     const stillWritten = JSON.parse(fs.readFileSync(cronPath, 'utf8'));
     check('T4b 非法 cron 500 且文件未变', bad.status === 500 && bad.body.ok === false && /分钟/.test(bad.body.error) && stillWritten.scrapeCron === '10 3 * * *', JSON.stringify(bad.body));
 
-    const res = await fetch(`${base}/config/cron`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: 'not json' });
+    const res = await server.request('/config/cron', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: 'not json' });
     check('T4c 非 JSON 体 500', res.status === 500, String(res.status));
   } finally {
-    child.kill();
-    await sleep(200);
-    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    await server.stop();
   }
 }
 

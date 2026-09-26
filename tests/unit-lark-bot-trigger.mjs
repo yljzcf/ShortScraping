@@ -11,9 +11,11 @@ import './bootstrap.cjs';
 // 在群里瞬间刷出几百条消息。水位线＝只推 scrapedAt 晚于启用时刻的卡。
 // 用法：node tests/unit-lark-bot-trigger.mjs
 import fs from 'node:fs';
+import { createChromeStorage } from './storage-stub.mjs';
 
-const rawStore = {};
-let failNextSet = false;
+// storage 走共用 storage-stub（v1.6.20 起不再手搓）：tick:1 保持手搓桩「让出一拍再读写」的时序，onChanged 从不派发。
+// 后台仍在本进程全局作用域 eval：B 组拿测试侧的真时钟与后台写的基线比先后，background-fixture 的固定时钟对不上
+const store = createChromeStorage({}, { tick: 1, dispatchChanges: false });
 const botPosts = [];          // 捕获发往机器人的请求
 const botPostTimes = [];      // 每次请求的时刻（S 组测节流）
 const alarmStore = new Map();
@@ -21,26 +23,8 @@ let botFailCount = 0;         // 还需失败多少次（Q 组制造推送失败
 let botGate = null;           // 非空时机器人请求先挂在这个 promise 上（R 组制造「处理进行中」的窗口）
 let botGateReached = null;    // 有请求挂上闸门时回调（R 组据此在处理中途插入入队）
 
-function pickKeys(keys) {
-  const wanted = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys ?? rawStore);
-  const out = {};
-  for (const k of wanted) if (k in rawStore) out[k] = structuredClone(rawStore[k]);
-  return out;
-}
-
 const chromeStub = {
-  storage: {
-    local: {
-      async get(keys) { await Promise.resolve(); return pickKeys(keys); },
-      async set(obj) {
-        if (failNextSet) { failNextSet = false; throw new Error('unit stub: 注入的 set 失败'); }
-        await Promise.resolve();
-        for (const [k, v] of Object.entries(obj)) rawStore[k] = structuredClone(v);
-      },
-      async remove(keys) { for (const k of (Array.isArray(keys) ? keys : [keys])) delete rawStore[k]; }
-    },
-    onChanged: { addListener(fn) { chromeStub.__onChanged = fn; } }
-  },
+  storage: { local: store.local, onChanged: store.onChanged },
   runtime: {
     id: 'unit-test',
     getURL: p => `chrome-extension://unit-test/${p}`,
@@ -105,7 +89,9 @@ await sleep(150);
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
-const resetDramasCache = async () => { failNextSet = true; await clearAllDramas().catch(() => {}); }; // eslint-disable-line no-undef
+// 直改 storage 里的 dramas 表前先让队列内存缓存失效：缓存在 eval 私有词法环境外部触不到，借生产语义——
+// 注入一次 set 失败，writeDramasInQueue 的 catch 置空缓存（失败不落盘）
+const resetDramasCache = async () => { store.failNextSet(); await clearAllDramas().catch(() => {}); }; // eslint-disable-line no-undef
 
 const SUB = 'https://unit.test/list';
 const ENABLED_AT = '2026-09-12T00:00:00.000Z';
@@ -119,17 +105,17 @@ const mk = (id, over = {}) => ({
 });
 
 const setupBot = async ({ enabled = true, enabledAt = ENABLED_AT } = {}) => {
-  rawStore.larkConfig = { webhookUrl: '', botWebhookUrl: BOT_HOOK, botEnabled: enabled, requestTimeoutSec: 5 };
-  rawStore.larkBotState = enabledAt ? { enabledAt } : {};
-  rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
-  rawStore.translateConfig = { translateMode: 'api', delayMs: 1 };
+  store.data.larkConfig = { webhookUrl: '', botWebhookUrl: BOT_HOOK, botEnabled: enabled, requestTimeoutSec: 5 };
+  store.data.larkBotState = enabledAt ? { enabledAt } : {};
+  store.data.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
+  store.data.translateConfig = { translateMode: 'api', delayMs: 1 };
 };
 
 async function runTranslateRound() {
   await chromeStub.runtime.sendMessage({ action: 'triggerTranslate' });
   for (let i = 0; i < 60; i++) {
     await sleep(80);
-    if (rawStore.translateRunState?.running === false) break;
+    if (store.data.translateRunState?.running === false) break;
   }
   await sleep(250);
 }
@@ -137,19 +123,19 @@ async function runTranslateRound() {
 // ---------- W 组：启用水位线（防存量刷屏） ----------
 await resetDramasCache(); await setupBot();
 botPosts.length = 0;
-rawStore.dramas = [
+store.seedDramas([
   mk('old1', { scrapedAt: BEFORE }),
   mk('old2', { scrapedAt: BEFORE }),
   mk('new1', { scrapedAt: AFTER })
-];
+]);
 await runTranslateRound();
 check('W1 只推启用之后抓到的卡（存量翻完不刷屏）', botPosts.length === 1,
   `posts=${botPosts.length} ${JSON.stringify(botPosts.map(p => p.card?.elements?.[0]?.text?.content))}`);
 check('W2 推的正是那条新卡', JSON.stringify(botPosts[0] || {}).includes('中·T-new1'),
   JSON.stringify(botPosts[0]?.card?.elements?.[0]));
 check('W3 存量条目仍正常翻译（只是不推）',
-  (rawStore.dramas || []).every(d => d.status === 'trans'),
-  JSON.stringify((rawStore.dramas || []).map(d => [d.id, d.status])));
+  (store.dramas() || []).every(d => d.status === 'trans'),
+  JSON.stringify((store.dramas() || []).map(d => [d.id, d.status])));
 
 // ---------- T 组：翻译完成才推、半成品不推 ----------
 await resetDramasCache(); await setupBot();
@@ -159,13 +145,13 @@ globalThis.Translator = {
     return title === 'T-partial' ? { title: '', desc: '只有简介' } : { title: `中·${title}`, desc: '中文简介' };
   }
 };
-rawStore.dramas = [mk('done'), mk('partial')];
+store.seedDramas([mk('done'), mk('partial')]);
 await runTranslateRound();
 check('T1 只有翻译完成的才推（半成品不推）', botPosts.length === 1
   && JSON.stringify(botPosts[0]).includes('中·T-done'),
   `posts=${botPosts.length} ${JSON.stringify(botPosts.map(p => JSON.stringify(p).slice(0, 60)))}`);
 check('T2 半成品仍留在待翻译队列',
-  (rawStore.dramas || []).find(d => d.id === 'partial')?.status === 'new', '');
+  (store.dramas() || []).find(d => d.id === 'partial')?.status === 'new', '');
 
 // 半成品下一轮补齐后才推
 globalThis.Translator = {
@@ -180,7 +166,7 @@ check('T3 半成品补齐后补推一次', botPosts.length === 1
 // ---------- N 组：抓取时已 trans 的新卡（平台自带中文，不进翻译线） ----------
 await resetDramasCache(); await setupBot();
 botPosts.length = 0;
-rawStore.dramas = [];
+store.seedDramas([]);
 const native = { ...mk('native'), status: 'trans', titleZh: '平台中文名', descriptionZh: '平台中文简介', translatedAt: AFTER };
 await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: native });
 await sleep(300);
@@ -225,7 +211,7 @@ botPosts.length = 0;
       return { title: `中·${title}`, desc: '中文简介' };
     }
   };
-  rawStore.dramas = [mk('race')];
+  store.seedDramas([mk('race')]);
   const round = performTranslate({ source: 'manual' }); // eslint-disable-line no-undef
   for (let i = 0; i < 50 && calls < 1; i++) await sleep(10);
   const single = await chromeStub.runtime.sendMessage({ action: 'translateSingle', dramaId: 'race' });
@@ -237,7 +223,7 @@ botPosts.length = 0;
   await round;
   await sleep(600);
   check('P2 批量线随后回填同一张卡（已是 trans）不再推第二次',
-    botPosts.length === 1 && (rawStore.dramas || [])[0]?.status === 'trans', `posts=${botPosts.length}`);
+    botPosts.length === 1 && (store.dramas() || [])[0]?.status === 'trans', `posts=${botPosts.length}`);
 }
 globalThis.Translator = { async translateTitleAndDesc(title) { return { title: `中·${title}`, desc: '中文简介' }; } };
 
@@ -245,11 +231,11 @@ globalThis.Translator = { async translateTitleAndDesc(title) { return { title: `
 await resetDramasCache(); await setupBot({ enabled: false });
 botPosts.length = 0;
 globalThis.Translator = { async translateTitleAndDesc(title) { return { title: `中·${title}`, desc: '中文简介' }; } };
-rawStore.dramas = [mk('offcard')];
+store.seedDramas([mk('offcard')]);
 await runTranslateRound();
 check('O1 开关关闭时一条都不推', botPosts.length === 0, `posts=${botPosts.length}`);
 check('O2 关闭时翻译照常进行',
-  (rawStore.dramas || [])[0]?.status === 'trans', JSON.stringify(rawStore.dramas?.[0]));
+  (store.dramas() || [])[0]?.status === 'trans', JSON.stringify(store.dramas()?.[0]));
 
 // 推送失败不能影响翻译落库
 await resetDramasCache(); await setupBot();
@@ -259,11 +245,11 @@ globalThis.fetch = async (url) => {
   if (String(url) === BOT_HOOK) throw new Error('unit stub: 机器人不可达');
   throw new TypeError('unit stub: no network');
 };
-rawStore.dramas = [mk('failpush')];
+store.seedDramas([mk('failpush')]);
 await runTranslateRound();
 check('O3 推送失败不影响翻译落库',
-  (rawStore.dramas || [])[0]?.status === 'trans' && (rawStore.dramas || [])[0]?.titleZh === '中·T-failpush',
-  JSON.stringify(rawStore.dramas?.[0]));
+  (store.dramas() || [])[0]?.status === 'trans' && (store.dramas() || [])[0]?.titleZh === '中·T-failpush',
+  JSON.stringify(store.dramas()?.[0]));
 globalThis.fetch = origFetch;
 
 // ---------- Q 组：推送失败重试队列（v1.6.0，推翻 v1.5.14 的「不重试不排队」） ----------
@@ -272,7 +258,7 @@ globalThis.fetch = origFetch;
 // **不能用 setTimeout**：MV3 的 SW 空闲约 30 秒即回收，跨 1 分钟的定时器活不到，
 // 只能靠 chrome.alarms（允许的最小间隔正好 1 分钟）+ storage 持久队列。
 const RETRY_ALARM = 'larkBotRetry';
-const queueOf = () => rawStore.larkBotState?.retryQueue || [];
+const queueOf = () => store.data.larkBotState?.retryQueue || [];
 const fireRetryAlarm = async () => {
   await chromeStub.__onAlarm?.({ name: RETRY_ALARM });
   await sleep(400);
@@ -286,11 +272,11 @@ const pushTrans = async (id, over = {}) => {
 };
 
 await resetDramasCache(); await setupBot();
-botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botPosts.length = 0; alarmStore.clear(); store.seedDramas([]);
 botFailCount = 99;                                  // 一直失败
 await pushTrans('retry1');
 check('Q1 首次推送失败后进入重试队列', queueOf().length === 1
-  && queueOf()[0]?.dramaId === 'retry1', JSON.stringify(rawStore.larkBotState));
+  && queueOf()[0]?.dramaId === 'retry1', JSON.stringify(store.data.larkBotState));
 check('Q2 队列只存 id 与已失败次数，不存卡片数据',
   queueOf()[0]?.attempts === 1 && !('card' in (queueOf()[0] || {})) && !('drama' in (queueOf()[0] || {})),
   JSON.stringify(queueOf()[0]));
@@ -308,7 +294,7 @@ check('Q6 队列空即清除闹钟（否则扩展永远每分钟醒一次）',
 
 // 满 3 次重试就丢弃：总请求 = 首发 1 + 重试 3 = 4
 await resetDramasCache(); await setupBot();
-botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botPosts.length = 0; alarmStore.clear(); store.seedDramas([]);
 botFailCount = 99;
 await pushTrans('deadcard');
 for (let i = 0; i < 3; i++) await fireRetryAlarm();
@@ -322,12 +308,12 @@ check('Q9 放弃之后不再重试', botPosts.length === 0, `posts=${botPosts.le
 
 // 条目已被清理 → 直接丢弃，不白发请求
 await resetDramasCache(); await setupBot();
-botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botPosts.length = 0; alarmStore.clear(); store.seedDramas([]);
 botFailCount = 99;
 await pushTrans('gonecard');
-// 模拟「按条件清理」删掉了它：直改 rawStore 绕不过队列缓存，必须先让缓存失效
+// 模拟「按条件清理」删掉了它：直改 storage 绕不过队列缓存，必须先让缓存失效
 await resetDramasCache();
-rawStore.dramas = [];
+store.seedDramas([]);
 botPosts.length = 0;
 await fireRetryAlarm();
 check('Q10 卡已从库中删除时出队丢弃、零请求',
@@ -335,8 +321,8 @@ check('Q10 卡已从库中删除时出队丢弃、零请求',
 
 // 队列上限：防 webhook 失效时无限膨胀
 await resetDramasCache(); await setupBot();
-botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
-rawStore.larkBotState = {
+botPosts.length = 0; alarmStore.clear(); store.seedDramas([]);
+store.data.larkBotState = {
   enabledAt: ENABLED_AT,
   retryQueue: Array.from({ length: 50 }, (_, i) => ({ dramaId: `old${i}`, attempts: 1 }))
 };
@@ -349,7 +335,7 @@ check('Q11 队列上限 50，超出丢最老的',
 
 // 成功推送不该留下任何队列痕迹
 await resetDramasCache(); await setupBot();
-botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botPosts.length = 0; alarmStore.clear(); store.seedDramas([]);
 botFailCount = 0;
 await pushTrans('okcard');
 check('Q12 推送成功不入队、不建闹钟',
@@ -375,7 +361,7 @@ const retryIds = () => queueOf().map(e => `${e.dramaId}:${e.attempts}`).join(','
 const postCount = text => botPosts.filter(p => JSON.stringify(p).includes(text)).length;
 
 await resetDramasCache(); await setupBot();
-botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botPosts.length = 0; alarmStore.clear(); store.seedDramas([]);
 botFailCount = 99;
 await pushTrans('r-old');
 botFailCount = 0;
@@ -397,7 +383,7 @@ check('R1c 本轮处理过的条目照常出队（r-old 推成功一次）',
 
 // 本轮推失败的条目与期间入队的条目并存：失败的次数 +1 留在前面（入队更早），新条目排在后面
 await resetDramasCache(); await setupBot();
-botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botPosts.length = 0; alarmStore.clear(); store.seedDramas([]);
 botFailCount = 99;
 await pushTrans('r-fail');
 botFailCount = 0;
@@ -415,7 +401,7 @@ check('R2 本轮失败的条目（次数 +1）与期间新入队的条目合并�
 
 // 并发：第一轮还挂在请求上，期间入队建的闹钟又触发一轮——第二轮必须直接返回，不重复推
 await resetDramasCache(); await setupBot();
-botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botPosts.length = 0; alarmStore.clear(); store.seedDramas([]);
 botFailCount = 99;
 await pushTrans('c1');
 await pushTrans('c2');
@@ -437,17 +423,17 @@ check('R3b 全部推成功后队列清空、闹钟清除', queueOf().length === 
   `queue=${retryIds()} alarms=${[...alarmStore.keys()]}`);
 botPosts.length = 0;
 await pushTrans('c3', {});                          // 推成功，不入队
-rawStore.larkBotState = { ...rawStore.larkBotState, retryQueue: [{ dramaId: 'c3', attempts: 1 }] };
+store.data.larkBotState = { ...store.data.larkBotState, retryQueue: [{ dramaId: 'c3', attempts: 1 }] };
 await fireRetryAlarm();
 check('R3c 处理标记随收尾复位：下一次闹钟照常处理', botPosts.length === 2 && queueOf().length === 0,
   `posts=${botPosts.length} queue=${retryIds()}`);
 
 // 处理期间同一张卡被重新入队（attempts 回到 1，与开轮值不同）：按新条目保留，并顶掉本轮给它留的旧重试
 await resetDramasCache(); await setupBot();
-botPosts.length = 0; alarmStore.clear(); rawStore.dramas = [];
+botPosts.length = 0; alarmStore.clear(); store.seedDramas([]);
 botFailCount = 0;
 await pushTrans('e1');
-rawStore.larkBotState = { ...rawStore.larkBotState, retryQueue: [{ dramaId: 'e1', attempts: 2 }] };
+store.data.larkBotState = { ...store.data.larkBotState, retryQueue: [{ dramaId: 'e1', attempts: 2 }] };
 {
   const gate = armGate();
   const run = startRetryRun();
@@ -467,7 +453,7 @@ await resetDramasCache(); await setupBot();
 botPosts.length = 0; botPostTimes.length = 0; alarmStore.clear();
 botFailCount = 0;
 globalThis.Translator = { async translateTitleAndDesc(title) { return { title: `中·${title}`, desc: '中文简介' }; } };
-rawStore.dramas = [mk('thr1'), mk('thr2'), mk('thr3')];
+store.seedDramas([mk('thr1'), mk('thr2'), mk('thr3')]);
 await runTranslateRound();
 const gaps = botPostTimes.slice(1).map((t, i) => t - botPostTimes[i]);
 check('S1 同批多条推送之间有节流间隔（≥240ms，即 ≤4 次/秒）',
@@ -488,8 +474,8 @@ const nowIso = () => new Date().toISOString();
 const mkSub = (id, source, sub, over = {}) => mk(id, { source, sourceListUrl: sub, scrapedAt: nowIso(), ...over });
 const mkNative = (id, source, sub, zh) => ({ ...mkSub(id, source, sub), status: 'trans', titleZh: zh, descriptionZh: '中文简介', translatedAt: nowIso() });
 const mkOldTrans = (id, source, sub, over = {}) => mkSub(id, source, sub, { status: 'trans', titleZh: '有', descriptionZh: '有', translatedAt: AFTER, ...over });
-const baselineOf = url => rawStore.larkBotState?.urlBaseline?.[url];
-const transCount = pred => (rawStore.dramas || []).filter(d => pred(d) && d.status === 'trans').length;
+const baselineOf = url => store.data.larkBotState?.urlBaseline?.[url];
+const transCount = pred => (store.dramas() || []).filter(d => pred(d) && d.status === 'trans').length;
 const posted = text => botPosts.some(p => JSON.stringify(p).includes(text));
 // 抓取桩按 URL 回放：模拟内容脚本在本轮期间把该订阅页的卡片经 saveDrama 入库
 let fakeSavesByUrl = {};
@@ -500,14 +486,14 @@ globalThis.scrapeUrlInTab = async (url) => {
 };
 const setupSubs = async (dramas) => {
   await resetDramasCache(); await setupBot();
-  rawStore.urlTags = [
+  store.data.urlTags = [
     { urlPattern: SUB, tags: ['T'] },
     { urlPattern: IMDB_A, tags: ['IMDB', 'drama'] },
     { urlPattern: IMDB_B, tags: ['IMDB', 'MyDrama'] },
     { urlPattern: FR_SUB, tags: ['FlickReels', 'HotPicks'] },
     { urlPattern: NS_SUB, tags: ['NetShort', 'Trending'] }
   ];
-  rawStore.dramas = dramas;
+  store.seedDramas(dramas);
   botPosts.length = 0;
 };
 
@@ -525,8 +511,8 @@ check('B1 同站新订阅 URL 首轮：入库即 trans 的卡不推（进行中�
   botPosts.length === 1 && posted('老订阅平台中文') && !posted('新订阅平台中文'), `posts=${botPosts.length}`);
 check('B2 收轮时新订阅 URL 基线定在完成时刻（ISO，不早于开轮）',
   typeof baselineOf(IMDB_B) === 'string' && baselineOf(IMDB_B) !== 'pending' && baselineOf(IMDB_B) >= runStart, String(baselineOf(IMDB_B)));
-check('B3 库里已有卡的订阅 URL 不设基线（同站不连坐）', baselineOf(IMDB_A) === undefined, JSON.stringify(rawStore.larkBotState?.urlBaseline));
-check('B3b 全局水位线不受影响', rawStore.larkBotState?.enabledAt === ENABLED_AT, String(rawStore.larkBotState?.enabledAt));
+check('B3 库里已有卡的订阅 URL 不设基线（同站不连坐）', baselineOf(IMDB_A) === undefined, JSON.stringify(store.data.larkBotState?.urlBaseline));
+check('B3b 全局水位线不受影响', store.data.larkBotState?.enabledAt === ENABLED_AT, String(store.data.larkBotState?.enabledAt));
 
 botPosts.length = 0;
 await runTranslateRound();
@@ -570,38 +556,38 @@ check('B8 老订阅 URL 本轮入库即 trans 的卡照常推、不设基线', b
 
 // SW 中途被回收会留下「进行中」：下一轮含该 URL 的收轮时收口成时间戳；但只碰本轮 URL——
 // 弹窗单站刷新传的是过滤后的列表，别站遗留的 pending 原样保留、零条的别站 URL 也不被标记
-rawStore.larkBotState = { ...rawStore.larkBotState, urlBaseline: { ...(rawStore.larkBotState?.urlBaseline || {}), [FR_SUB]: 'pending', [IMDB_B]: 'pending' } };
+store.data.larkBotState = { ...store.data.larkBotState, urlBaseline: { ...(store.data.larkBotState?.urlBaseline || {}), [FR_SUB]: 'pending', [IMDB_B]: 'pending' } };
 fakeSavesByUrl = {};
 await performScrapeOnce({ site: 'flickreels' });   // eslint-disable-line no-undef
 check('B9 遗留的「进行中」在下一轮收轮时收口为时间戳', typeof baselineOf(FR_SUB) === 'string' && baselineOf(FR_SUB) !== 'pending', String(baselineOf(FR_SUB)));
 check('B9b 单站刷新只碰本轮 URL：别站遗留 pending 原样保留、零条的别站 URL 不被标记',
-  baselineOf(IMDB_B) === 'pending' && baselineOf(IMDB_A) === undefined, JSON.stringify(rawStore.larkBotState?.urlBaseline));
+  baselineOf(IMDB_B) === 'pending' && baselineOf(IMDB_A) === undefined, JSON.stringify(store.data.larkBotState?.urlBaseline));
 
 // —— 尾斜杠归一（UrlMatch.normalizeListUrl，与订阅归属判定同口径）双向
 const RS_CFG = 'https://www.reelshort.com/';    // 手写配置带尾斜杠
 const RS_STORED = 'https://www.reelshort.com';  // 库中卡 sourceListUrl 不带
 await setupSubs([mkOldTrans('rs-existing', 'reelshort', RS_STORED)]);
-rawStore.urlTags.push({ urlPattern: RS_CFG, tags: ['ReelShort'] });
+store.data.urlTags.push({ urlPattern: RS_CFG, tags: ['ReelShort'] });
 fakeSavesByUrl = { [RS_CFG]: [mkNative('rs-native', 'reelshort', RS_CFG, '老订阅斜杠差异')] };
 await performScrapeOnce({ site: 'reelshort' });   // eslint-disable-line no-undef
 await sleep(300);
 check('B10 配置带尾斜杠、库中卡不带：仍算已有卡，不被误当首轮静音、不设基线',
   botPosts.length === 1 && baselineOf(RS_STORED) === undefined && baselineOf(RS_CFG) === undefined,
-  `posts=${botPosts.length} ${JSON.stringify(rawStore.larkBotState?.urlBaseline)}`);
+  `posts=${botPosts.length} ${JSON.stringify(store.data.larkBotState?.urlBaseline)}`);
 const DS_CFG = 'https://dramashorts.io/';
 const DS_STORED = 'https://dramashorts.io';
-rawStore.urlTags.push({ urlPattern: DS_CFG, tags: ['DramaShorts'] });
+store.data.urlTags.push({ urlPattern: DS_CFG, tags: ['DramaShorts'] });
 botPosts.length = 0;
 fakeSavesByUrl = { [DS_CFG]: [mkNative('ds-native', 'dramashorts', DS_STORED, '新订阅斜杠差异')] };
 await performScrapeOnce({ site: 'dramashorts' });   // eslint-disable-line no-undef
 await sleep(300);
 check('B11 新订阅带尾斜杠、卡片 sourceListUrl 不带：基线按归一键存、首轮照样拦住',
   botPosts.length === 0 && typeof baselineOf(DS_STORED) === 'string' && baselineOf(DS_STORED) !== 'pending' && baselineOf(DS_CFG) === undefined,
-  `posts=${botPosts.length} ${JSON.stringify(rawStore.larkBotState?.urlBaseline)}`);
+  `posts=${botPosts.length} ${JSON.stringify(store.data.larkBotState?.urlBaseline)}`);
 
 // —— 无 sourceListUrl 的卡（理论形态：content.js 一律写订阅 URL、订阅外清理也会删它）不受基线约束
 botPosts.length = 0;
-rawStore.larkBotState = { ...rawStore.larkBotState, urlBaseline: { ...(rawStore.larkBotState?.urlBaseline || {}), [NS_SUB]: 'pending' } };
+store.data.larkBotState = { ...store.data.larkBotState, urlBaseline: { ...(store.data.larkBotState?.urlBaseline || {}), [NS_SUB]: 'pending' } };
 const orphan = mkNative('orphan', 'netshort', NS_SUB, '无归属卡');
 delete orphan.sourceListUrl;
 await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: orphan });
@@ -617,12 +603,12 @@ await setupSubs([
   mkOldTrans('fr-old-trans', 'flickreels', FR_SUB, { scrapedAt: '2026-09-16T21:50:00.000Z' }),
   mkSub('fr-old-new', 'flickreels', FR_SUB, { scrapedAt: '2026-09-16T21:51:00.000Z' })   // 首轮抓到、尚未翻完
 ]);
-rawStore.larkBotState = { enabledAt: ENABLED_AT, siteBaseline: { flickreels: LEGACY_AT } };
+store.data.larkBotState = { enabledAt: ENABLED_AT, siteBaseline: { flickreels: LEGACY_AT } };
 fakeSavesByUrl = {};
 await performScrapeOnce({ site: 'netshort' });   // eslint-disable-line no-undef
 check('B13 遗留站点基线折进该站所有订阅 URL 后删除 siteBaseline 键',
-  baselineOf(FR_SUB) === LEGACY_AT && !('siteBaseline' in (rawStore.larkBotState || {})) && rawStore.larkBotState?.enabledAt === ENABLED_AT,
-  JSON.stringify(rawStore.larkBotState));
+  baselineOf(FR_SUB) === LEGACY_AT && !('siteBaseline' in (store.data.larkBotState || {})) && store.data.larkBotState?.enabledAt === ENABLED_AT,
+  JSON.stringify(store.data.larkBotState));
 botPosts.length = 0;
 await runTranslateRound();
 check('B14 首轮遗留未翻完的卡翻完仍不推（scrapedAt 早于继承的基线）', botPosts.length === 0 && transCount(d => d.id === 'fr-old-new') === 1,

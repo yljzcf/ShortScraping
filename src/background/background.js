@@ -1436,6 +1436,16 @@ function buildTranslateBatches(dramas, maxItems) {
 }
 
 /**
+ * 读取并归一化翻译配置，供调用 Translator 时作尾参注入（translator.js 不再自己读 storage）。
+ * 翻译轮每批开头读一次、单卡 🌍 每次读一次：改了密钥 / 端点 / 模型 / 提示词，下一批即生效，
+ * 与 translator 此前每次调用自读 storage 的新鲜度一致。
+ */
+async function readTranslateConfig() {
+  const { translateConfig } = await chrome.storage.local.get('translateConfig');
+  return TranslateConfig.normalizeConfig(translateConfig);
+}
+
+/**
  * 翻译轮实现。运行状态持久化到 translateRunState（弹窗按钮由它驱动）：
  * 非空轮 running:true → 每条进度（兼 SW 保活心跳）→ finally 终态；
  * 空扫描仅手动触发时写一次终态（弹窗等着收尾信号），
@@ -1597,6 +1607,19 @@ async function performTranslateOnce(source) {
 
     const mode = config.translateMode;
 
+    // 每批开头重读一次配置、作尾参传给 Translator（见 readTranslateConfig）。读到的模式与本轮
+    // 开头选定的不同就提前结束本轮：分批、拆单重试、传输失败的归因都按本轮模式搭好了，剩下的
+    // 留给下一轮按新模式重扫。此前 translator 每次调用自读 storage，中途改成 API 模式时，AI
+    // 分支里的 translateBatchAI 会落进它自己的逐条分支，与这一轮的分支对不上
+    let modeChanged = false;
+    const readBatchConfig = async () => {
+      const latest = await readTranslateConfig();
+      if (latest.translateMode === mode) return latest;
+      modeChanged = true;
+      console.warn(`[ShortScraping] 翻译模式在本轮中途改成了 ${latest.translateMode}，本轮提前结束，剩下的下一轮按新模式翻译`);
+      return null;
+    };
+
     if (mode === 'ai') {
       // AI 模式：按内容长度动态打包（1–10 条/批），一次请求译多条，明显减少请求数
       const maxItems = Math.min(10, Math.max(1, Number(config.batchSize) || 10));
@@ -1605,10 +1628,12 @@ async function performTranslateOnce(source) {
 
       for (const chunk of batches) {
         if (aborted) break;
+        const batchConfig = await readBatchConfig();
+        if (!batchConfig) break;
         let results = null;
         let batchError = null;
         try {
-          results = (await Translator.translateBatchAI(chunk.map(toItem))).map(keepChineseTranslation);
+          results = (await Translator.translateBatchAI(chunk.map(toItem), batchConfig)).map(keepChineseTranslation);
         } catch (e) {
           batchError = e;
         }
@@ -1623,7 +1648,7 @@ async function performTranslateOnce(source) {
           for (const drama of chunk) {
             if (aborted) break;
             try {
-              const [single] = await Translator.translateBatchAI([toItem(drama)]);
+              const [single] = await Translator.translateBatchAI([toItem(drama)], batchConfig);
               const result = keepChineseTranslation(single);
               if (result.title || result.desc) {
                 await applyOne(drama, result);
@@ -1660,9 +1685,11 @@ async function performTranslateOnce(source) {
       // API 模式（MyMemory 等）无批量端点，保持逐条翻译
       for (const drama of newDramas) {
         if (aborted) break;
+        const batchConfig = await readBatchConfig(); // 逐条翻译，一条即一批
+        if (!batchConfig) break;
         let raw;
         try {
-          raw = await Translator.translateTitleAndDesc(drama.title, drama.description);
+          raw = await Translator.translateTitleAndDesc(drama.title, drama.description, batchConfig);
         } catch (e) {
           console.warn(`[ShortScraping] 翻译失败: ${drama.title}`, e);
           raw = { title: '', desc: '', transportError: e?.message || String(e) };
@@ -1698,6 +1725,12 @@ async function performTranslateOnce(source) {
     if (aborted) {
       runError = `连续 ${TRANSLATE_ABORT_AFTER_FAILURES} 次翻译请求失败，本轮提前结束：${lastError || '模型未给出译文'}`;
       return { pendingCount, translatedCount, error: runError, aborted: true };
+    }
+
+    // 第一批开头就读到模式变了、一条都还没试：不是接口或配置出错，不报下面的「检查配置」，
+    // 待翻译的留给下一轮（抓取后翻译线照常起下一轮）
+    if (modeChanged && processedCount === 0) {
+      return { pendingCount, translatedCount };
     }
 
     // 有待翻译却一条译文都没写进去＝接口/配置有问题：把错误写进 summary，
@@ -1818,8 +1851,10 @@ async function handleTranslateSingle(dramaId) {
   // 单卡请求最长也要等满 requestTimeoutSec（默认 60s），同批量线一样保活
   const stopKeepAlive = startSwKeepAlive();
   try {
+    // 配置每次现读（translator 不再自己读 storage）：设置页刚改的密钥 / 模式，下一次 🌍 即生效
+    const config = await readTranslateConfig();
     // 语言守卫与批量线同口径：模型回显英文不得覆盖既有中文译名
-    const result = keepChineseTranslation(await Translator.translateTitleAndDesc(drama.title, drama.description));
+    const result = keepChineseTranslation(await Translator.translateTitleAndDesc(drama.title, drama.description, config));
     if (!result.title && !result.desc) {
       return { success: false, error: '翻译结果为空，请检查翻译接口配置或控制台错误' };
     }

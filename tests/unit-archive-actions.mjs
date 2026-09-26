@@ -1,83 +1,33 @@
 import './bootstrap.cjs';
 // B2 回归测试：importDramas 合并导入与 pruneDramas 条件清理（单写者队列内执行）。
 // 用法：node tests/unit-archive-actions.mjs（B2 实现前跑应无此消息接口 RED）
-import fs from 'node:fs';
-
-const rawStore = {};
-const listeners = { runtimeMessage: [] };
-let failNextSet = false;
-
-function pickKeys(keys) {
-  const wanted = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys ?? rawStore);
-  const out = {};
-  for (const k of wanted) if (k in rawStore) out[k] = structuredClone(rawStore[k]);
-  return out;
-}
-
-globalThis.chrome = {
-  storage: {
-    local: {
-      async get(keys) { await Promise.resolve(); return pickKeys(keys); },
-      async set(obj) {
-        if (failNextSet) { failNextSet = false; throw new Error('unit stub: 注入的 set 失败'); }
-        await Promise.resolve();
-        for (const [k, v] of Object.entries(obj)) rawStore[k] = structuredClone(v);
-      }
-    },
-    onChanged: { addListener() {} }
-  },
-  runtime: {
-    id: 'unit-test',
-    getURL: p => `chrome-extension://unit-test/${p}`,
-    onInstalled: { addListener() {} },
-    onStartup: { addListener() {} },
-    onMessage: { addListener(fn) { listeners.runtimeMessage.push(fn); } },
-    sendMessage(message, callback) {
-      const deliver = new Promise((resolve) => {
-        let settled = false;
-        const sendResponse = (resp) => { if (!settled) { settled = true; resolve(resp); } };
-        let keepOpen = false;
-        for (const fn of listeners.runtimeMessage) {
-          if (fn(message, { id: 'unit-test', url: 'chrome-extension://unit-test/src/popup/popup.html' }, sendResponse) === true) keepOpen = true;
-        }
-        if (!keepOpen && !settled) { settled = true; resolve(undefined); }
-      });
-      if (typeof callback === 'function') { deliver.then(callback); return; }
-      return deliver;
-    }
-  },
-  alarms: { async get() { return undefined; }, async clear() { return true; }, create() {}, onAlarm: { addListener() {} } },
-  tabs: { create() {}, remove() {}, onUpdated: { addListener() {}, removeListener() {} } },
-  notifications: { create() {} },
-  scripting: { async executeScript() { return []; } }
-};
-globalThis.importScripts = () => {};
+// v1.6.20：手搓的 chrome 桩换成 background-fixture（storage 走共用的 storage-stub）。
+import { background } from './background-fixture.mjs';
 
 const SUB = 'https://unit.test/list';
-globalThis.fetch = async (url) => {
-  if (String(url).includes('tag.json')) return { ok: true, json: async () => [{ url: SUB, tags: ['T'] }] };
-  throw new TypeError('unit stub: no network');
-};
-globalThis.Translator = { async translateTitleAndDesc() { return { title: '', desc: '' }; } };
+// 弹窗发送方（不带 tab）：沿用迁移前手搓桩的口径，后台 isExtensionPageSender 放行
+const POPUP_SENDER = { id: 'fixture', url: 'chrome-extension://fixture/src/popup/popup.html' };
 
-const origLog = console.log, origWarn = console.warn, origError = console.error;
-console.log = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origLog(...a); };
-console.warn = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origWarn(...a); };
-console.error = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origError(...a); };
-
-for (const rel of ['../src/shared/url-match.js', '../src/shared/site-registry.js', '../src/shared/timeline-csv.js', '../src/shared/schedule-config.js', '../src/shared/lark.js']) {
-  (0, eval)(fs.readFileSync(new URL(rel, import.meta.url), 'utf8'));
-}
-rawStore.dramas = [];
-rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
-(0, eval)(fs.readFileSync(new URL('../src/background/background.js', import.meta.url), 'utf8'));
+// 真定时器：顶层初始化与 CSV 防抖等靠真时间走完；tick:1 保持手搓桩「先让一拍再读写」的时序。
+// 外网只放行 tag.json（订阅＝SUB），其余一律拒（与迁移前同口径）；翻译不在本套件范围，
+// 注入空结果的 Translator 替身（fixture 随之不加载真实 translator.js）
+const bg = await background({
+  data: { urlTags: [{ urlPattern: SUB, tags: ['T'] }] },
+  dramas: [],
+  translator: { async translateTitleAndDesc() { return { title: '', desc: '' }; } },
+  timers: 'real',
+  storage: { tick: 1 },
+  fetch: url => (String(url).includes('tag.json')
+    ? { ok: true, json: async () => [{ url: SUB, tags: ['T'] }] }
+    : Promise.reject(new TypeError('unit stub: no network')))
+});
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 await sleep(700);
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
-const send = (msg) => chrome.runtime.sendMessage(msg);
+const send = (msg) => bg.send(msg, POPUP_SENDER);
 const iso = (d) => `2026-07-${String(d).padStart(2, '0')}T12:00:00.000Z`;
 const mk = (n, over = {}) => ({
   id: `id-${n}`, itemId: `tt${String(n).padStart(4, '0')}`, title: `Title ${n}`,
@@ -102,7 +52,7 @@ await send({ action: 'saveDrama', drama: mk(2, { scrapedAt: iso(15), source: 'st
   ];
   const r = await send({ action: 'importDramas', dramas: payload });
   check('T1a 四分类计数正确', r.success === true && r.added === 3 && r.duplicates === 2 && r.outOfScope === 1 && r.invalid === 1 && r.total === 7, JSON.stringify(r));
-  const dramas = rawStore.dramas;
+  const dramas = bg.dramas();
   check('T1b 库内条数 2+3', dramas.length === 5, `len=${dramas.length}`);
   const t5 = dramas.find(d => d.itemId === 'tt0005');
   const t6 = dramas.find(d => d.itemId === 'tt0006');
@@ -119,17 +69,17 @@ await send({ action: 'saveDrama', drama: mk(2, { scrapedAt: iso(15), source: 'st
   const preview = await send({ action: 'pruneDramas', sites: ['imdb'], beforeIso: iso(19), dryRun: true });
   // imdb 卡：tt0005(25 日)、tt0001(20 日)、tt0003(18 日)、tt0006(无时间保守不命中) → 早于 19 日的只有 tt0003
   check('T2a dryRun 命中数与分站计数', preview.success === true && preview.matched === 1 && preview.perSite.imdb === 1, JSON.stringify(preview));
-  check('T2b dryRun 不动数据', rawStore.dramas.length === 5, `len=${rawStore.dramas.length}`);
+  check('T2b dryRun 不动数据', bg.dramas().length === 5, `len=${bg.dramas().length}`);
   const real = await send({ action: 'pruneDramas', sites: ['imdb'], beforeIso: iso(19), previewToken: preview.previewToken });
-  check('T2c 真删数＝预览数', real.success === true && real.removed === 1 && rawStore.dramas.length === 4, JSON.stringify(real));
-  check('T2d 无 scrapedAt 条目带日期条件时保守保留', rawStore.dramas.some(d => d.itemId === 'tt0006'), '');
+  check('T2c 真删数＝预览数', real.success === true && real.removed === 1 && bg.dramas().length === 4, JSON.stringify(real));
+  check('T2d 无 scrapedAt 条目带日期条件时保守保留', bg.dramas().some(d => d.itemId === 'tt0006'), '');
 }
 
 // ---------- T3 清理：仅站点（无日期）与入参校验 ----------
 {
   const steamPreview = await send({ action: 'pruneDramas', sites: ['steam'], dryRun: true });
   const bySite = await send({ action: 'pruneDramas', sites: ['steam'], previewToken: steamPreview.previewToken });
-  check('T3a 仅站点条件清理（含无 scrapedAt 也命中语义的对照）', bySite.removed === 1 && !rawStore.dramas.some(d => d.source === 'steam'), JSON.stringify(bySite));
+  check('T3a 仅站点条件清理（含无 scrapedAt 也命中语义的对照）', bySite.removed === 1 && !bg.dramas().some(d => d.source === 'steam'), JSON.stringify(bySite));
   const empty = await send({ action: 'pruneDramas', sites: [] });
   check('T3b 空 sites 拒绝', empty.success === false && /未指定/.test(empty.error), JSON.stringify(empty));
   const bad = await send({ action: 'pruneDramas', sites: ['unknown-site'] });
@@ -142,18 +92,18 @@ await send({ action: 'saveDrama', drama: mk(2, { scrapedAt: iso(15), source: 'st
 
 // ---------- T4 导入与 saveDrama 并发交错不丢卡（同队列串行） ----------
 {
-  const before = rawStore.dramas.length;
+  const before = bg.dramas().length;
   const pImport = send({ action: 'importDramas', dramas: [mk(7, { scrapedAt: iso(1) }), mk(8, { scrapedAt: iso(2) })] });
   const pSave = send({ action: 'saveDrama', drama: mk(9, { scrapedAt: iso(3) }) });
   const [ri, rs] = await Promise.all([pImport, pSave]);
-  check('T4 交错执行不丢卡', ri.added === 2 && rs.saved === true && rawStore.dramas.length === before + 3, `len=${rawStore.dramas.length}`);
+  check('T4 交错执行不丢卡', ri.added === 2 && rs.saved === true && bg.dramas().length === before + 3, `len=${bg.dramas().length}`);
 }
 
 // ---------- T5 导入补上逐条可判定的一次性迁移（审查 import-bypasses-oneshot-migrations） ----------
 // 一次性迁移都挂完成标记，导入时不会重跑：旧备份里修复前的形态原样入库、且永远不再被修。
 {
-  const before = rawStore.dramas.length;
-  rawStore.shorticalCanonicalIdsMigrated = true;
+  const before = bg.dramas().length;
+  bg.storage.seed({ shorticalCanonicalIdsMigrated: true });
   const r = await send({ action: 'importDramas', dramas: [
     mk(20, { itemId: 'rr20', source: 'royalroad', tags: ['T', 'RR'] }),                     // 旧显示标签
     mk(21, { itemId: 'mdf-orphan-slug', source: 'mydrama' }),                               // fandom 未映射临时键
@@ -161,10 +111,10 @@ await send({ action: 'saveDrama', drama: mk(2, { scrapedAt: iso(15), source: 'st
     mk(23, { itemId: 'st23', source: 'steam', titleZh: '탈출! 인연의 집', descriptionZh: '中文简介' }), // 非中文译名
     mk(24, { itemId: 'st24', source: 'steam', titleZh: '官方中文名' })                        // 正常中文译名
   ] });
-  const byItem = Object.fromEntries(rawStore.dramas.map(d => [d.itemId, d]));
+  const byItem = Object.fromEntries(bg.dramas().map(d => [d.itemId, d]));
   check('T5a fandom 未映射临时键跳过并计入 invalid',
     r.success === true && r.added === 3 && r.invalid === 2 && !byItem['mdf-orphan-slug'] && !byItem['rsf-some-title']
-    && rawStore.dramas.length === before + 3, JSON.stringify(r));
+    && bg.dramas().length === before + 3, JSON.stringify(r));
   check('T5b RR 显示标签改为 RoyalRoad（与 migrateLegacyTags 同口径）',
     JSON.stringify(byItem.rr20?.tags) === JSON.stringify(['T', 'RoyalRoad']), JSON.stringify(byItem.rr20?.tags));
   check('T5c 不含汉字的 titleZh 清空并退回 new（简介保留）',
@@ -172,19 +122,18 @@ await send({ action: 'saveDrama', drama: mk(2, { scrapedAt: iso(15), source: 'st
     JSON.stringify(byItem.st23));
   check('T5d 正常中文译名不被误动', byItem.st24?.status === 'trans' && byItem.st24?.titleZh === '官方中文名',
     JSON.stringify(byItem.st24));
-  check('T5e 没导入 Shortical 条目时不碰其迁移标记', rawStore.shorticalCanonicalIdsMigrated === true,
-    String(rawStore.shorticalCanonicalIdsMigrated));
+  check('T5e 没导入 Shortical 条目时不碰其迁移标记', bg.data.shorticalCanonicalIdsMigrated === true,
+    String(bg.data.shorticalCanonicalIdsMigrated));
 
   // 旧 Shortical 条目的 href 号 id 与库里的规范 id 不相等，会作为新卡加入：清完成标记，下次唤醒重跑规范 id 迁移
   const rs = await send({ action: 'importDramas', dramas: [
     mk(25, { itemId: 'sc2200', source: 'shortical', url: 'https://shortical.com/drama/bound-by-fire-2200' })
   ] });
   check('T5f 导入 Shortical 条目 → shorticalCanonicalIdsMigrated 清为 false（下次唤醒重跑迁移）',
-    rs.added === 1 && rawStore.shorticalCanonicalIdsMigrated === false
-    && rawStore.dramas.some(d => d.itemId === 'sc2200'), JSON.stringify({ rs, flag: rawStore.shorticalCanonicalIdsMigrated }));
+    rs.added === 1 && bg.data.shorticalCanonicalIdsMigrated === false
+    && bg.dramas().some(d => d.itemId === 'sc2200'), JSON.stringify({ rs, flag: bg.data.shorticalCanonicalIdsMigrated }));
 }
 
-console.log = origLog; console.warn = origWarn; console.error = origError;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

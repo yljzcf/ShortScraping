@@ -6,72 +6,30 @@ import './bootstrap.cjs';
 //   日志打不开 / 派生失败时回 500、旧实例不退出；launchd 拉起却撞上前台实例占端口时以 0 退出，免得崩溃循环；
 //   已设开机自启（LaunchAgent 已加载）时 npm run sync 提示改用 npm run restart 后退出，不另起前台实例（仅 darwin）；
 //   端口只认 SHORTSCRAPING_PORT：shell 里的通用 PORT 不再把服务带到扩展连不上的端口、也绕不过上面的守卫。
-// 隔离方式沿用 unit-server-safety：复制到 os.tmpdir() 隔离树、随机端口，不碰真实 31919 与 db/；
-// SHORTSCRAPING_LOG_FILE 指到隔离树，不写用户的 ~/Library/Logs。
+// 隔离方式：tests/server-fixture.mjs 的 os.tmpdir() 隔离树、随机端口，不碰真实 31919 与 db/；
+// SHORTSCRAPING_LOG_FILE 指到隔离树（夹具默认），不写用户的 ~/Library/Logs。
+// 多实例轮流占同一端口，所以只用夹具的 tree / launch / 探针，不用 startIsolatedServer。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
-import { SUB } from './background-fixture.mjs';
-import { freePort } from './free-port.mjs';
+import {
+  SERVER_ARGS, PROBE_EXIT, freePort, makeIsolatedTree, launch, health as healthAt, waitFor, alive, httpClient, terminate, probeStartup
+} from './server-fixture.mjs';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'shortscraping-restart-'));
-for (const rel of ['server', 'src/shared', 'config', 'db']) fs.mkdirSync(path.join(directory, rel), { recursive: true });
-fs.copyFileSync(path.join(root, 'server/sync-server.js'), path.join(directory, 'server/sync-server.js'));
-for (const file of fs.readdirSync(path.join(root, 'src/shared'))) fs.copyFileSync(path.join(root, 'src/shared', file), path.join(directory, 'src/shared', file));
-fs.writeFileSync(path.join(directory, 'config/tag.json'), JSON.stringify([{ url: SUB, tags: ['IMDB'] }]));
-const logFile = path.join(directory, 'logs/sync.log'); // 目录故意不预建：服务端要自己 mkdir -p
+const tree = makeIsolatedTree({ prefix: 'shortscraping-restart-' }); // config/tag.json 用夹具默认的 SUB → IMDB
+const directory = tree.dir;
+const logFile = tree.logFile; // 隔离树里的 logs/sync.log，目录故意不预建：服务端要自己 mkdir -p
 
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function start(extraEnv) {
-  const env = { ...process.env, SHORTSCRAPING_PORT: String(port), XPC_SERVICE_NAME: '', SHORTSCRAPING_LOG_FILE: logFile, ...extraEnv };
-  const child = spawn(process.execPath, ['server/sync-server.js', '--local-only'], {
-    cwd: directory, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
-  });
-  child.output = '';
-  child.stdout.on('data', chunk => { child.output += chunk; });
-  child.stderr.on('data', chunk => { child.output += chunk; });
-  return child;
-}
-
-async function health() {
-  try {
-    const response = await fetch(base + '/health', { signal: AbortSignal.timeout(1000) });
-    return await response.json();
-  } catch (_) {
-    return null;
-  }
-}
-
-async function waitFor(predicate, timeoutMs, label) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await predicate();
-    if (value) return value;
-    if (Date.now() > deadline) throw new Error(`等待超时：${label}`);
-    await sleep(100);
-  }
-}
-
-// 按进程判活而不是看 /health 无响应：fetch 复用的 keep-alive 连接在 server.close() 之后
-// 仍会被退出中的旧进程应答，/health 会在 null 与旧进程之间来回跳
-function alive(pid) {
-  try { process.kill(pid, 0); return true; } catch (_) { return false; }
-}
-
-async function post(route) {
-  const response = await fetch(base + route, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(3000)
-  });
-  return { status: response.status, body: await response.json() };
-}
+// 夹具钉死 SHORTSCRAPING_PORT、XPC_SERVICE_NAME=''、SHORTSCRAPING_LOG_FILE；extraEnv 按用例覆盖
+const start = extraEnv => launch(tree, SERVER_ARGS, { port, env: extraEnv });
+const health = () => healthAt(base);
+const client = httpClient(base);
+const post = route => client.post(route, {});
 
 const children = [];
 let respawnedPid = null;
@@ -156,17 +114,13 @@ try {
   await foregroundExit;
 
   // —— 端口只认专用的 SHORTSCRAPING_PORT：shell 里给别的项目 export 的通用 PORT 不再被继承 ——
-  // 预加载把 listen 换成「打印端口后以 42 退出」：落到默认端口的那一例也绝不会真去监听本机 31919
-  const recordListen = path.join(directory, 'record-listen.cjs');
-  fs.writeFileSync(recordListen, "require('net').Server.prototype.listen = function (p) { console.log('LISTEN:' + p); process.exit(42); };\n");
-  const portEnv = { ...process.env, XPC_SERVICE_NAME: '', SHORTSCRAPING_LOG_FILE: logFile, SHORTSCRAPING_NO_LAUNCHD: '1' };
-  for (const key of ['PORT', 'SHORTSCRAPING_PORT', 'SHORTSCRAPING_WAIT_PORT']) delete portEnv[key];
+  // 夹具的启动探针把 listen 换成「打印端口后以 42 退出」：落到默认端口的那一例也绝不会真去监听本机 31919
   const listenPort = extra => {
-    const run = spawnSync(process.execPath, ['-r', recordListen, 'server/sync-server.js', '--local-only'], {
-      cwd: directory, env: { ...portEnv, ...extra }, encoding: 'utf8', timeout: 10000
+    const run = probeStartup(tree, {
+      env: { SHORTSCRAPING_NO_LAUNCHD: '1', ...extra }, unset: ['PORT', 'SHORTSCRAPING_PORT', 'SHORTSCRAPING_WAIT_PORT']
     });
-    assert.equal(run.status, 42, run.stdout + run.stderr);
-    return Number(/LISTEN:(\d+)/.exec(run.stdout)?.[1]);
+    assert.equal(run.status, PROBE_EXIT, run.stdout + run.stderr);
+    return run.port;
   };
   assert.equal(listenPort({ PORT: String(port) }), 31919); // 旧实现会跑到 PORT 指定的端口，扩展连不上
   assert.equal(listenPort({ SHORTSCRAPING_PORT: String(port) }), port);
@@ -176,18 +130,16 @@ try {
 
   // —— 已设开机自启时拒绝另起前台实例：只在 darwin + 默认端口下探测 launchctl ——
   // 探测目标是默认端口，也就是本机真实的 31919：launchctl 换成 PATH 前置的假脚本（不碰本机真实的
-  // LaunchAgent），再预加载把 listen 换成直接以 42 退出——守卫失效也绝不会真去监听
+  // LaunchAgent），再用夹具的启动探针拦下 listen（以 42 退出）——守卫失效也绝不会真去监听
   if (process.platform === 'darwin') {
     const fakeBin = path.join(directory, 'fake-bin');
     fs.mkdirSync(fakeBin);
     fs.writeFileSync(path.join(fakeBin, 'launchctl'),
       '#!/bin/sh\n[ "$1" = print ] && [ "${2##*/}" = com.shortscraping.sync ] && exit 0\nexit 1\n', { mode: 0o755 });
-    const noListen = path.join(directory, 'no-listen.cjs');
-    fs.writeFileSync(noListen, "require('net').Server.prototype.listen = function () { process.exit(42); };\n");
-    const guardEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, XPC_SERVICE_NAME: '', SHORTSCRAPING_LOG_FILE: logFile };
-    for (const key of ['PORT', 'SHORTSCRAPING_PORT', 'SHORTSCRAPING_WAIT_PORT', 'SHORTSCRAPING_NO_LAUNCHD']) delete guardEnv[key];
-    const runGuarded = extra => spawnSync(process.execPath, ['-r', noListen, 'server/sync-server.js', '--local-only'], {
-      cwd: directory, env: { ...guardEnv, ...extra }, encoding: 'utf8', timeout: 10000
+    // 外层环境若带着 SHORTSCRAPING_NO_LAUNCHD 也一并删：这里测的正是没有逃生口时的守卫
+    const runGuarded = extra => probeStartup(tree, {
+      env: { PATH: `${fakeBin}:${process.env.PATH}`, ...extra },
+      unset: ['PORT', 'SHORTSCRAPING_PORT', 'SHORTSCRAPING_WAIT_PORT', 'SHORTSCRAPING_NO_LAUNCHD']
     });
     const refusedStart = runGuarded({});
     assert.equal(refusedStart.status, 1, refusedStart.stdout + refusedStart.stderr);
@@ -211,13 +163,10 @@ try {
 
   console.log('Server restart (respawn + launchd + log file + port clash + autostart guard) checks passed');
 } finally {
-  for (const child of children) {
-    if (child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, 'exit'); child.kill(); await exited;
-    }
-  }
+  for (const child of children) await terminate(child);
+  // 🔄 派生的新实例已脱离、不是本进程的子进程：按 pid 收尾
   if (respawnedPid) {
     try { process.kill(respawnedPid); } catch (_) { /* 已退出 */ }
   }
-  fs.rmSync(directory, { recursive: true, force: true });
+  tree.cleanup();
 }

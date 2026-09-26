@@ -1,9 +1,26 @@
 /**
  * ShortScraping Translator Module
  * 封装翻译逻辑，支持 API 和 AI 两种模式
+ *
+ * 只在后台 service worker 里运行（background.js importScripts）：弹窗关掉页面即销毁、
+ * 页内 fetch 随之中断，所以单卡 🌍 也经 translateSingle 消息走后台。外壳按 lark.js 的
+ * UMD 写法，Node 里也能 require，便于测试直接加载真实模块。
+ *
+ * 配置由调用方注入（各函数的尾参 config，后台 readTranslateConfig 读取），本模块不碰任何
+ * 扩展 API：此前每次调用各读一次 storage，一轮翻译按开头快照选定 AI / API 模式后，
+ * 中途改配置会让 translateBatchAI 落进它自己的非 AI 分支，与后台这一轮的分支对不上；
+ * 回调形式的 storage.get 还让测试桩得专门垫一层。放尾部是为了不动位置参数——替换
+ * Translator 的测试桩都按 (title, desc) / (items) 取参。
  */
+(function (global) {
+  'use strict';
 
-globalThis.Translator = (() => {
+  // 配置归一化（默认值、旧 mode 字段兼容、数值兜底）的单一真源是 translate-config.js，
+  // 后台 importScripts 已把它排在本模块之前
+  const TranslateConfig = (typeof module !== 'undefined' && module.exports)
+    ? require('./translate-config.js')
+    : global.TranslateConfig;
+
   // 批量翻译的输入/输出契约（由代码固定，拼在用户风格提示词之后）。
   // 对应关系的命根子：要求模型按输入 id 一一回填，绝不靠返回顺序。
   const BATCH_CONTRACT =
@@ -14,24 +31,22 @@ globalThis.Translator = (() => {
     '\n\n需要翻译的内容：\n';
 
   /**
-   * 获取翻译配置
+   * 归一化调用方注入的配置。缺参直接抛错而不是落回默认值：默认是 API 模式（MyMemory），
+   * 漏传会把片名悄悄发给用户没选的第三方接口，比报错更糟。normalizeConfig 幂等，
+   * 后台已归一化过的配置再过一遍不变。
    */
-  async function getConfig() {
-    return new Promise((resolve) => {
-      chrome.storage.local.get('translateConfig', (result) => {
-        resolve(TranslateConfig.normalizeConfig(result.translateConfig));
-      });
-    });
+  function resolveConfig(rawConfig) {
+    if (!rawConfig || typeof rawConfig !== 'object') {
+      throw new TypeError('Translator 缺少翻译配置参数（由后台 readTranslateConfig 读取后传入）');
+    }
+    return TranslateConfig.normalizeConfig(rawConfig);
   }
-
-  // 配置归一化（默认值、旧 mode 字段兼容、数值兜底）的单一真源是
-  // src/shared/translate-config.js，四端共用；这里直接用，不再留本地别名。
 
   /**
    * 翻译标题和简介（AI 模式，带前置提示词）
    */
-  async function translateTitleAndDesc(title, description) {
-    const config = await getConfig();
+  async function translateTitleAndDesc(title, description, rawConfig) {
+    const config = resolveConfig(rawConfig);
     console.log(`[ShortScraping] 翻译模式: ${config.translateMode}`);
 
     if (config.translateMode === 'ai') {
@@ -245,22 +260,24 @@ globalThis.Translator = (() => {
    * 对应关系靠批内 id：请求带 id、解析按 id 回填，绝不依赖返回顺序。
    * 调用方负责分批（每批条数/字符预算），本函数只把收到的这一批用一次请求译出来。
    * 非 AI 模式退化为逐条 translateTitleAndDesc，保证调用方总能拿到对齐结果。
+   * config：调用方注入的翻译配置（同 translateTitleAndDesc 的尾参）。
    *
    * 错误语义：传输层失败（未配置端点密钥 / 超时 / HTTP 非 200 / 响应非 JSON / 缺 choices）
    * 抛异常，调用方据此向用户报告失败原因（HTTP 非 200 带 error.status）；模型返回内容
    * 解析不出（格式跑偏）仍返回空串数组，由后台翻译线按「应答了却没给出译文」处理。
    */
-  async function translateBatchAI(items) {
+  async function translateBatchAI(items, rawConfig) {
     const list = Array.isArray(items) ? items : [];
     if (list.length === 0) return [];
 
-    const config = await getConfig();
+    const config = resolveConfig(rawConfig);
 
     if (config.translateMode !== 'ai') {
       const results = [];
       for (const it of list) {
         try {
-          results.push(await translateTitleAndDesc(it.title, it.desc));
+          // 同一份配置传下去：逐条调用不再各自重读，整批只按一种模式翻
+          results.push(await translateTitleAndDesc(it.title, it.desc, config));
         } catch (e) {
           results.push({ title: '', desc: '' });
         }
@@ -342,9 +359,14 @@ globalThis.Translator = (() => {
     return map;
   }
 
-  // 只导出实际有调用方的方法（弹窗单卡翻译 / 后台批量与逐条翻译）
-  return {
+  // 只导出实际有调用方的方法（后台单卡 🌍 / 批量与逐条翻译）
+  const api = {
     translateTitleAndDesc,
     translateBatchAI
   };
-})();
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = api;
+  }
+  global.Translator = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);

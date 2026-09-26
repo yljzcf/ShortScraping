@@ -24,110 +24,71 @@ import './bootstrap.cjs';
 //   R 组（真实 translator.js）：HTTP 非 200 的错误带 status；API 模式传输失败带回
 //     transportError，「译文与原文相同」仍是无 transportError 的空串。
 // 用法：node tests/unit-translate-failures.mjs（修复前 F/C/E/L 应 RED）
+// v1.6.20：手搓的 chrome 桩换成 background-fixture（storage 走共用的 storage-stub）。
 import fs from 'node:fs';
+import { background } from './background-fixture.mjs';
 
 let unhandledCount = 0;
 process.on('unhandledRejection', (e) => { unhandledCount++; console.error('UNHANDLED:', e?.message || e); });
 
-// ---------- 定时器加速：后台脚本里的 1s 轮间隔 / 10s 预约 / 批间 delay 一律压到 ≤2ms ----------
-const realSetTimeout = globalThis.setTimeout;
-globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, Math.min(Number(ms) || 0, 2), ...args);
-const sleep = ms => new Promise(r => realSetTimeout(r, ms));
+// 弹窗发送方（不带 tab）：沿用迁移前手搓桩的口径，后台 isExtensionPageSender 放行
+const POPUP_SENDER = { id: 'fixture', url: 'chrome-extension://fixture/src/popup/popup.html' };
 
-// 墙钟偏移：只影响 Date.now（抓取后翻译线的墙钟上限用它），new Date() 不受影响
-const realNow = Date.now;
-let clockOffset = 0;
-Date.now = () => realNow() + clockOffset;
-
-// ---------- chrome 桩（unit-translate-partial 同款 + 可挂起的抓取标签页） ----------
-const rawStore = {};
-let failNextSet = false;
-let translateScanCount = 0; // performTranslateOnce 每轮开头读一次 translateConfig+urlTags
-let pendingTabCreate = [];
-
-function pickKeys(keys) {
-  const wanted = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys ?? rawStore);
-  const out = {};
-  for (const k of wanted) if (k in rawStore) out[k] = structuredClone(rawStore[k]);
-  return out;
-}
-
-const chromeStub = {
-  storage: {
-    local: {
-      async get(keys) {
-        if (Array.isArray(keys) && keys.includes('translateConfig') && keys.includes('urlTags')) translateScanCount++;
-        await Promise.resolve();
-        return pickKeys(keys);
-      },
-      async set(obj) {
-        if (failNextSet) { failNextSet = false; throw new Error('unit stub: 注入的 set 失败'); }
-        await Promise.resolve();
-        for (const [k, v] of Object.entries(obj)) rawStore[k] = structuredClone(v);
-      },
-      async remove(keys) { for (const k of (Array.isArray(keys) ? keys : [keys])) delete rawStore[k]; }
-    },
-    onChanged: { addListener() {} }
-  },
-  runtime: {
-    id: 'unit-test',
-    getURL: p => `chrome-extension://unit-test/${p}`,
-    onInstalled: { addListener() {} },
-    onStartup: { addListener() {} },
-    onMessage: { addListener(fn) { chromeStub.__msg = fn; } },
-    sendMessage(message) {
-      return new Promise((resolve) => {
-        const handled = chromeStub.__msg?.(message, { id: 'unit-test', url: 'chrome-extension://unit-test/src/popup/popup.html' }, resolve);
-        if (!handled) resolve(undefined);
-      });
-    },
-    lastError: null
-  },
-  alarms: { async get() { return undefined; }, async getAll() { return []; }, async clear() { return true; }, create() {}, onAlarm: { addListener() {} } },
-  tabs: {
-    // 抓取标签页挂起到测试放行（放行即 reject：该 URL 记失败、抓取收尾，activeScrapeCount 归零）
-    create() { return new Promise((resolve, reject) => { pendingTabCreate.push({ resolve, reject }); }); },
-    async remove() {},
-    async sendMessage() { return undefined; },
-    onUpdated: { addListener() {}, removeListener() {} }
-  },
-  notifications: { create() {} },
-  scripting: { async executeScript() { return []; } }
-};
-globalThis.chrome = chromeStub;
-
-globalThis.importScripts = (...paths) => {
-  for (const p of paths) {
-    if (String(p).includes('translator')) continue;
-    const rel = String(p).replace('../shared/', '../src/shared/');
-    (0, eval)(fs.readFileSync(new URL(rel, import.meta.url), 'utf8'));
-  }
-};
-globalThis.fetch = async () => { throw new TypeError('unit stub: no network'); };
-
-// Translator 桩：按用例切换行为，并记录每次请求
+// Translator 桩：按用例切换行为，并记录每次请求（注入后 fixture 不加载真实 translator.js）
 const batchCalls = [];
 const singleCalls = [];
 let batchBehavior = async (items) => items.map(it => ({ title: `中·${it.title}`, desc: '中文简介' }));
 let singleBehavior = async (title) => ({ title: `中·${title}`, desc: '中文简介' });
-globalThis.Translator = {
+const Translator = {
   async translateBatchAI(items) { batchCalls.push(items.map(it => it.title)); return batchBehavior(items); },
   async translateTitleAndDesc(title, description) { singleCalls.push(title); return singleBehavior(title, description); }
 };
 const httpError = (status) => Object.assign(new Error(`AI 接口 HTTP ${status}`), { status });
 
+// SW 上下文里的日志 fixture 已静音；这里压的是 R 组在本进程全局求值的真实 translator.js 的日志
 const origLog = console.log, origWarn = console.warn, origError = console.error;
 console.log = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origLog(...a); };
 console.warn = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origWarn(...a); };
 console.error = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origError(...a); };
 
-(0, eval)(fs.readFileSync(new URL('../src/background/background.js', import.meta.url), 'utf8'));
+// 真定时器 + tick:1（手搓桩「先让一拍再读写」的时序）；外网一律拒（与迁移前同口径）。
+// settle:false：顶层代码一跑完就拿到 bg，当拍换掉 SW 上下文的 setTimeout（见下）
+const bg = await background({
+  settle: false,
+  translator: Translator,
+  timers: 'real',
+  storage: { tick: 1 },
+  fetch: () => Promise.reject(new TypeError('unit stub: no network'))
+});
+
+// ---------- 定时器加速：后台脚本里的 1s 轮间隔 / 10s 预约 / 批间 delay 一律压到 ≤2ms ----------
+// 只换 SW 上下文里的 setTimeout，本套件自己的 sleep 仍走真定时器。顶层同步挂上的 500ms
+// CSV 预热定时器早于这里、按真时长排队：它只读 storage、推送必败，不碰任何断言对象
+const realSetTimeout = globalThis.setTimeout;
+bg.context.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, Math.min(Number(ms) || 0, 2), ...args);
+const sleep = ms => new Promise(r => realSetTimeout(r, ms));
+
+// 墙钟：fixture 的 Date 是可拨的固定时钟（bg.setTime 拨动）。抓取后翻译线的墙钟上限只看
+// Date.now 的差值，拨过 2 小时即越限；拨回基准即复原
+const clockBase = bg.context.Date.now();
+
+// 抓取标签页挂起到测试放行（放行即 reject：该 URL 记失败、抓取收尾，activeScrapeCount 归零）
+const pendingTabCreate = [];
+Object.assign(bg.context.chrome.tabs, {
+  create() { return new Promise((resolve, reject) => { pendingTabCreate.push({ resolve, reject }); }); },
+  async remove() {},
+  async sendMessage() { return undefined; }
+});
+
+// performTranslateOnce 每轮开头读一次 translateConfig+urlTags：按 storage 桩的读日志计数
+const translateScanCount = () => bg.storage.reads
+  .filter(keys => Array.isArray(keys) && keys.includes('translateConfig') && keys.includes('urlTags')).length;
+
 await sleep(150);
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
-const resetDramasCache = async () => { failNextSet = true; await clearAllDramas().catch(() => {}); failNextSet = false; }; // eslint-disable-line no-undef
-const byId = () => Object.fromEntries((rawStore.dramas || []).map(d => [d.id, d]));
+const byId = () => Object.fromEntries((bg.dramas() || []).map(d => [d.id, d]));
 
 const SUB = 'https://unit.test/list';
 const mk = (id, over = {}) => ({
@@ -138,15 +99,15 @@ const mk = (id, over = {}) => ({
 const AI = { translateMode: 'ai', aiEndpoint: 'https://x.test/v1', aiApiKey: 'k', batchSize: 10, delayMs: 0 };
 const API = { translateMode: 'api', delayMs: 0 };
 
+// 等队列排空再让 dramas 内存缓存失效，随后直改 storage 等价「SW 冷启动前 storage 被外部改写」
 async function seed(config, dramas) {
-  await resetDramasCache();
-  rawStore.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
-  rawStore.translateConfig = config;
-  rawStore.dramas = dramas;
+  await bg.resetDramasCache();
+  bg.storage.seed({ urlTags: [{ urlPattern: SUB, tags: ['T'] }], translateConfig: config });
+  bg.seedDramas(dramas);
   batchCalls.length = 0;
   singleCalls.length = 0;
 }
-const round = () => performTranslate({ source: 'manual' }); // eslint-disable-line no-undef
+const round = () => bg.context.performTranslate({ source: 'manual' });
 
 // ============ F 组：毒条目隔离与失败计次 ============
 
@@ -241,8 +202,8 @@ batchBehavior = async () => { throw httpError(401); };
     r?.aborted === true && String(r?.error || '').includes('连续 3 次') && String(r?.error || '').includes('401'),
     JSON.stringify(r));
   check('C1c 终态 summary.error 同步写出（弹窗 ❌）',
-    String(rawStore.translateRunState?.summary?.error || '').includes('连续 3 次'), JSON.stringify(rawStore.translateRunState?.summary));
-  check('C1d 熔断不计任何条目的 translateAttempts', (rawStore.dramas || []).every(d => d.translateAttempts === undefined && d.status === 'new'), '');
+    String(bg.data.translateRunState?.summary?.error || '').includes('连续 3 次'), JSON.stringify(bg.data.translateRunState?.summary));
+  check('C1d 熔断不计任何条目的 translateAttempts', (bg.dramas() || []).every(d => d.translateAttempts === undefined && d.status === 'new'), '');
 }
 
 // C2 每批 1 条（batchSize=1）：3 批连败即停
@@ -259,8 +220,8 @@ batchBehavior = async () => { throw httpError(400); };
 {
   for (let i = 0; i < 4; i++) await round();
   check('C3 全局 400 连跑 4 轮：熔断链作废，没有条目被计次或收口',
-    (rawStore.dramas || []).every(d => d.status === 'new' && d.translateAttempts === undefined),
-    JSON.stringify((rawStore.dramas || []).filter(d => d.translateAttempts !== undefined || d.status !== 'new').map(d => d.id)));
+    (bg.dramas() || []).every(d => d.status === 'new' && d.translateAttempts === undefined),
+    JSON.stringify((bg.dramas() || []).filter(d => d.translateAttempts !== undefined || d.status !== 'new').map(d => d.id)));
 }
 
 // C4 API 模式同样熔断
@@ -282,7 +243,7 @@ batchBehavior = async (items) => items.map(() => ({ title: '', desc: '' }));
     `calls=${batchCalls.length} ${JSON.stringify(r)}`);
   for (let i = 0; i < 3; i++) await round();
   check('C5b 连跑 4 轮没有条目被计次或收口',
-    (rawStore.dramas || []).every(d => d.status === 'new' && d.translateAttempts === undefined), '');
+    (bg.dramas() || []).every(d => d.status === 'new' && d.translateAttempts === undefined), '');
 }
 
 // C6 API 模式：本轮一条都没翻成、却有 ≥3 条应答为空 → 更像全局问题，不计次
@@ -291,10 +252,10 @@ singleBehavior = async () => ({ title: '', desc: '' });
 {
   for (let i = 0; i < 4; i++) await round();
   check('C6 API 模式整轮零译文且 ≥3 条应答为空：连跑 4 轮不计次',
-    (rawStore.dramas || []).every(d => d.status === 'new' && d.translateAttempts === undefined), '');
+    (bg.dramas() || []).every(d => d.status === 'new' && d.translateAttempts === undefined), '');
   // 同样的空结果，只要本轮有别的条目翻成功，就证明接口与模型正常 → 照常计次
-  await resetDramasCache();
-  rawStore.dramas = [...Array.from({ length: 5 }, (_, i) => mk(`q${i}`)), mk('q-ok')];
+  await bg.resetDramasCache();
+  bg.seedDramas([...Array.from({ length: 5 }, (_, i) => mk(`q${i}`)), mk('q-ok')]);
   singleBehavior = async (title) => (title === 'T-q-ok' ? { title: '中文', desc: '中文简介' } : { title: '', desc: '' });
   await round();
   const m = byId();
@@ -315,7 +276,7 @@ batchBehavior = async (items) => items.map(it => (/^\d+$/.test(it.title) ? { tit
     JSON.stringify({ r, bad: [0, 1, 2, 3, 4].map(i => m[`bad${i}`]?.translateAttempts) }));
   check('C7b 请求序列＝2 次整批 + 5 次单条', batchCalls.length === 7, JSON.stringify(batchCalls));
   for (let i = 0; i < 2; i++) {
-    await saveDramaRecord(mk(`fresh${i}`)); // eslint-disable-line no-undef -- 每轮都有新卡入库（抓取后翻译线的常态）
+    await bg.context.saveDramaRecord(mk(`fresh${i}`)); // 每轮都有新卡入库（抓取后翻译线的常态）
     await round();
   }
   const after = byId();
@@ -372,7 +333,7 @@ batchBehavior = async (items) => items.map(it => (it.title === 'Revenge Bride'
 await seed(API, [mk('e5', { status: 'trans', titleZh: '复仇新娘', descriptionZh: '旧简介', translatedAt: '2026-07-01T00:00:00.000Z' })]);
 singleBehavior = async (title) => ({ title, desc: '新简介' });
 {
-  const resp = await chromeStub.runtime.sendMessage({ action: 'translateSingle', dramaId: 'e5' });
+  const resp = await bg.send({ action: 'translateSingle', dramaId: 'e5' }, POPUP_SENDER);
   const c = byId().e5;
   check('E3 单卡重译回显英文片名 → 既有中文译名保留、简介照常换新',
     resp?.success === true && c?.titleZh === '复仇新娘' && c?.descriptionZh === '新简介', JSON.stringify({ resp, c }));
@@ -383,7 +344,7 @@ await seed(API, [mk('e6')]);
 singleBehavior = async (title, description) => ({ title, desc: description });
 {
   const before = JSON.stringify(byId().e6);
-  const resp = await chromeStub.runtime.sendMessage({ action: 'translateSingle', dramaId: 'e6' });
+  const resp = await bg.send({ action: 'translateSingle', dramaId: 'e6' }, POPUP_SENDER);
   check('E4 单卡整条回显英文 → success=false「翻译结果为空」、卡片不动',
     resp?.success === false && String(resp?.error || '').includes('翻译结果为空') && JSON.stringify(byId().e6) === before,
     JSON.stringify({ resp, card: byId().e6 }));
@@ -401,13 +362,13 @@ batchBehavior = async (items) => items.map(() => ({ title: '伪娘与扶她の�
 // ============ L 组：抓取后翻译线 ============
 await seed(API, []);
 singleBehavior = async (title) => ({ title: `中·${title}`, desc: '中文简介' });
-const scrapeDone = performScrape(); // eslint-disable-line no-undef
+const scrapeDone = bg.context.performScrape();
 await sleep(400); // 预约 10s→2ms，线启动后每轮 1s→2ms：400ms 远超 30 个空转轮
 {
-  const scansBefore = translateScanCount;
+  const scansBefore = translateScanCount();
   check('L0 前置：抓取挂起期间翻译线在空转', scansBefore > 40, `scans=${scansBefore}`);
 
-  await saveDramaRecord(mk('late1')); // eslint-disable-line no-undef
+  await bg.context.saveDramaRecord(mk('late1'));
   let late = null;
   for (let i = 0; i < 50; i++) {
     await sleep(20);
@@ -423,33 +384,33 @@ pendingTabCreate.splice(0).forEach(t => t.reject(new Error('unit stub: 放行抓
 await scrapeDone;
 await sleep(200);
 {
-  const a = translateScanCount;
+  const a = translateScanCount();
   await sleep(200);
-  check('L2 抓取结束后翻译线按空扫描收尾（不再发起新的扫描）', translateScanCount === a, `before=${a} after=${translateScanCount}`);
+  check('L2 抓取结束后翻译线按空扫描收尾（不再发起新的扫描）', translateScanCount() === a, `before=${a} after=${translateScanCount()}`);
 }
 
 // L3 墙钟上限：抓取挂住时线也会退出；抓取全部结束后 resumePostScrapeTranslateLoop 再安排一次
-const scrapeHung = performScrape(); // eslint-disable-line no-undef
+const scrapeHung = bg.context.performScrape();
 await sleep(150);
 {
-  check('L3 前置：resumePostScrapeTranslateLoop 已导出', typeof globalThis.resumePostScrapeTranslateLoop === 'function', '');
-  const alive = translateScanCount;
+  check('L3 前置：resumePostScrapeTranslateLoop 已导出', typeof bg.context.resumePostScrapeTranslateLoop === 'function', '');
+  const alive = translateScanCount();
   await sleep(100);
-  check('L3 前置：墙钟未到时线在抓取挂住期间持续空转', translateScanCount > alive, `before=${alive} after=${translateScanCount}`);
-  clockOffset = 2 * 60 * 60 * 1000 + 1000; // 越过 2 小时墙钟上限
+  check('L3 前置：墙钟未到时线在抓取挂住期间持续空转', translateScanCount() > alive, `before=${alive} after=${translateScanCount()}`);
+  bg.setTime(clockBase + 2 * 60 * 60 * 1000 + 1000); // 越过 2 小时墙钟上限
   await sleep(150);
-  const a = translateScanCount;
+  const a = translateScanCount();
   await sleep(150);
-  check('L3a 抓取挂住超过墙钟上限 → 线退出（空转停止）', translateScanCount === a, `before=${a} after=${translateScanCount}`);
+  check('L3a 抓取挂住超过墙钟上限 → 线退出（空转停止）', translateScanCount() === a, `before=${a} after=${translateScanCount()}`);
 
-  await saveDramaRecord(mk('late2')); // eslint-disable-line no-undef
-  if (typeof globalThis.resumePostScrapeTranslateLoop === 'function') globalThis.resumePostScrapeTranslateLoop();
+  await bg.context.saveDramaRecord(mk('late2'));
+  if (typeof bg.context.resumePostScrapeTranslateLoop === 'function') bg.context.resumePostScrapeTranslateLoop();
   await sleep(150);
   check('L3b 仍有抓取在进行时 resume 不动（等最后一个抓取收尾）', byId().late2?.status === 'new', JSON.stringify(byId().late2));
 
   pendingTabCreate.splice(0).forEach(t => t.reject(new Error('unit stub: 放行抓取')));
   await scrapeHung;
-  if (typeof globalThis.resumePostScrapeTranslateLoop === 'function') globalThis.resumePostScrapeTranslateLoop();
+  if (typeof bg.context.resumePostScrapeTranslateLoop === 'function') bg.context.resumePostScrapeTranslateLoop();
   let late = null;
   for (let i = 0; i < 50; i++) {
     await sleep(20);
@@ -458,59 +419,53 @@ await sleep(150);
   }
   check('L3c 抓取全部结束且线已退出 → resume 再安排一次，挂住期间入库的卡被翻译',
     late?.status === 'trans', JSON.stringify(late));
-  clockOffset = 0;
+  bg.setTime(clockBase);
   await sleep(200);
 }
 
-// ============ R 组：真实 translator.js（最后跑，覆盖全局 Translator） ============
+// ============ R 组：真实 translator.js（在本进程全局求值，与 SW 上下文里的替身互不相干） ============
 {
-  // translator.js 的 getConfig 用回调形式的 storage.get
-  const promiseGet = chromeStub.storage.local.get;
-  chromeStub.storage.local.get = (keys, cb) => {
-    const out = promiseGet(keys);
-    if (typeof cb === 'function') { out.then(cb); return undefined; }
-    return out;
-  };
+  // translator.js 不读 storage：配置按尾参显式传入（后台由 readTranslateConfig 读取后注入）
   (0, eval)(fs.readFileSync(new URL('../src/shared/translator.js', import.meta.url), 'utf8'));
 
-  rawStore.translateConfig = { translateMode: 'ai', aiEndpoint: 'https://x.test/v1', aiApiKey: 'k', requestTimeoutSec: 5 };
+  const aiConfig = { translateMode: 'ai', aiEndpoint: 'https://x.test/v1', aiApiKey: 'k', requestTimeoutSec: 5 };
   globalThis.fetch = async () => ({ ok: false, status: 400, json: async () => ({}) });
   let err = null;
-  try { await globalThis.Translator.translateBatchAI([{ title: 'A', desc: '' }]); } catch (e) { err = e; }
+  try { await globalThis.Translator.translateBatchAI([{ title: 'A', desc: '' }], aiConfig); } catch (e) { err = e; }
   check('R1 AI 批量 HTTP 400 抛错并带 status（后台据此归因条目级拒收）', err?.status === 400 && err?.message.includes('400'),
     JSON.stringify({ message: err?.message, status: err?.status }));
 
   globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ error: { message: 'invalid api key' } }) });
   let err2 = null;
-  try { await globalThis.Translator.translateBatchAI([{ title: 'A', desc: '' }]); } catch (e) { err2 = e; }
+  try { await globalThis.Translator.translateBatchAI([{ title: 'A', desc: '' }], aiConfig); } catch (e) { err2 = e; }
   check('R1b 中转服务 HTTP 200 + {"error":…}（缺 choices）→ 按传输失败抛错、无 status（通道故障）',
     String(err2?.message || '').includes('invalid api key') && err2?.status === undefined, String(err2?.message));
 
-  rawStore.translateConfig = { translateMode: 'api', apiEndpoint: 'https://mt.test/get', requestTimeoutSec: 5 };
+  const apiConfig = { translateMode: 'api', apiEndpoint: 'https://mt.test/get', requestTimeoutSec: 5 };
   globalThis.fetch = async () => ({ ok: false, status: 503, json: async () => ({}) });
-  const r2 = await globalThis.Translator.translateTitleAndDesc('Hello', 'World');
+  const r2 = await globalThis.Translator.translateTitleAndDesc('Hello', 'World', apiConfig);
   check('R2 API 模式 HTTP 503 → 字段空串 + transportError', r2.title === '' && r2.desc === '' && String(r2.transportError).includes('503'),
     JSON.stringify(r2));
 
   globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ responseStatus: 429, responseData: { translatedText: 'MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY' } }) });
-  const r3 = await globalThis.Translator.translateTitleAndDesc('Hello', '');
+  const r3 = await globalThis.Translator.translateTitleAndDesc('Hello', '', apiConfig);
   check('R3 API 模式额度告警（HTTP 200 + responseStatus 429）→ transportError，不当成译文', r3.title === '' && Boolean(r3.transportError),
     JSON.stringify(r3));
 
   // 原文用 searchParams 取：URL 的查询串里空格编码成 '+'，正则 + decodeURIComponent 还原不了
   globalThis.fetch = async (url) => ({ ok: true, status: 200, json: async () => ({ responseStatus: 200, responseData: { translatedText: new URL(url).searchParams.get('q') } }) });
-  const r4 = await globalThis.Translator.translateTitleAndDesc('1923', '');
+  const r4 = await globalThis.Translator.translateTitleAndDesc('1923', '', apiConfig);
   check('R4 API 模式译文与原文相同 → 空串且无 transportError（后台按「服务答了没给译文」计次）',
     r4.title === '' && r4.desc === '' && !('transportError' in r4), JSON.stringify(r4));
 
   globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ responseStatus: 200, responseData: { translatedText: '你好' } }) });
-  const r5 = await globalThis.Translator.translateTitleAndDesc('Hello', 'World');
+  const r5 = await globalThis.Translator.translateTitleAndDesc('Hello', 'World', apiConfig);
   check('R5 API 模式正常应答照常返回译文', r5.title === '你好' && r5.desc === '你好' && !('transportError' in r5), JSON.stringify(r5));
 
   // R6 mymemory-length-and-query 第 1 步（batch F）：endpoint 自带查询串（MyMemory 文档建议加
   // de=邮箱提高额度）时，旧的字符串拼接得 '…/get?de=me@x.com?q=…'，q 被吞进 de 的值里。
   // 桩按 MyMemory 的真实行为：缺 q 回 responseStatus 403「NO QUERY SPECIFIED」
-  rawStore.translateConfig = { translateMode: 'api', apiEndpoint: 'https://mt.test/get?de=me@x.com', requestTimeoutSec: 5 };
+  const deConfig = { translateMode: 'api', apiEndpoint: 'https://mt.test/get?de=me@x.com', requestTimeoutSec: 5 };
   const apiUrls = [];
   globalThis.fetch = async (url) => {
     apiUrls.push(String(url));
@@ -519,7 +474,7 @@ await sleep(150);
       ? { responseStatus: 200, responseData: { translatedText: `译:${q}` } }
       : { responseStatus: 403, responseDetails: 'NO QUERY SPECIFIED. EXAMPLE REQUEST: GET?Q=HELLO&LANGPAIR=EN|IT', responseData: { translatedText: '' } }) };
   };
-  const r6 = await globalThis.Translator.translateTitleAndDesc('Tom & Jerry?', 'A cat + a mouse');
+  const r6 = await globalThis.Translator.translateTitleAndDesc('Tom & Jerry?', 'A cat + a mouse', deConfig);
   const p6 = apiUrls[0] ? new URL(apiUrls[0]).searchParams : new URLSearchParams();
   check('R6 endpoint 自带查询串：保留 de，q / langpair 作为独立参数（含 & ? + 的原文往返无损）',
     r6.title === '译:Tom & Jerry?' && r6.desc === '译:A cat + a mouse' && !('transportError' in r6)
@@ -531,7 +486,6 @@ await sleep(50);
 check('T0 全程无未捕获 rejection', unhandledCount === 0, `unhandled=${unhandledCount}`);
 
 console.log = origLog; console.warn = origWarn; console.error = origError;
-Date.now = realNow;
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

@@ -4,75 +4,29 @@ import './bootstrap.cjs';
 //   R1 端口上有旧实例：停掉后前台起新实例（pid 不同），--restart 之后的参数转给服务，服务退出码原样带回；
 //   R2 端口空闲：直接前台启动；包装进程被单独 SIGTERM 时转给服务，不留孤儿占端口（仅 POSIX）；
 //   R3 端口被别的服务占着：以 1 退出、不启动新实例（旧版 `stop.js && sync-server.js` 会照样启动，必然撞 EADDRINUSE）。
-// 隔离方式沿用 unit-server-restart：复制到 os.tmpdir() 隔离树，不碰真实 31919 与 db/。
+// 隔离方式：tests/server-fixture.mjs 的 os.tmpdir() 隔离树（多带一份 server/tools/stop.js），不碰真实 31919 与 db/。
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
-import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
-import { SUB } from './background-fixture.mjs';
-import { freePort } from './free-port.mjs';
+import {
+  SERVER_ARGS, freePort, makeIsolatedTree, launch as launchIn, health as healthAt, waitFor, alive, httpClient, terminate
+} from './server-fixture.mjs';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'shortscraping-stop-restart-'));
-for (const rel of ['server/tools', 'src/shared', 'config', 'db']) fs.mkdirSync(path.join(directory, rel), { recursive: true });
-fs.copyFileSync(path.join(root, 'server/sync-server.js'), path.join(directory, 'server/sync-server.js'));
-fs.copyFileSync(path.join(root, 'server/tools/stop.js'), path.join(directory, 'server/tools/stop.js'));
-for (const file of fs.readdirSync(path.join(root, 'src/shared'))) fs.copyFileSync(path.join(root, 'src/shared', file), path.join(directory, 'src/shared', file));
-fs.writeFileSync(path.join(directory, 'config/tag.json'), JSON.stringify([{ url: SUB, tags: ['IMDB'] }]));
+const tree = makeIsolatedTree({ prefix: 'shortscraping-stop-restart-', files: ['server/tools/stop.js'] });
 
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const envFor = targetPort => ({
-  ...process.env, SHORTSCRAPING_PORT: String(targetPort), XPC_SERVICE_NAME: '', SHORTSCRAPING_NO_LAUNCHD: '1',
-  SHORTSCRAPING_LOG_FILE: path.join(directory, 'sync.log')
-});
-
-function launch(args, targetPort = port) {
-  const child = spawn(process.execPath, args, {
-    cwd: directory, env: envFor(targetPort), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
-  });
-  child.output = '';
-  child.stdout.on('data', chunk => { child.output += chunk; });
-  child.stderr.on('data', chunk => { child.output += chunk; });
-  child.exited = once(child, 'exit');
-  return child;
-}
-
-async function health() {
-  try {
-    const response = await fetch(base + '/health', { signal: AbortSignal.timeout(1000) });
-    return await response.json();
-  } catch (_) {
-    return null;
-  }
-}
-
-async function waitFor(predicate, timeoutMs, label) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await predicate();
-    if (value) return value;
-    if (Date.now() > deadline) throw new Error(`等待超时：${label}`);
-    await sleep(100);
-  }
-}
-
-// 按进程判活：退出中的旧进程仍可能经 keep-alive 连接应答 /health（见 unit-server-restart）
-function alive(pid) {
-  try { process.kill(pid, 0); return true; } catch (_) { return false; }
-}
+// 夹具钉死 SHORTSCRAPING_PORT=targetPort、SHORTSCRAPING_NO_LAUNCHD=1、XPC_SERVICE_NAME=''，日志写进隔离树；
+// child 上挂 output 与 exited。按进程判活用夹具的 alive：退出中的旧进程仍可能经 keep-alive 连接应答 /health
+const launch = (args, targetPort = port) => launchIn(tree, args, { port: targetPort });
+const health = () => healthAt(base);
+const client = httpClient(base);
 
 const children = [];
 const serverPids = new Set();
 let foreign = null;
 try {
   // —— R1：替换正在运行的实例 ——
-  const first = launch(['server/sync-server.js', '--local-only']);
+  const first = launch(SERVER_ARGS);
   children.push(first);
   const before = await waitFor(async () => {
     const h = await health();
@@ -92,9 +46,7 @@ try {
   // 端口来自专用环境变量 SHORTSCRAPING_PORT（不再是通用的 PORT）：非默认端口时明说操作的不是扩展连的那个服务
   assert.match(restarter.output, new RegExp(`按环境变量 SHORTSCRAPING_PORT 操作端口 ${port}（非默认 31919）`));
   await waitFor(() => /服务已启动/.test(restarter.output), 3000, `服务输出直通前台\n${restarter.output}`);
-  const stopped = await fetch(base + '/shutdown', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(3000)
-  });
+  const stopped = await client.request('/shutdown', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   assert.equal(stopped.status, 200);
   const [code, signal] = await restarter.exited;
   assert.deepEqual([code, signal], [0, null]); // 服务的退出码原样带回给 npm / 终端
@@ -112,7 +64,7 @@ try {
     assert.deepEqual([coldCode, coldSignal], [null, 'SIGTERM']); // 按服务的死因重新抛出同一信号
     await waitFor(() => !alive(coldHealth.pid), 5000, '信号转给了服务，端口随之释放');
   } else {
-    await fetch(base + '/shutdown', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    await client.request('/shutdown', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     assert.equal((await cold.exited)[0], 0);
   }
 
@@ -129,12 +81,11 @@ try {
 
   console.log('stop.js --restart (foreground replace / cold start / signal forward / foreign port) checks passed');
 } finally {
-  for (const child of children) {
-    if (child.exitCode === null && child.signalCode === null) { child.kill(); await child.exited; }
-  }
+  for (const child of children) await terminate(child);
+  // stop.js 派生的服务是包装进程的子进程、不在夹具的登记里：按 pid 收尾
   for (const pid of serverPids) {
     try { process.kill(pid); } catch (_) { /* 已退出 */ }
   }
   if (foreign) await new Promise(resolve => foreign.close(resolve));
-  fs.rmSync(directory, { recursive: true, force: true });
+  tree.cleanup();
 }
