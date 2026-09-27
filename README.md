@@ -1,6 +1,6 @@
 # ShortScraping - 爆款短剧监控助手
 
-Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRoad、My Drama、ReelShort、DramaShorts、NetShort、FlickReels、GoodShort、Shortical、ShortMax、DramaBox、PinesDramas、Netflix、Apple TV 十五个平台的榜单/板块，新条目以时间线卡片展示，自动翻译为中文，并可经本地服务同步为 CSV、在局域网内只读共享。
+Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRoad、My Drama、ReelShort、DramaShorts、NetShort、FlickReels、GoodShort、Shortical、ShortMax、DramaBox、PinesDramas、Netflix、Apple TV、Higgsfield 十六个平台的榜单/板块，新条目以时间线卡片展示，自动翻译为中文，并可经本地服务同步为 CSV、在局域网内只读共享。
 
 适合谁：追踪海外短剧/游戏/网文热榜动向的编辑、制片、市场与数据同学——打开弹窗就能看到"最近各平台新上了什么"，无需逐站巡逻。
 
@@ -34,6 +34,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 | PinesDramas | `/novels` 的 Recommended（6 条）与 Popular Short Dramas（6 条）、首页的 Popular Novels（6 条）与 Editor's Pick（4 条），各按 `?list=<板块标题>` 订阅；订阅须写裸域 `https://pinedrama.com/` | 板块 SSR 直出、读页面 DOM；简介与类型标签均取自作品详情页 | `pdn`/`pdd`+slug |
 | Netflix | Tudum Top 10 六个榜单页：`/tudum/top10`、`/tv`、`/films-non-english`、`/tv-non-english`、`/united-states`、`/united-states/tv` | 页内 `netflix.reactContext` 内联脚本 SSR 榜单数据直出；类型标签经后台代理取作品 `/title/` 页 | `nf`+videoId |
 | Apple TV | Top 10 TV Shows 与 Top 10 Movies 两个榜单页（`/us/collection/most-popular-now/uts.col.Charts{Shows,Movies}.tvs.sbd.4000`） | 页内 `serialized-server-data` JSON SSR 直出榜单；简介与类型标签经后台代理取作品详情页 | `at`+`umc.cmc.` 编号 |
+| Higgsfield | `/community/originals` 整页一条订阅（页上三个板块合起来即全部已上线作品）；需要时也可用 `?list=higgsfield_choice` / `first_look` / `on_our_radar` 单订某个板块；订阅须写裸域 `https://higgsfield.ai/` | 直连页面自己用的作品接口（板块是只渲染可见卡片的虚拟列表，不读 DOM），无需请求详情页 | `hf`+UUID |
 
 站点细节：
 
@@ -49,8 +50,9 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 - **DramaBox**：`dramabox.com` 与 `dramaboxdb.com` 是同一片库的**两套人工编排视图**（同一套站点程序、同一批作品编号、连站点图标都完全相同），所以在扩展里合并成 **一个 DramaBox 来源**。两站同名板块的内容其实并不一样——实测四个板块共 72 个位置只对应 62 部不重复的剧（`dramaboxdb` 的 Must-sees 恰好是 `dramabox` 的 Trending），所以两站都抓才能拿全；重叠的剧按先到先得只留一张卡。**卡片链接统一指向 `dramabox.com`**（实测 `dramaboxdb` 独有的作品在 `dramabox.com` 上也都能打开）。订阅的是板块列表页而不是首页：首页每个板块只给 6 条，列表页正好 18 条；板块还有更多页，扩展只抓第一页。板块内容不随访问变化（同一板块连抓三次，条目与顺序完全一致），所以重复抓取新增为 0 是正常的。订阅 URL 须带 `www.`（裸域会 301 到 www，跳转后与订阅串不等就不会入库）。简介、封面与类型标签全在列表数据里，不需要请求详情页。
 
 - **PinesDramas**：一个站点同时有网文与短剧两类内容，两者各有各的作品页（同名地址互不通用），扩展里合并成 **一个 PinesDramas 来源**、按标签区分（`novel` / `drama`），整站归在「游戏 · 网文」分组下。四个板块分落两个页面，按板块标题订阅（`Recommended WebNovels For You` → `?list=recommended_webnovels_for_you`，其余同理），站点改板块文案时调整订阅 `?list=` 值即可。**列表卡片的简介覆盖不全**——Popular Novels 与 Popular Short Dramas 的卡上根本没有简介，另两个板块的短句也和作品页的完整梗概是两段不同文案，所以扩展对每条都取一次作品页，顺带拿到 2~4 个内容类型标签（卡片上只印 1 个）；某条取不到时该作品本轮不入库、下轮重来（避免留下永远补不上简介的卡）。每轮约 22 条、耗时 20 秒上下。订阅 URL 要写**裸域**（带 `www.` 会被 301 到裸域，跳转后与订阅串不等就不会入库）。站点上的评分不入库。
+- **Higgsfield**：Higgsfield Studio 自制的 AI 原创影视（短片、多集剧、长片），归在「影视」分组下。规则目录订的是 `/community/originals` **整页**这一条：页上三个板块——**Higgsfield Choice**（官方精选）、**First Look**（抢先看，含 MV、幕后花絮这类衍生内容，与精选有重叠）、**On Our Radar**（前两个板块之外的其余已上线作品，刚上线还没归类的新作也在这里）——合起来正好是全部已上线作品，所以一条订阅就不漏不多，每轮也只开一个标签页；Coming Soon 的不收。只想看某个板块时，可把订阅改成 `?list=higgsfield_choice` / `?list=first_look` / `?list=on_our_radar`（按站点同款规则切分；单订 On Our Radar 时它将来可能为空，届时提示「抓到 0 条」属正常）。封面存站点缩放后的小图（约 40KB），推送时换成同一缩放服务的 1080 宽大图（几十到几百 KB；不用原图——个别作品的原图是接近 10MB 的 png，下载慢时会超时）；作品地址是播放页（`/original-series/<作品>/<第一集>`，剧集落在第 1 集）。接口没有内容类型字段，卡片不显示类型标签。订阅 URL 要写**裸域**（带 `www.` 会被 301 到裸域，跳转后与订阅串不等就不会入库）；内容脚本只注入 `/community/originals`，在站内用 AI 生成工具的页面不注入。
 
-> 各站的域名形态并不一致，订阅 URL 写错一个字符就会静默零抓取：FlickReels、GoodShort、ShortMax、DramaBox 必须带 `www.`，Shortical 与 PinesDramas 必须**不带**。规则目录里已按正确形态内置。`?list=` 的板块值同理：值写错（归一化后为空，或找不到对应板块）时这条订阅抓 0 条，后台日志会提示，不再悄悄退回默认板块、把别的板块的条目记到这条订阅名下（v1.6.16）；只有完全不带 `?list=` 时才用各站的默认板块。
+> 各站的域名形态并不一致，订阅 URL 写错一个字符就会静默零抓取：FlickReels、GoodShort、ShortMax、DramaBox 必须带 `www.`，Shortical、PinesDramas 与 Higgsfield 必须**不带**。规则目录里已按正确形态内置。`?list=` 的板块值同理：值写错（归一化后为空，或找不到对应板块）时这条订阅抓 0 条，后台日志会提示，不再悄悄退回默认板块、把别的板块的条目记到这条订阅名下（v1.6.16）；只有完全不带 `?list=` 时才用各站的默认板块。
 
 ## 📦 安装与快速上手
 
@@ -265,7 +267,7 @@ server/tools/remove-autostart.command  # 撤销开机自启
 - 站外请求包括抓取订阅站点、调用配置的翻译接口、检查更新，以及 Lark 推送：用户点击单卡按钮时 POST 到配置的多维表格工作流 webhook；开启群机器人后，条目翻译完成即自动 POST 到配置的机器人 webhook（可随时关闭）；填写了飞书自建应用凭据时，还会把封面图上传到 `open.feishu.cn` 换取卡片图片 key（不填则发无图卡）。
 - 四个本地配置（含翻译密钥和 webhook）均被 `.gitignore` 排除，不会随仓库分发；原子写入中断时残留的 `config/*.tmp` 同样被排除。同步服务写回 `config/trans.json`、`config/lark.json` 这两个存明文密钥的文件时只给文件属主读写权限（0600，macOS / Linux；Windows 沿用目录权限），同机其他账号读不到。v1.6.17 之前写出的这两个文件仍是默认权限，在设置页对应标签页保存一次即收紧，或手动运行 `chmod 600 config/trans.json config/lark.json`。
 - 同步服务写接口仅接受回环连接，并且只认首次写入时固定下来的那个扩展（记录在 `config/sync-origin.json`）。换目录重载扩展（扩展 ID 随之改变）后被拒时，删除该文件即可让下一次写入重新固定，**不必重启同步服务**（v1.7.0 前服务只在启动时读一次这个文件，删了也照样被拒）；只有「JSON 请求体 + 真实写接口」的请求才会触发固定。所有写请求都要求 `application/json`，本机管理脚本仍可调用。
-- 扩展权限（v1.6.17 收紧）：不申请 `tabs` 权限；内容脚本仅注入支持的平台域名，其中 IMDB（`/search/title`、`/find`）、Steam（`/category/`、`/tags/`）、RoyalRoad（`/fictions/`）与 Netflix、Apple TV 一样只注入订阅页路径，在这几站浏览其他页面时不注入；后台的强制注入兜底只对支持的站点放行，订阅页跳到了站外（地区跳转、同意页等）时本次抓取直接报失败、不注入。内容脚本不直接读写扩展存储（v1.6.19）：开轮需要的订阅清单与已入库条目的 ID 由后台经消息下发（v1.6.21 起只下发该标签页所在站点的条目 ID），不含简介、译文和任何配置密钥；后台还会尝试把 `chrome.storage.local` 收窄为只对扩展自身页面开放（Chrome 不支持收窄该区时只在后台日志告警）。内容脚本只能向后台索取抓取上下文、提交抓取结果、请求代取详情页，清库、导入、配置写回、Lark 推送与测试发送等操作只接受扩展自己的弹窗和设置页发起。
+- 扩展权限（v1.6.17 收紧）：不申请 `tabs` 权限；内容脚本仅注入支持的平台域名，其中 IMDB（`/search/title`、`/find`）、Steam（`/category/`、`/tags/`）、RoyalRoad（`/fictions/`）、Higgsfield（`/community/originals`）与 Netflix、Apple TV 一样只注入订阅页路径，在这几站浏览其他页面时不注入；后台的强制注入兜底只对支持的站点放行，订阅页跳到了站外（地区跳转、同意页等）时本次抓取直接报失败、不注入。内容脚本不直接读写扩展存储（v1.6.19）：开轮需要的订阅清单与已入库条目的 ID 由后台经消息下发（v1.6.21 起只下发该标签页所在站点的条目 ID），不含简介、译文和任何配置密钥；后台还会尝试把 `chrome.storage.local` 收窄为只对扩展自身页面开放（Chrome 不支持收窄该区时只在后台日志告警）。内容脚本只能向后台索取抓取上下文、提交抓取结果、请求代取详情页，清库、导入、配置写回、Lark 推送与测试发送等操作只接受扩展自己的弹窗和设置页发起。
 - 共享页按主机地址类型放行：IP 地址与 `localhost` 直接可用，用自定义域名访问需启动时加 `--allow-host=<域名>`。
 - 防 CSV 公式注入：`db/timeline.csv`、设置页「导出 CSV」与 `npm run export-lark` 产出的 `.csv`（v1.6.17 起）里，以 `= + - @`（或 Tab、换行）开头的单元格会加一个前导撇号 `'`，Excel/WPS 打开时按文本显示、不当公式执行；代价是以 `- `、`+` 开头的正常简介也会带上撇号。原始 JSON 备份、剪贴板「导出到多维表格」与 export-lark 的 TSV 保持原文；确定不经 Excel/WPS 打开、直接导入 Base 的 export-lark CSV 可加 `--raw` 关掉撇号。导入跳过字段类型、时间戳（含 `2026-02-30`、`2026-13-01` 这类日历上不存在的日期）、链接或 ID 无效的记录，计入「无效」条数、不影响同批其余记录（封面链接无效只清空封面，不丢整条记录）；原文（标题/简介/标签）含乱码字符 `�` 的记录照常导入，结果里单独报条数——多为旧版同步服务写坏的备份，原文无法还原，重新抓取也不会覆盖；条件清理会验证预览范围，范围变化时需重新预览。
 
@@ -278,7 +280,7 @@ ShortScraping/
 ├── README.md / LICENSE / .gitignore / .gitattributes
 ├── src/
 │   ├── background/background.js  # 后台 service worker：调度、抓取/翻译编排、CSV 推送
-│   ├── content/                  # 内容脚本：十五个站点适配器（16 个域名；content.js + content.css）
+│   ├── content/                  # 内容脚本：十六个站点适配器（17 个域名；content.js + content.css）
 │   ├── popup/                    # 扩展弹窗（popup.html/css/js）
 │   ├── settings/                 # 设置中心：配置文件/网页订阅/定时任务/翻译接口/Lark 推送/数据存档
 │   └── shared/                   # 共享模块。UMD 多端共用（后台 importScripts / 页面 <script> / Node require）：site-registry（站点元数据单一真源，含卡片归属站点 siteOfDrama）、scrape-rules（内容脚本与后台共用的采集口径：fandom 临时键前缀、类型标签清洗、Shortical sitemap 解析）、site-tabs（分组折叠标签条）、timeline-csv（CSV 序列化/导入校验）、schedule-config（cron 解析）、translate-config（翻译配置与文本判据）、subscription-config（订阅规范化、要抓的订阅 URL 清单与范围判定、IMDb 滚动日期窗口补日期）、url-match（订阅 URL 归属）、lark（Lark 推送/多维表格导出/群机器人卡片）、fetch-util（带期限的 fetch，期限连响应正文一起算；内容脚本另有同语义的一份）；仅后台 SW（importScripts，UMD 外壳只为测试能 require）：translator（翻译，配置由后台读取后传入）；浏览器端：timeline-render（时间线渲染，弹窗＋共享页）、timeline-cards.css（弹窗与共享页共用的时间线/卡片样式）、qrcode（二维码，弹窗）
@@ -310,7 +312,7 @@ ShortScraping/
 
 ## 验证与升级
 
-使用 Node.js 22 或更新版本运行 `npm test`（当前 71 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+使用 Node.js 22 或更新版本运行 `npm test`（当前 72 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
 
 测试基建（v1.6.20，用户侧无变化）：新写的测试一律用下面的共用夹具，不再每个套件各抄一份桩。
 

@@ -32,7 +32,7 @@ check('G2a 分组顺序：短剧 → 影视 → 游戏·网文',
 check('G2b 组内站点字面量（2026-09-12 用户定）',
   deepEq(SiteRegistry.SITE_GROUPS.map(g => g.sites), [
     ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox'],
-    ['imdb', 'netflix', 'appletv'],
+    ['imdb', 'netflix', 'appletv', 'higgsfield'],
     ['steam', 'royalroad', 'pinedrama']
   ]),
   JSON.stringify(SiteRegistry.SITE_GROUPS.map(g => g.sites)));

@@ -43,6 +43,10 @@
     { site: 'imdb', name: 'IMDB', host: 'imdb.com', match: 'suffix', path: ['/search/title*', '/find*'] },
     { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*' },
     { site: 'appletv', name: 'AppleTV', host: 'tv.apple.com', match: 'exact', path: '/us/collection/most-popular-now/*' },
+    // Higgsfield（v1.7.2）：整站是用户可能天天在用的 AI 生成工具，只注入订阅页 /community/originals
+    // （理由同上面的 manifest-overbroad-injection）；末尾的 * 连查询串一起匹配，?list=<板块> 照样命中。
+    // exact：www 会 301 到裸域，订阅页只在裸域上
+    { site: 'higgsfield', name: 'Higgsfield', host: 'higgsfield.ai', match: 'exact', path: '/community/originals*' },
     { site: 'steam', name: 'Steam', host: 'store.steampowered.com', match: 'exact', path: ['/category/*', '/tags/*'] },
     { site: 'mydrama', name: 'MyDrama', host: 'my-drama.com', match: 'suffix' },
     { site: 'reelshort', name: 'ReelShort', host: 'reelshort.com', match: 'suffix' },
@@ -76,7 +80,8 @@
   // 仍按 SITES，分组只管头部与设置页的展示序。
   const SITE_GROUPS = [
     { group: 'shortdrama', name: '短剧', sites: ['mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox'] },
-    { group: 'video', name: '影视', sites: ['imdb', 'netflix', 'appletv'] },
+    // Higgsfield 是 Higgsfield Studio 自制的 AI 原创影视（短片、多集剧、长片），2026-09-27 默认归入本组
+    { group: 'video', name: '影视', sites: ['imdb', 'netflix', 'appletv', 'higgsfield'] },
     // PinesDramas 同时有网文与短剧两类内容，整站按 2026-09-18 用户指定归入本组
     { group: 'game', name: '游戏 · 网文', sites: ['steam', 'royalroad', 'pinedrama'] }
   ];

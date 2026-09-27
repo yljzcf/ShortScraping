@@ -18,12 +18,12 @@ const deepEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 // ---------- T1 与 v1.5.0 字面值全等 ----------
 // 站点顺序＝弹窗/共享页图标与设置页分组顺序（2026-09-11 用户定：Netflix 第二、RoyalRoad 末位；
-// 2026-09-12 用户定：AppleTV 紧随 Netflix 排第三）
+// 2026-09-12 用户定：AppleTV 紧随 Netflix 排第三；2026-09-27：Higgsfield 紧随 AppleTV，同在影视组）
 check('T1a CATEGORY_SOURCES 顺序与全集',
-  deepEq(SiteRegistry.CATEGORY_SOURCES, ['imdb', 'netflix', 'appletv', 'steam', 'mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox', 'royalroad', 'pinedrama']),
+  deepEq(SiteRegistry.CATEGORY_SOURCES, ['imdb', 'netflix', 'appletv', 'higgsfield', 'steam', 'mydrama', 'reelshort', 'dramashorts', 'netshort', 'flickreels', 'goodshort', 'shortical', 'shortmax', 'dramabox', 'royalroad', 'pinedrama']),
   JSON.stringify(SiteRegistry.CATEGORY_SOURCES));
 check('T1b SOURCE_NAMES 字面量（含键序）',
-  deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', appletv: 'AppleTV', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', flickreels: 'FlickReels', goodshort: 'GoodShort', shortical: 'Shortical', shortmax: 'ShortMax', dramabox: 'DramaBox', royalroad: 'RoyalRoad', pinedrama: 'PinesDramas' }),
+  deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', appletv: 'AppleTV', higgsfield: 'Higgsfield', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', flickreels: 'FlickReels', goodshort: 'GoodShort', shortical: 'Shortical', shortmax: 'ShortMax', dramabox: 'DramaBox', royalroad: 'RoyalRoad', pinedrama: 'PinesDramas' }),
   JSON.stringify(SiteRegistry.SOURCE_NAMES));
 // hostBySource（站点→主域）只剩测试在用，弹窗「去抓取」早已改用 siteOfUrl 按域名归类：v1.7.0 删导出
 check('T1c 无人使用的 hostBySource 导出已删', !('hostBySource' in SiteRegistry), JSON.stringify(Object.keys(SiteRegistry)));
@@ -68,6 +68,7 @@ const expectedGroups = [
   { site: 'imdb', label: 'IMDB', tag: 'IMDB', icon: 'assets/icons/site-imdb.png' },
   { site: 'netflix', label: 'Netflix', tag: 'Netflix', icon: 'assets/icons/site-netflix.png' },
   { site: 'appletv', label: 'AppleTV', tag: 'AppleTV', icon: 'assets/icons/site-appletv.png' },
+  { site: 'higgsfield', label: 'Higgsfield', tag: 'Higgsfield', icon: 'assets/icons/site-higgsfield.png' },
   { site: 'steam', label: 'Steam', tag: 'Steam', icon: 'assets/icons/site-steam.png' },
   { site: 'royalroad', label: 'RoyalRoad', tag: 'RoyalRoad', icon: 'assets/icons/site-royalroad.png' },
   { site: 'pinedrama', label: 'PinesDramas', tag: 'PinesDramas', icon: 'assets/icons/site-pinedrama.png' }
@@ -226,11 +227,13 @@ check('T4h 共享页静态白名单含 site-tabs', serverSrc.includes("'/shared/
 // 且 exact 语义下无 *. 前缀（不波及 apple.com 其它子域）。
 // IMDB / Steam / RoyalRoad 收窄到 adapter.matches 认的订阅入口（2026-09-25 审查
 // manifest-overbroad-injection），IMDB 与 Steam 的 path 是数组、各展开两项；
-// DramaBox 贡献两项（同一 site 键的两条 host 条目逐条展开）
+// DramaBox 贡献两项（同一 site 键的两条 host 条目逐条展开）；Higgsfield 只注入 /community/originals*（v1.7.2，
+// exact 语义同 AppleTV，只认裸域 higgsfield.ai）
 check('T6 contentScriptMatches 按站点顺序：路径限定项（IMDB/Steam 各两项）+ 短剧站整站 + DramaBox 两域名',
   deepEq(SiteRegistry.contentScriptMatches(), [
     '*://*.imdb.com/search/title*', '*://*.imdb.com/find*',
     '*://*.netflix.com/tudum/top10*', '*://tv.apple.com/us/collection/most-popular-now/*',
+    '*://higgsfield.ai/community/originals*',
     '*://store.steampowered.com/category/*', '*://store.steampowered.com/tags/*', '*://*.my-drama.com/*',
     '*://*.reelshort.com/*', '*://*.dramashorts.io/*', '*://*.netshort.com/*', '*://*.flickreels.net/*',
     '*://*.goodshort.com/*', '*://*.shortical.com/*', '*://*.shorttv.live/*',
@@ -275,7 +278,7 @@ const injected = url => SiteRegistry.contentScriptMatches().some(p => matchesPat
     urls.length > 0 && missed.length === 0, JSON.stringify(missed));
 }
 
-// ---------- T6c 三站的非订阅页不再注入；自测匹配器语义 ----------
+// ---------- T6c 路径收窄站点（IMDB / Steam / RoyalRoad / Higgsfield）的非订阅页不注入；自测匹配器语义 ----------
 for (const [url, expected] of [
   ['https://www.imdb.com/find/?q=drama', true],
   ['https://m.imdb.com/search/title/?genres=short', true],
@@ -288,6 +291,14 @@ for (const [url, expected] of [
   ['https://store.steampowered.com/app/570/', false],
   ['https://www.royalroad.com/home', false],
   ['https://www.royalroad.com/fiction/12345/some-title', false],
+  // Higgsfield（v1.7.2）：整站是 AI 生成工具，只注入订阅页；?list= 连查询串一起匹配
+  ['https://higgsfield.ai/community/originals?list=first_look', true],
+  ['https://higgsfield.ai/community/originals', true],
+  ['https://higgsfield.ai/', false],
+  ['https://higgsfield.ai/ai/video', false],
+  ['https://higgsfield.ai/community/projects', false],
+  ['https://higgsfield.ai/original-series/mork/episode-1', false],
+  ['https://www.higgsfield.ai/community/originals?list=first_look', false],
   // 匹配器自身语义：查询串参与路径匹配、裸域命中 *.、scheme 只认 http(s)
   ['https://www.flickreels.net/?list=hot_picks', true],
   ['https://imdb.com/search/title/', true],
@@ -328,8 +339,8 @@ check('T6d notimdb.com 站点归属怪癖保真', SiteRegistry.siteOfUrl('https:
   const unmapped = catalog.filter(entry => !SiteRegistry.siteOfUrl(entry.url)).map(entry => entry.url);
   check('T8a 订阅目录每条都能映射到站点', catalog.length > 0 && unmapped.length === 0, JSON.stringify(unmapped));
 
-  // 照抄 README「各站的域名形态并不一致」那段：带 www. 的四站与必须裸域的两站（站点 301 方向各不相同）
-  const HOST_FORM = { flickreels: 'www', goodshort: 'www', shortmax: 'www', dramabox: 'www', shortical: 'bare', pinedrama: 'bare' };
+  // 照抄 README「各站的域名形态并不一致」那段：带 www. 的四站与必须裸域的三站（站点 301 方向各不相同）
+  const HOST_FORM = { flickreels: 'www', goodshort: 'www', shortmax: 'www', dramabox: 'www', shortical: 'bare', pinedrama: 'bare', higgsfield: 'bare' };
   const wrongForm = catalog.filter(entry => {
     const form = HOST_FORM[SiteRegistry.siteOfUrl(entry.url)];
     if (!form) return false;
@@ -337,7 +348,7 @@ check('T6d notimdb.com 站点归属怪癖保真', SiteRegistry.siteOfUrl('https:
     return form === 'www' ? !www : www;
   }).map(entry => entry.url);
   const covered = Object.keys(HOST_FORM).filter(site => catalog.some(entry => SiteRegistry.siteOfUrl(entry.url) === site));
-  check('T8b 域名形态：FlickReels / GoodShort / ShortMax / DramaBox 带 www.，Shortical / PinesDramas 不带',
+  check('T8b 域名形态：FlickReels / GoodShort / ShortMax / DramaBox 带 www.，Shortical / PinesDramas / Higgsfield 不带',
     wrongForm.length === 0 && covered.length === Object.keys(HOST_FORM).length,
     JSON.stringify({ wrongForm, covered }));
 

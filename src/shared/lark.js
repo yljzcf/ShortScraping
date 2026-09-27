@@ -130,6 +130,9 @@
    *   按请求尺寸裁切，同为 2:3 故构图不变，22/22 条存量实测 200（2026-09-15）。
    * - FlickReels：去掉 OSS 缩放参数 ?x-oss-process=image/resize,w_600,image/format,webp
    *   （v1.6.5；600×780 webp ≈60KB → 1000×1300 jpg ≈400KB），参数本身含英文逗号。
+   * - Higgsfield：站点缩放代理 images.higgs.ai 的 384 宽档（url 参数百分号编码）→ 同一代理的 1080 宽档、
+   *   url 参数不编码（v1.7.2；≈40KB → 55~617KB，与站点 _optimized.webp 同宽）。刻意**不解包成
+   *   CloudFront 原图**：没有优化档的作品原图是最大近 10MB 的 png，CloudFront 慢时 15 秒读不完。
    * 保持现状的站点（2026-09-15 复测，均已在各自上限）：Steam（460×215；同哈希目录下
    * capsule_616x353 / library_600x900 / library_hero / hero_capsule 逐个实测全 404，
    * 3 个 app 一致）、RoyalRoad（covers-large 400×600，已比 covers-full 大）、
@@ -226,6 +229,23 @@
       // 不写死 '!15491.webp'（同 AppleTV 尺寸码、DramaBox @ 尾段的教训）。
       return raw.replace(/!\d+\.webp$/i, '');
     }
+    if (/^https:\/\/images\.higgs\.ai\//i.test(raw)) {
+      // Higgsfield：采集存站内卡片同款缩放代理 `images.higgs.ai/?default=1&output=webp&url=<竖版海报>&w=384&q=85`
+      // （≈40KB），推送换同一代理的 1080 宽档（与站点 _optimized.webp 同宽，29 部实测 55~617KB）。
+      // **不解包成 CloudFront 原图**：没有优化档的作品原图是 3.9~9.7MB 的 png，CloudFront 慢时（实测 ≈330KB/s）
+      // 15 秒读不完，10MB 还顶到飞书图片上传上限——2026-09-27 实推 29 条，有 3 条因此退回了 384 宽小图。
+      // url 参数放最后且**不编码**（代理对两种形态回同一字节，实测），整个 URL 不含逗号/百分号，捷径能转附件；
+      // 内层地址自带 ? & # % 逗号或空白时没法裸拼，退回解包直链。与 content.js 的 higgsfieldThumb 成对。
+      try {
+        const inner = new URL(raw).searchParams.get('url') || '';
+        if (!/^https?:\/\//i.test(inner)) return raw;
+        if (/[?&#%,\s]/.test(inner)) return inner;
+        return `https://images.higgs.ai/?default=1&output=webp&w=1080&q=85&url=${inner}`;
+      } catch (e) {
+        // 解析失败原样透传
+      }
+      return raw;
+    }
     if (/^https:\/\/[a-z0-9-]+\.mzstatic\.com\/image\/thumb\//i.test(raw)) {
       // 尾段形如 `<w>x<h><裁切码>.<扩展名>`。**按形状匹配数字**、不写死 '400x600nr'：
       // 裁切码取自站点自己的 artwork.template（content.js 的 appleArtUrl 只替换
@@ -254,7 +274,7 @@
       // 全站点统一条目 ID（值＝内部去重字段 itemId，与 CSV 的 itemId 列一致）：IMDB=tt…、
       // Steam=appId、RoyalRoad=rr…、MyDrama=md…、ReelShort=rs…、DramaShorts=ds…、NetShort=ns…、
       // Netflix=nf…、AppleTV=at…、FlickReels=fr…、GoodShort=gs…、Shortical=sc…、ShortMax=sm…、
-      // DramaBox=db…、PinesDramas=pdd…（短剧）/ pdn…（小说）；前缀由 content.js 各适配器生成
+      // DramaBox=db…、PinesDramas=pdd…（短剧）/ pdn…（小说）、Higgsfield=hf…；前缀由 content.js 各适配器生成
       item_id: asText(d.itemId),
       title,
       title_zh: titleZh,

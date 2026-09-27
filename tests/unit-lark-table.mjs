@@ -51,7 +51,13 @@ const POSTERS = {
   dramabox: 'https://thwztchapter.dramaboxdb.com/data/cppartner/4x2/42x0/420x0/42000024547/42000024547.jpg@w=240&h=400',
   dramaboxRaw: 'https://thwztchapter.dramaboxdb.com/data/cppartner/4x2/42x0/420x0/42000024547/42000024547.jpg',
   pinedrama: 'https://v.pinedrama.com/b1265344voduse1318177724/5eb5db755001834811001798224/vJq5RLc9BRQA.webp!15491.webp',
-  pinedramaRaw: 'https://v.pinedrama.com/b1265344voduse1318177724/5eb5db755001834811001798224/vJq5RLc9BRQA.webp'
+  pinedramaRaw: 'https://v.pinedrama.com/b1265344voduse1318177724/5eb5db755001834811001798224/vJq5RLc9BRQA.webp',
+  // Higgsfield：采集存站点缩放代理（384 宽 ≈40KB），url 参数是百分号编码的 CloudFront 直链
+  // （多数是 1080×1920 的 _optimized.webp；没有优化档的作品直接是 png/jpg 原图）
+  higgsfield: 'https://images.higgs.ai/?default=1&output=webp&url=https%3A%2F%2Fdu4zrvwy3vtek.cloudfront.net%2Fseries%2Fb7ab12d0-769e-4420-91d8-f59f9c13c9a1%2Fportrait%2F585ed38b-328b-4075-b006-70c6a2e7f172_optimized.webp&w=384&q=85',
+  higgsfieldRaw: 'https://du4zrvwy3vtek.cloudfront.net/series/b7ab12d0-769e-4420-91d8-f59f9c13c9a1/portrait/585ed38b-328b-4075-b006-70c6a2e7f172_optimized.webp',
+  higgsfieldPng: 'https://images.higgs.ai/?default=1&output=webp&url=https%3A%2F%2Fdu4zrvwy3vtek.cloudfront.net%2Fseries%2Ff11e4476-a1ff-49a9-93a8-e2fd334785e3%2Fportrait%2F35395ccb-8ab9-4bca-926c-939e56601a83.png&w=384&q=85',
+  higgsfieldPngRaw: 'https://du4zrvwy3vtek.cloudfront.net/series/f11e4476-a1ff-49a9-93a8-e2fd334785e3/portrait/35395ccb-8ab9-4bca-926c-939e56601a83.png'
 };
 
 // 捷径致死字符：英文逗号与百分号编码（2026-07-25 两轮对照实锤）
@@ -161,6 +167,35 @@ if (typeof pfp === 'function') {
   check('P41 别站的 !数字.webp 尾缀不受波及',
     pfp('https://example.com/img/a.webp!15491.webp') === 'https://example.com/img/a.webp!15491.webp',
     pfp('https://example.com/img/a.webp!15491.webp'));
+
+  /* —— v1.7.2：Higgsfield 换成同一缩放代理的 1080 宽档（url 参数不编码） ————————
+   * 采集存 images.higgs.ai/?…&url=<竖版海报>&w=384&q=85（≈40KB，弹窗封面不懒加载），推出去才放大。
+   * 刻意**不解包成 CloudFront 原图**：没有优化档的作品原图是 3.9~9.7MB 的 png，2026-09-27 实推时
+   * CloudFront ≈330KB/s、15 秒读不完，29 条里 3 条退回了小图。1080 宽档 55~617KB、与站点
+   * _optimized.webp 同宽；url 参数不编码（代理对两种形态回同一字节，实测），整个 URL 无逗号/百分号。
+   * 与 content.js 的 higgsfieldThumb 成对。
+   */
+  const hfBig = raw => `https://images.higgs.ai/?default=1&output=webp&w=1080&q=85&url=${raw}`;
+  check('P42 higgsfield 小图档换成 1080 宽档，内层 CloudFront 地址不编码、放最后',
+    pfp(POSTERS.higgsfield) === hfBig(POSTERS.higgsfieldRaw), pfp(POSTERS.higgsfield));
+  check('P43 higgsfield 没有优化档的 png 原图同样走 1080 宽档（不去拉最大近 10MB 的原图）',
+    pfp(POSTERS.higgsfieldPng) === hfBig(POSTERS.higgsfieldPngRaw), pfp(POSTERS.higgsfieldPng));
+  check('P44 higgsfield 存的小图档含百分号不可转附件，推送形态可转',
+    !convertible(POSTERS.higgsfield) && convertible(pfp(POSTERS.higgsfield)) && convertible(pfp(POSTERS.higgsfieldPng)),
+    pfp(POSTERS.higgsfield));
+  check('P44b higgsfield 推送形态再过一遍不变（幂等：内层地址不编码也能被 searchParams 正确取回）',
+    pfp(pfp(POSTERS.higgsfield)) === pfp(POSTERS.higgsfield), pfp(pfp(POSTERS.higgsfield)));
+  check('P44c higgsfield 内层地址自带 ? & # % 逗号时没法裸拼，退回解包直链',
+    pfp(`https://images.higgs.ai/?default=1&output=webp&url=${encodeURIComponent(`${POSTERS.higgsfieldRaw}?v=2&x=1`)}&w=384&q=85`)
+      === `${POSTERS.higgsfieldRaw}?v=2&x=1`,
+    pfp(`https://images.higgs.ai/?default=1&output=webp&url=${encodeURIComponent(`${POSTERS.higgsfieldRaw}?v=2&x=1`)}&w=384&q=85`));
+  check('P45 higgsfield CloudFront 直链原样透传（与 Shortical 的 CloudFront 封面互不波及）',
+    pfp(POSTERS.higgsfieldRaw) === POSTERS.higgsfieldRaw && pfp(POSTERS.shortical) === POSTERS.shortical,
+    pfp(POSTERS.higgsfieldRaw));
+  check('P46 higgsfield 代理缺 url 参数或 url 不是 http(s) 时原样透传',
+    pfp('https://images.higgs.ai/?default=1&w=384') === 'https://images.higgs.ai/?default=1&w=384'
+      && pfp('https://images.higgs.ai/?url=javascript%3Aalert(1)&w=384') === 'https://images.higgs.ai/?url=javascript%3Aalert(1)&w=384',
+    pfp('https://images.higgs.ai/?url=javascript%3Aalert(1)&w=384'));
 
   /* —— v1.6.4：Apple TV 尺寸码提到 1200×1800 ————————————————————
    * 采集存 400×600（73KB），机器人卡满宽渲染偏软；mzstatic 按请求尺寸裁切，

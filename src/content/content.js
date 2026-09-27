@@ -965,8 +965,51 @@
     }
   };
 
+  /**
+   * Higgsfield 适配器（higgsfield.ai/community/originals，v1.7.2）：Higgsfield Studio 自制的 AI 原创影视
+   * （短片、多集剧、长片）。页上三个板块 Higgsfield Choice / First Look / On Our Radar 合起来正好是
+   * 全部已上线作品（On Our Radar 本就是剩余项），目录只订**整页**这一条、不带 ?list=（2026-09-27 用户定：
+   * 三个板块标签相同，拆开订没有区分意义，每轮还要多开两个标签页）。要单订某个板块时用
+   * ?list=higgsfield_choice / first_look / on_our_radar，切分规则见 HIGGSFIELD_SECTIONS。
+   *
+   * 站点是 TanStack Start SPA，板块是横向**虚拟列表**（16 部的板块 DOM 里只渲染 4~8 张，
+   * 随横向滚动增删）→ 不读 DOM，直接调页面自己用的那个接口（一次回全部作品，再按板块规则筛）。
+   * 接口匿名可用，CORS 只放行 https://higgsfield.ai 这一个来源——内容脚本的跨域请求按页面来源
+   * 走 CORS，正好命中，故直连（同 Shortical 调官方接口），不必加后台代理规则。
+   * 连抓三次条目集合与顺序完全一致，不随访问轮换。
+   *
+   * 列表字段齐全（标题 / 简介 / 海报 / 分集），零详情请求。接口没有内容类型字段（tags 恒空，
+   * categories 只是板块名），genres 留空。站点无平台中文，status 全走 new 交 AI 翻译。
+   * 订阅 URL 须写**裸域**（www.higgsfield.ai 301 到裸域，同 Shortical / PinesDramas）。
+   */
+  const higgsfieldAdapter = {
+    matches(url) {
+      try {
+        const u = new URL(url);
+        return u.hostname === 'higgsfield.ai' && /^\/community\/originals\/?$/.test(u.pathname);
+      } catch (e) {
+        return false;
+      }
+    },
+    async getListItems() {
+      return await getHiggsfieldItems();
+    },
+    extractId(item) {
+      // 站点规范 id 是 UUID（slug 实测会带尾空格，不宜当键），加 hf 前缀与全局去重键约定一致
+      const id = item && typeof item.id === 'string' ? item.id.trim().toLowerCase() : '';
+      return HIGGSFIELD_UUID.test(id) ? `hf${id}` : null;
+    },
+    extractBasic(item, tags, id, index) {
+      return extractHiggsfieldFromItem(item, index, tags, id);
+    },
+    async fetchDetail(drama) {
+      // 接口条目已是全量字段（简介取 full_description），无需二次请求
+      return drama;
+    }
+  };
+
   // 站点适配器注册表。
-  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, flickreels: flickreelsAdapter, goodshort: goodshortAdapter, shortical: shorticalAdapter, shortmax: shortmaxAdapter, dramabox: dramaboxAdapter, pinedrama: pinedramaAdapter, netflix: netflixAdapter, appletv: appletvAdapter };
+  const ADAPTERS = { imdb: imdbAdapter, steam: steamAdapter, royalroad: royalroadAdapter, mydrama: mydramaAdapter, reelshort: reelshortAdapter, dramashorts: dramashortsAdapter, netshort: netshortAdapter, flickreels: flickreelsAdapter, goodshort: goodshortAdapter, shortical: shorticalAdapter, shortmax: shortmaxAdapter, dramabox: dramaboxAdapter, pinedrama: pinedramaAdapter, netflix: netflixAdapter, appletv: appletvAdapter, higgsfield: higgsfieldAdapter };
 
   /**
    * 添加抓取按钮。样式只在 content.css 一处（manifest 随 content.js 一起注入）：
@@ -3064,6 +3107,109 @@
 
     console.log(`[ShortScraping] PinesDramas 详情: ${drama.title} | 类型: ${drama.genres.join(', ')}`);
     return drama;
+  }
+
+  /* ——— Higgsfield（higgsfield.ai，v1.7.2）—————————————————————————————— */
+
+  const HIGGSFIELD_ORIGIN = 'https://higgsfield.ai';
+  // 与页面自己发的请求一致：order=curated、limit=100、第一页（现有 36 部，远不到一页；
+  // 站点点「Load more」才翻页，这里同样只取第一页）
+  const HIGGSFIELD_SERIES_API = 'https://fnf-api-gw.higgsfield.ai/fnf-series/series?order=curated&limit=100&offset=0';
+  const HIGGSFIELD_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  /**
+   * 板块筛选规则（coming soon 在此之前已统一排除）。all 是整页、不带 ?list= 时的默认：不再筛——
+   * 三个板块的并集恰好就是全部已上线作品。另外三个供单订某个板块，**照抄站点前端**（2026-09-27
+   * 读自页面 JS），按作品的 categories[].slug 分：Choice 与 First Look 各认自己的分类，两者可重叠
+   * （实测 16 部与 10 部里重叠 2 部，全局去重先到先得）；On Our Radar 是**剩余项**——前两个
+   * 分类都不含的已上线作品。它与后台叫 on-our-radar 的那个分类（同一接口网关 /home 里的分组，
+   * 实测 10 部、一半同时在精选里）不是一回事，别改成按那个分类筛。
+   */
+  const HIGGSFIELD_SECTIONS = {
+    all: () => true,
+    higgsfield_choice: slugs => slugs.includes('higgsfield-choice'),
+    first_look: slugs => slugs.includes('first-look'),
+    on_our_radar: slugs => !slugs.includes('higgsfield-choice') && !slugs.includes('first-look')
+  };
+
+  /**
+   * 封面存站内卡片同款缩略图：站点自己的缩放代理 images.higgs.ai，参数照抄其 srcset 的 384w 档
+   * （竖版 384×512 / 384×683，≈40KB）。不直接存 portrait_url：已上线 29 部里 24 部是 1080×1920 的
+   * _optimized.webp（0.1~1MB），另 5 部没有优化档、就是 png/jpg 原图（1.1~9.7MB），而弹窗封面不懒加载。
+   * 推送侧由 lark.js 的 posterForPayload 换成同一代理的 1080 宽档（不解包成 CloudFront 原图，理由同上）
+   * ——成对，勿只改一边。
+   */
+  function higgsfieldThumb(raw) {
+    return `https://images.higgs.ai/?default=1&output=webp&url=${encodeURIComponent(raw)}&w=384&q=85`;
+  }
+
+  /**
+   * 当前订阅页的作品：一次请求拿全部作品，排除 coming soon，再按 ?list= 选中的板块规则筛（整页不筛）。
+   * 板块参数无效或未知时不发请求；接口失败、响应形态不对一律返回空数组（scrapePage 安全跳过、下轮重试）。
+   */
+  async function getHiggsfieldItems() {
+    const section = readListParam('all');
+    if (!section) return [];
+    const inSection = HIGGSFIELD_SECTIONS[section];
+    if (!inSection) {
+      console.log(`[ShortScraping] Higgsfield 板块未找到: ${section}`);
+      return [];
+    }
+
+    let payload;
+    try {
+      // 不带自定义请求头：保持简单请求，免 CORS 预检
+      const response = await fetchWithTimeout(HIGGSFIELD_SERIES_API);
+      if (!response.ok) {
+        console.log(`[ShortScraping] Higgsfield 接口 HTTP ${response.status}，本页跳过`);
+        return [];
+      }
+      payload = await response.json();
+    } catch (e) {
+      console.log('[ShortScraping] Higgsfield 接口请求失败:', e.message);
+      return [];
+    }
+
+    const items = payload && Array.isArray(payload.items) ? payload.items : null;
+    if (!items) {
+      console.log('[ShortScraping] Higgsfield 接口响应缺 items 数组，本页跳过');
+      return [];
+    }
+    return items.filter(item => {
+      if (!item || typeof item !== 'object' || item.state === 'coming_soon') return false;
+      const slugs = (Array.isArray(item.categories) ? item.categories : [])
+        .map(category => category && category.slug)
+        .filter(Boolean);
+      return inSection(slugs);
+    });
+  }
+
+  /**
+   * 从接口条目提取基础信息。作品地址用站点自己的播放页形态 /original-series/<slug>/<首集 slug>
+   * （页面 canonical 同形，29/29 实测 200；/original-series/<slug> 本身是 404），剧集型作品落在第 1 集。
+   * 没有分集的条目（coming soon 形态）没有播放页，返回 null 跳过。
+   * 标题与简介折叠空白：站点数据里有尾空格（"MORK "）和句中硬换行（ZEPHYR 的简介）。
+   * 简介取 full_description（多数比 short_description 长一截），缺了退 short。
+   */
+  function extractHiggsfieldFromItem(item, index, tags, hfId) {
+    const slug = typeof item.slug === 'string' ? item.slug : '';
+    const firstEpisode = Array.isArray(item.episodes) ? item.episodes[0] : null;
+    const episodeSlug = firstEpisode && typeof firstEpisode.slug === 'string' ? firstEpisode.slug : '';
+    if (!slug.trim() || !episodeSlug.trim()) {
+      console.log(`[ShortScraping] Higgsfield 条目没有播放页地址，跳过: ${item.name || hfId}`);
+      return null;
+    }
+    const text = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const cover = String(item.portrait_url || item.landscape_url || '').trim();
+
+    return createDramaCard('higgsfield', hfId, index, tags, {
+      title: text(item.name),
+      poster: cover ? higgsfieldThumb(cover) : '',
+      genres: [],
+      description: text(item.full_description) || text(item.short_description),
+      // slug 原样编码、不 trim：与站点自己的链接构造器同形
+      url: `${HIGGSFIELD_ORIGIN}/original-series/${encodeURIComponent(slug)}/${encodeURIComponent(episodeSlug)}`
+    });
   }
 
   /**
