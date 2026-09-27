@@ -100,8 +100,9 @@ const csvPath = tree.p('db/timeline.csv');
 const jsonPath = tree.p('db/timeline.json');
 const historyDir = tree.p('db/history');
 const localHealth = () => server.health(2000);
-const dropCsvs = () => (fs.existsSync(historyDir) ? fs.readdirSync(historyDir) : [])
-  .filter(name => /^timeline-\d{8}-\d{6}-\d{3}-drop\.csv$/.test(name)).sort();
+// drop 档只存 timeline.json 的副本（v1.7.1 起不再另存 CSV）
+const dropJsons = () => (fs.existsSync(historyDir) ? fs.readdirSync(historyDir) : [])
+  .filter(name => /^timeline-\d{8}-\d{6}-\d{3}-drop\.json$/.test(name)).sort();
 
 try {
   // ---------- C0 首启空快照 ----------
@@ -308,21 +309,22 @@ try {
     server.clearOutput();
     await server.postSync([...imdbRows, ...royalroad(12)]);           // reelshort 5→0：不足 10 条的小站
     await sleep(200);
-    check('D1 小站（原有 <10 条）清空不留 drop 档、不告警', dropCsvs().length === 0 && !server.output.includes('站点条数骤降'),
-      `${dropCsvs().join(',')} ${server.output.slice(0, 200)}`);
+    check('D1 小站（原有 <10 条）清空不留 drop 档、不告警', dropJsons().length === 0 && !server.output.includes('站点条数骤降'),
+      `${dropJsons().join(',')} ${server.output.slice(0, 200)}`);
 
     await server.postSync([...imdbRows, ...royalroad(10)]);           // royalroad 12→10：跌 16.7%，不到 20%
     await sleep(200);
-    check('D2 站点小幅下跌（未超 20%）不留 drop 档', dropCsvs().length === 0 && !server.output.includes('站点条数骤降'),
-      dropCsvs().join(','));
+    check('D2 站点小幅下跌（未超 20%）不留 drop 档', dropJsons().length === 0 && !server.output.includes('站点条数骤降'),
+      dropJsons().join(','));
 
     server.clearOutput();
     const cleared = await server.postSync(imdbRows);                  // royalroad 10→0；整表 70→60 只跌 14%
     await sleep(300);
-    const drops = dropCsvs();
-    check('D3a 清空一个 ≥10 条的站（整表只跌 14%）留下 drop 档，文件名沿用原格式', cleared.ok === true && drops.length === 1
-      && fs.existsSync(path.join(historyDir, drops[0].replace(/\.csv$/, '.json'))), fs.readdirSync(historyDir).join(','));
-    check('D3b drop 档是覆盖前的 70 条', drops.length === 1 && dataRows(fs.readFileSync(path.join(historyDir, drops[0]), 'utf8')) === 70, '');
+    const drops = dropJsons();
+    check('D3a 清空一个 ≥10 条的站（整表只跌 14%）留下 drop 档，文件名沿用原格式、只存 JSON', cleared.ok === true && drops.length === 1
+      && !fs.readdirSync(historyDir).some(name => name.endsWith('-drop.csv')), fs.readdirSync(historyDir).join(','));
+    check('D3b drop 档是覆盖前的 70 条', drops.length === 1
+      && JSON.parse(fs.readFileSync(path.join(historyDir, drops[0]), 'utf8')).dramas.length === 70, '');
     check('D3c 告警点名站点与条数变化，并指明备份路径',
       /站点条数骤降（royalroad 10→0 条；整表 70→60 条）/.test(server.output) && /已备份到[\s\S]*db[\\/]history/.test(server.output)
         && !server.output.includes('收到空时间线推送'), server.output.slice(0, 400));

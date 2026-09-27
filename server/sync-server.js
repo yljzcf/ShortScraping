@@ -182,13 +182,17 @@ function parseJsonText(text) {
 // timeline.csv 与 timeline.json 两份本地副本同时消失（原子写 rename 不留旧文件）。
 // 两档留痕，都只挂在**真正要覆盖**的那一支（同内容推送本就不重写，见 /sync），
 // 所以 SW 每次唤醒的预热推送不会刷屏：
-//   每日档 timeline-YYYYMMDD.{csv,json}   当天第一次改写前的状态，保留最近 14 份（每个有改写的日子至多一份）；
-//   drop 档 timeline-YYYYMMDD-HHMMSS-mmm-drop.{csv,json}
+//   每日档 timeline-YYYYMMDD.json        当天第一次改写前的状态，保留最近 7 份（每个有改写的日子至多一份）；
+//   drop 档 timeline-YYYYMMDD-HHMMSS-mmm-drop.json
 //                                        条数清空或跌超 20%、或任一站点（原有 ≥10 条）跌超 20% 时
 //                                        额外留一份，保留最近 10 份。
-// 事故形态必定落在 drop 档；日常改写只多出每天两个文件。
+// 事故形态必定落在 drop 档；日常改写只多出每天一个文件。
+// 只存 timeline.json（v1.7.1，2026-09-27 用户定）：设置页「导入恢复」只认 JSON，CSV 随时能由 JSON 重新生成，
+// 以前 CSV、JSON 各存一份，备份目录一半是用不上的副本；每日档也从 14 份减到 7 份。旧版本留下的 .csv 备份
+// 不轮转、不自动删（是同名 JSON 的副本，可手动删除）。盘上还没有 timeline.json 时（新装的第一次推送）没有
+// 旧快照可留，当天的每日档在下一次改写时再留
 const HISTORY_DIR = path.join(DB_DIR, 'history');
-const HISTORY_KEEP_DAILY = 14;
+const HISTORY_KEEP_DAILY = 7;
 const HISTORY_KEEP_DROP = 10;
 const HISTORY_DROP_RATIO = 0.8;
 // 分站点口径（v1.6.21）：整表 80% 看不见「只清空一个站」——2026-09 实测清空 royalroad（430/2239，占 19.2%）
@@ -225,17 +229,13 @@ function stampParts(date = new Date()) {
   };
 }
 
-// 源文件都是原子写落定的完整文件，copyFileSync 拿到的必然是一致快照；
-// 不存在的那份（首启时还没有 timeline.json）跳过不报错。
-function copyTimelinePair(baseName) {
-  const copied = [];
-  for (const [source, ext] of [[CSV_PATH, 'csv'], [TIMELINE_JSON_PATH, 'json']]) {
-    if (!fs.existsSync(source)) continue;
-    const target = path.join(HISTORY_DIR, `${baseName}.${ext}`);
-    fs.copyFileSync(source, target);
-    copied.push(target);
-  }
-  return copied;
+// 源文件是原子写落定的完整文件，copyFileSync 拿到的必然是一致快照；还没有 timeline.json（新装的第一次推送）
+// 时跳过不报错。返回留下的备份路径（没有就是空数组）
+function copyTimelineSnapshot(baseName) {
+  if (!fs.existsSync(TIMELINE_JSON_PATH)) return [];
+  const target = path.join(HISTORY_DIR, `${baseName}.json`);
+  fs.copyFileSync(TIMELINE_JSON_PATH, target);
+  return [target];
 }
 
 // 同类备份只保留最近 keep 份：文件名以 YYYYMMDD[-HHMMSS] 开头，字典序即时间序
@@ -259,11 +259,8 @@ function backupBeforeOverwrite(nextCount, prevCount, prevSignature, siteDrops = 
     fs.mkdirSync(HISTORY_DIR, { recursive: true });
     const { day, time } = stampParts();
 
-    const dailyDone = fs.existsSync(path.join(HISTORY_DIR, `timeline-${day}.csv`))
-      || fs.existsSync(path.join(HISTORY_DIR, `timeline-${day}.json`));
-    if (!dailyDone) {
-      copyTimelinePair(`timeline-${day}`);
-      rotateHistory(/^timeline-\d{8}\.csv$/, HISTORY_KEEP_DAILY);
+    if (!fs.existsSync(path.join(HISTORY_DIR, `timeline-${day}.json`))) {
+      copyTimelineSnapshot(`timeline-${day}`);
       rotateHistory(/^timeline-\d{8}\.json$/, HISTORY_KEEP_DAILY);
     }
 
@@ -271,8 +268,7 @@ function backupBeforeOverwrite(nextCount, prevCount, prevSignature, siteDrops = 
     if (!tableDropped && siteDrops.length === 0) return [];
     // 同一源状态已留过 drop 档：它是最新一份、不会被轮转掉，直接复用路径写进告警
     if (prevSignature === lastDrop.signature) return lastDrop.paths;
-    const dropPaths = copyTimelinePair(`timeline-${day}-${time}-drop`);
-    rotateHistory(/^timeline-\d{8}-\d{6}-\d{3}-drop\.csv$/, HISTORY_KEEP_DROP);
+    const dropPaths = copyTimelineSnapshot(`timeline-${day}-${time}-drop`);
     rotateHistory(/^timeline-\d{8}-\d{6}-\d{3}-drop\.json$/, HISTORY_KEEP_DROP);
     lastDrop = { signature: prevSignature, paths: dropPaths };
     return dropPaths;

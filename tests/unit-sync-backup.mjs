@@ -10,6 +10,8 @@ import { startIsolatedServer } from './server-fixture.mjs';
 // 之后补充：落盘失败时内存签名不先行（否则重推同内容被跳过、磁盘停在旧版本）、
 // 先写 json 快照再写 CSV（CSV 被锁不冻结共享页）、同一源状态的 drop 档不重复留、
 // CSV 落后于快照时重启后首次推送照样补写。
+// v1.7.1：备份只存 timeline.json（设置页导入只认 JSON，CSV 可由 JSON 重新生成），每日档从 14 份减到 7 份；
+// 旧版本留下的 .csv 备份不轮转、不删。
 //
 // 隔离方式：tests/server-fixture.mjs 把 sync-server.js + src/shared 复制到 os.tmpdir() 隔离树，
 // 随机端口子进程——全程不触碰真实 31919 与真实 db/（2026-07-15 事故预防纪律）。
@@ -45,75 +47,77 @@ const today = (() => {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
 })();
 const ls = () => (fs.existsSync(historyDir) ? fs.readdirSync(historyDir).sort() : []);
-const dailyCsvs = () => ls().filter(n => new RegExp(`^timeline-\\d{8}\\.csv$`).test(n));
-const dropCsvs = () => ls().filter(n => /^timeline-\d{8}-\d{6}-\d{3}-drop\.csv$/.test(n));
+const dailyJsons = () => ls().filter(n => /^timeline-\d{8}\.json$/.test(n));
+const dropJsons = () => ls().filter(n => /^timeline-\d{8}-\d{6}-\d{3}-drop\.json$/.test(n));
+const csvBackups = () => ls().filter(n => n.endsWith('.csv'));
 const dataRows = (text) => text.trim().split('\r\n').length - 1;
+// 备份里的条数（备份是 timeline.json 的原样副本）
+const backupRows = (name) => JSON.parse(fs.readFileSync(path.join(historyDir, name), 'utf8')).dramas.length;
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
+const show = v => JSON.stringify(v);
 
 try {
-  // ---------- B1 首次真实改写 → 生成当天的每日档（内容＝改写前的状态） ----------
+  // ---------- B1 新装第一次推送没有旧快照可留；第二次改写 → 生成当天的每日档（内容＝改写前的状态） ----------
   await postSync(many(10));
-  check('B1a 生成当日每日档 CSV', fs.existsSync(path.join(historyDir, `timeline-${today}.csv`)), ls().join(','));
-  check('B1b 每日档是「改写前」的内容（ensureDb 建的空表头）',
-    dataRows(fs.readFileSync(path.join(historyDir, `timeline-${today}.csv`), 'utf8')) === 0, ls().join(','));
-  check('B1c 当前 CSV 已是新的 10 条', dataRows(fs.readFileSync(csvPath, 'utf8')) === 10, '');
+  check('B1a 新装第一次推送（盘上还没有 timeline.json）：没有旧快照，不留备份', ls().length === 0, ls().join(','));
+  check('B1b 当前 CSV 已是新的 10 条', dataRows(fs.readFileSync(csvPath, 'utf8')) === 10, '');
+  await postSync(many(11));
+  check('B1c 当天第一次有旧快照的改写：生成当日每日档，只存 JSON',
+    show(ls()) === show([`timeline-${today}.json`]), ls().join(','));
+  check('B1d 每日档是「改写前」的内容（10 条）', backupRows(`timeline-${today}.json`) === 10, String(backupRows(`timeline-${today}.json`)));
 
   // ---------- B2 同内容重推 → 不走重写分支，不产生任何新备份 ----------
   const snapshotB2 = ls().join(',');
-  await postSync(many(10));
+  await postSync(many(11));
   check('B2 同内容重推零新增备份', ls().join(',') === snapshotB2, `${snapshotB2} -> ${ls().join(',')}`);
 
   // ---------- B3 内容变化但没有骤降 → 当日档不重复生成、无 drop 档 ----------
-  await postSync(many(11));
-  check('B3a 当日每日档仍只有一份', dailyCsvs().length === 1, ls().join(','));
-  check('B3b 未骤降时不产生 drop 档', dropCsvs().length === 0, ls().join(','));
-  check('B3c 每日档内容未被二次覆盖（仍是当天第一次改写前的空表）',
-    dataRows(fs.readFileSync(path.join(historyDir, `timeline-${today}.csv`), 'utf8')) === 0, '');
+  await postSync(many(12));
+  check('B3a 当日每日档仍只有一份', dailyJsons().length === 1, ls().join(','));
+  check('B3b 未骤降时不产生 drop 档', dropJsons().length === 0, ls().join(','));
+  check('B3c 每日档内容未被二次覆盖（仍是当天第一次改写前的 10 条）', backupRows(`timeline-${today}.json`) === 10, '');
 
-  // ---------- B4 骤降（11 → 3，跌 72%）→ 额外 drop 档，内容是旧的 11 条 ----------
+  // ---------- B4 骤降（12 → 3，跌 75%）→ 额外 drop 档，内容是旧的 12 条 ----------
   await postSync(many(3));
-  const drops = dropCsvs();
-  check('B4a 骤降产生 drop 档', drops.length === 1, ls().join(','));
-  check('B4b drop 档内容是覆盖前的 11 条',
-    drops.length === 1 && dataRows(fs.readFileSync(path.join(historyDir, drops[0]), 'utf8')) === 11,
-    drops.length === 1 ? String(dataRows(fs.readFileSync(path.join(historyDir, drops[0]), 'utf8'))) : '无');
-  check('B4c drop 档同时留了 json 快照',
-    fs.existsSync(path.join(historyDir, drops[0].replace(/\.csv$/, '.json'))), ls().join(','));
+  const drops = dropJsons();
+  check('B4a 骤降产生 drop 档，只存 JSON', drops.length === 1 && csvBackups().length === 0, ls().join(','));
+  check('B4b drop 档内容是覆盖前的 12 条', drops.length === 1 && backupRows(drops[0]) === 12,
+    drops.length === 1 ? String(backupRows(drops[0])) : '无');
 
   // ---------- B5 空推送（带 allowEmpty，用户确认过的清空）→ drop 档 + 警告行指明备份路径 ----------
   server.clearOutput();
   await postSync([], { allowEmpty: true });
   await sleep(300);
-  check('B5a 空推送再留一份 drop 档', dropCsvs().length === 2, ls().join(','));
+  check('B5a 空推送再留一份 drop 档', dropJsons().length === 2, ls().join(','));
   check('B5b 既有的空推送警告仍在', /警告：收到空时间线推送/.test(server.output), server.output.trim().slice(0, 200));
-  check('B5c 警告点名备份文件', /已备份到[\s\S]*db[\\/]history/.test(server.output), server.output.trim().slice(0, 300));
+  check('B5c 警告点名备份文件（只有 JSON 一份）', /已备份到[\s\S]*db[\\/]history[\\/]timeline-\d{8}-\d{6}-\d{3}-drop\.json/.test(server.output)
+    && !/-drop\.csv/.test(server.output), server.output.trim().slice(0, 300));
   check('B5d 清空行为不变（CSV 只剩表头）', dataRows(fs.readFileSync(csvPath, 'utf8')) === 0, '');
 
-  // ---------- B6 轮转：每日档保留 14 份、drop 档保留 10 份 ----------
+  // ---------- B6 轮转：每日档保留 7 份、drop 档保留 10 份；旧版本留下的 .csv 备份不动 ----------
   // 造历史文件（日期均早于今天），再触发一次真实改写验证裁剪
   for (let i = 1; i <= 20; i++) {
     const day = `202601${String(i).padStart(2, '0')}`;
-    fs.writeFileSync(path.join(historyDir, `timeline-${day}.csv`), 'old');
     fs.writeFileSync(path.join(historyDir, `timeline-${day}.json`), '{}');
-    fs.writeFileSync(path.join(historyDir, `timeline-${day}-120000-000-drop.csv`), 'old');
     fs.writeFileSync(path.join(historyDir, `timeline-${day}-120000-000-drop.json`), '{}');
   }
-  fs.rmSync(path.join(historyDir, `timeline-${today}.csv`));   // 让当天的每日档重新生成一次
-  fs.rmSync(path.join(historyDir, `timeline-${today}.json`), { force: true });
+  const legacyCsvs = ['timeline-20260101.csv', 'timeline-20260120.csv', 'timeline-20260102-120000-000-drop.csv'];
+  for (const name of legacyCsvs) fs.writeFileSync(path.join(historyDir, name), 'old');
+  fs.rmSync(path.join(historyDir, `timeline-${today}.json`));   // 让当天的每日档重新生成一次
   await postSync(many(9));                                      // 0 → 9，非骤降，只生成每日档
-  check('B6a 每日档裁到 14 份', dailyCsvs().length === 14, `daily=${dailyCsvs().length} [${dailyCsvs().join(',')}]`);
-  check('B6b 保留的是最新的（今天在内、20260101 已删）',
-    dailyCsvs().includes(`timeline-${today}.csv`) && !dailyCsvs().includes('timeline-20260101.csv'), dailyCsvs().join(','));
-  check('B6c 每日档的 json 同步裁剪',
-    ls().filter(n => /^timeline-\d{8}\.json$/.test(n)).length === 14,
-    String(ls().filter(n => /^timeline-\d{8}\.json$/.test(n)).length));
+  check('B6a 每日档裁到 7 份', dailyJsons().length === 7, `daily=${dailyJsons().length} [${dailyJsons().join(',')}]`);
+  check('B6b 保留的是最新的 7 份（今天与 20260115-20260120 在，20260114 已删）',
+    dailyJsons().includes(`timeline-${today}.json`) && dailyJsons().includes('timeline-20260115.json')
+      && !dailyJsons().includes('timeline-20260114.json'), dailyJsons().join(','));
 
   await postSync(many(1));                                      // 9 → 1，骤降，生成 drop 档并触发 drop 轮转
-  check('B6d drop 档裁到 10 份', dropCsvs().length === 10, `drop=${dropCsvs().length}`);
-  check('B6e drop 档保留最新的（20260101 的已删）',
-    !dropCsvs().includes('timeline-20260101-120000-000-drop.csv'), dropCsvs().join(','));
+  check('B6c drop 档裁到 10 份', dropJsons().length === 10, `drop=${dropJsons().length}`);
+  check('B6d drop 档保留最新的（20260101 的已删）',
+    !dropJsons().includes('timeline-20260101-120000-000-drop.json'), dropJsons().join(','));
+  check('B6e 旧版本留下的 .csv 备份原样不动（不轮转、不删），也没有新的 .csv 备份',
+    show(csvBackups()) === show([...legacyCsvs].sort()), csvBackups().join(','));
 
   // ---------- B7 备份目录不干扰共享页/CSV 正常行为 ----------
   check('B7 当前 CSV 仍是最后一次推送的 1 条', dataRows(fs.readFileSync(csvPath, 'utf8')) === 1, '');
@@ -130,13 +134,13 @@ try {
   const b8b = await postSync(many(2));                          // 扩展失败后重推同一份
   check('B8a 快照写失败返回错误', b8a.ok === false && b8b.ok === false, JSON.stringify([b8a, b8b]));
   check('B8b 先写快照：快照失败时 CSV 与 json 都保持旧的 10 条', dataRows(fs.readFileSync(csvPath, 'utf8')) === 10 && jsonRows() === 10, '');
-  check('B8c 同一源状态的重试不重复留 drop 档', dropCsvs().length === 1, ls().join(','));
+  check('B8c 同一源状态的重试不重复留 drop 档', dropJsons().length === 1, ls().join(','));
   fs.rmdirSync(`${jsonPath}.tmp`);
   const b8d = await postSync(many(2));                          // 恢复后同内容再推：不能被当成「未变化」跳过
   check('B8d 恢复后同内容重推真正落盘', b8d.ok === true && b8d.count === 2 && jsonRows() === 2
     && dataRows(fs.readFileSync(csvPath, 'utf8')) === 2, JSON.stringify(b8d));
   check('B8e 共享页随之更新', (await getTimeline()).dramas.length === 2, '');
-  check('B8f 恢复后的写入也不重复留 drop 档', dropCsvs().length === 1, ls().join(','));
+  check('B8f 恢复后的写入也不重复留 drop 档', dropJsons().length === 1, ls().join(','));
 
   // ---------- B9 CSV 写失败（Windows 上 Excel 锁住）：共享页照常前进，下次同内容推送补写 CSV ----------
   fs.mkdirSync(`${csvPath}.tmp`);
@@ -180,8 +184,7 @@ try {
   // 正是事故形态：服务刚被 launchd 拉起，重装后的扩展 SW 启动即推 []。409 分支在备份之前返回，
   // 连每日档 / drop 档都不产生（没有覆盖就没有留痕）
   await restartServer();
-  fs.rmSync(path.join(historyDir, `timeline-${today}.csv`), { force: true });  // 让「会不会留每日档」可观测
-  fs.rmSync(path.join(historyDir, `timeline-${today}.json`), { force: true });
+  fs.rmSync(path.join(historyDir, `timeline-${today}.json`), { force: true });  // 让「会不会留每日档」可观测
   const historyBefore = ls().join(',');
   const csvBefore = fs.readFileSync(csvPath, 'utf8');
   const jsonBefore = fs.readFileSync(jsonPath, 'utf8');
@@ -191,6 +194,8 @@ try {
   check('B11b CSV / json 原样', fs.readFileSync(csvPath, 'utf8') === csvBefore && fs.readFileSync(jsonPath, 'utf8') === jsonBefore, '');
   check('B11c 拒绝时不留任何备份', ls().join(',') === historyBefore, `${historyBefore} -> ${ls().join(',')}`);
   check('B11d 共享页仍是 4 条', (await getTimeline()).dramas.length === 4, '');
+  check('B12 全程没有产生任何新的 .csv 备份（剩下的只是 B6 造的旧文件）',
+    csvBackups().every(name => legacyCsvs.includes(name)), csvBackups().join(','));
 } finally {
   await server.stop();
 }
