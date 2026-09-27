@@ -300,7 +300,7 @@ async function scrapeSetup({ tabUrl, tabsGet = 'ok' } = {}) {
     async sendMessage() {
       log.sends++;
       if (!injected) throw new Error('Could not establish connection. Receiving end does not exist.');
-      return { success: true, data: [] };
+      return { success: true, newCount: 0, subscribed: true, listCount: 0 };
     },
     onUpdated: {
       addListener(fn) { setImmediate(() => fn(100, { status: 'complete' })); },

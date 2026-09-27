@@ -1,6 +1,7 @@
 /**
  * 站点注册表：全部站点元数据的单一真源（收敛自四处 hostname if 链、
- * 两处显示名映射、hostBySource 反向映射与设置页订阅分组常量，2026-08-01）。
+ * 两处显示名映射、站点→主域反向映射与设置页订阅分组常量，2026-08-01；
+ * 反向映射 hostBySource 已无消费方，v1.7.0 删除）。
  *
  * 新增站点只改本文件的 SITES 一处，并把它归入 SITE_GROUPS 的某一组
  * （分组决定弹窗/共享页头部与设置页订阅列表的展示序，v1.5.11 起）。
@@ -24,8 +25,6 @@
  *   - 同键的各条 name 必须一致（unit-site-registry 有守卫），否则显示名取决于遍历顺序；
  *   - CATEGORY_SOURCES 去重——它是「站点键全集」，不去重会渲染出两个一样的标签，
  *     并让 SITE_GROUPS 展平排列与 ADAPTERS 键集两条断言同时 RED；
- *   - hostBySource 取**首条**即主域（保留供外部参考；弹窗「去抓取」已改用 siteOfUrl 按域名归类挑订阅 URL，
- *     按 host 子串挑会让只订了 dramaboxdb.com 的 DramaBox 挑不中）；
  *   - contentScriptMatches 逐条展开，两个域名都进 manifest。
  *
  * 加载方式：后台 importScripts / 弹窗、设置页、共享页 <script> 标签
@@ -98,11 +97,8 @@
   }
 
   const SOURCE_NAMES = {};
-  const hostBySource = {};
   for (const entry of SITES) {
     SOURCE_NAMES[entry.site] = entry.name;
-    // 同键多 host 取首条＝主域（保留供外部参考，弹窗「去抓取」已改用 siteOfUrl）
-    if (!(entry.site in hostBySource)) hostBySource[entry.site] = entry.host;
   }
 
   function siteOfHostname(hostname) {
@@ -122,6 +118,16 @@
       // 无效 URL 视为不属于任何站点
       return null;
     }
+  }
+
+  /**
+   * 卡片归哪个站点（弹窗 / 共享页的站点标签、同步服务的分站点骤降告警同一口径）：source 在站点全集里就用它，
+   * 否则归 IMDB——source 字段出现之前只有 IMDB 一个站。此前 timeline-render 的 dramaSource 与 sync-server 的
+   * siteOfDrama 各写一份（v1.7.0 收拢到这里）。
+   */
+  function siteOfDrama(drama) {
+    const source = drama && drama.source;
+    return CATEGORY_SOURCES.includes(source) ? source : 'imdb';
   }
 
   /**
@@ -156,8 +162,8 @@
   }
 
   const api = {
-    SITES, SITE_GROUPS, DEFAULT_GROUP, CATEGORY_SOURCES, SOURCE_NAMES, hostBySource,
-    groupOfSite, siteOfHostname, siteOfUrl, isInjectableUrl, contentScriptMatches
+    SITES, SITE_GROUPS, DEFAULT_GROUP, CATEGORY_SOURCES, SOURCE_NAMES,
+    groupOfSite, siteOfHostname, siteOfUrl, siteOfDrama, isInjectableUrl, contentScriptMatches
   };
 
   if (typeof module !== 'undefined' && module.exports) {

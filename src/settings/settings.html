@@ -636,6 +636,13 @@
             </div>
           </div>
 
+          <div class="form-field" style="max-width: 420px; margin-top: 16px;">
+            <label for="imdbWindowDaysInput">IMDb 只看近多少天发行的片（天）</label>
+            <input type="number" id="imdbWindowDaysInput" min="0" max="3650" step="1" placeholder="180">
+            <p class="help-text" style="margin-top: 6px;">IMDb 订阅地址不写日期，抓取时按这里的天数只看近期发行的片，每个榜单读到的前 50 就是近期关注度最高的。默认 180；填 0 表示不限日期。改了天数之后的第一轮 IMDb 只入库、不推送到 Lark 群。</p>
+            <p class="help-text" id="knownItemsInfo" style="margin-top: 4px;"></p>
+          </div>
+
           <div class="actions">
             <button class="btn btn-primary" id="btnSaveSchedule">保存定时任务配置</button>
           </div>
@@ -670,7 +677,7 @@
             </div>
             <div class="form-field">
               <label for="requestTimeoutSec">请求超时（秒）</label>
-              <input type="number" id="requestTimeoutSec" min="1" step="1" placeholder="10">
+              <input type="number" id="requestTimeoutSec" min="1" step="1" placeholder="60">
             </div>
           </div>
 
@@ -884,6 +891,7 @@
   <script src="../shared/timeline-csv.js"></script>
   <script src="../shared/schedule-config.js"></script>
   <script src="../shared/translate-config.js"></script>
+  <script src="../shared/fetch-util.js"></script>
   <script src="../shared/lark.js"></script>
   <script src="settings.js"></script>
 </body>

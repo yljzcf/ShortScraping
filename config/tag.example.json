@@ -1,54 +1,54 @@
 [
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&genres=short",
+    "url": "https://www.imdb.com/search/title/?genres=short",
     "tags": ["IMDB", "short"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&genres=Drama",
+    "url": "https://www.imdb.com/search/title/?genres=Drama",
     "tags": ["IMDB", "drama"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&interests=in0000310",
+    "url": "https://www.imdb.com/search/title/?interests=in0000310",
     "tags": ["IMDB", "micro-drama"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1116954",
+    "url": "https://www.imdb.com/search/title/?companies=co1116954",
     "tags": ["IMDB", "MyDrama"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1124838",
+    "url": "https://www.imdb.com/search/title/?companies=co1124838",
     "tags": ["IMDB", "DramaWave"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1045147",
+    "url": "https://www.imdb.com/search/title/?companies=co1045147",
     "tags": ["IMDB", "GoodShort"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1028734",
+    "url": "https://www.imdb.com/search/title/?companies=co1028734",
     "tags": ["IMDB", "DramaBox"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1065580",
+    "url": "https://www.imdb.com/search/title/?companies=co1065580",
     "tags": ["IMDB", "ShortMax"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1167893",
+    "url": "https://www.imdb.com/search/title/?companies=co1167893",
     "tags": ["IMDB", "Shortical"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1016895",
+    "url": "https://www.imdb.com/search/title/?companies=co1016895",
     "tags": ["IMDB", "ReelShort"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1116348",
+    "url": "https://www.imdb.com/search/title/?companies=co1116348",
     "tags": ["IMDB", "DramaShorts"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1149472",
+    "url": "https://www.imdb.com/search/title/?companies=co1149472",
     "tags": ["IMDB", "FlickReels"]
   },
   {
-    "url": "https://www.imdb.com/search/title/?release_date=2026-01-01,&companies=co1104898",
+    "url": "https://www.imdb.com/search/title/?companies=co1104898",
     "tags": ["IMDB", "NetShort"]
   },
   {

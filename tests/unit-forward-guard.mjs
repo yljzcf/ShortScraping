@@ -248,6 +248,17 @@ const popupStore = extra => ({
     p.status().textContent);
 }
 
+// ---------- G4 两端判据同源：后台与弹窗各持一份 DRAMAS_LAYOUT_SUPPORTED（弹窗不加载后台脚本），必须同值 ----------
+{
+  const constOf = rel => Number((fs.readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8').match(/const DRAMAS_LAYOUT_SUPPORTED = (\d+);/) || [])[1]);
+  const bgValue = constOf('src/background/background.js');
+  const popupValue = constOf('src/popup/popup.js');
+  check('G4 后台与弹窗的 DRAMAS_LAYOUT_SUPPORTED 同值（后台只剩 isDramasLayoutAhead 一处判据）',
+    Number.isInteger(bgValue) && bgValue === popupValue
+      && (fs.readFileSync(new URL('../src/background/background.js', import.meta.url), 'utf8').match(/layout > DRAMAS_LAYOUT_SUPPORTED/g) || []).length === 1,
+    JSON.stringify({ bgValue, popupValue }));
+}
+
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

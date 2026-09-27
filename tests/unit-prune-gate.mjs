@@ -73,6 +73,19 @@ const bgSrc = fs.readFileSync(new URL('../src/background/background.js', import.
 check('G6 performScrapeOnce 结束处 force 清理并重读最新 urlTags',
   bgSrc.includes('pruneDramasOutsideConfiguredUrls(latestUrlTags, { force: true'), '');
 
+// ---------- G7/G8 订阅 URL 清单收拢到 SubscriptionConfig（v1.7.0）后指纹与失败语义不变 ----------
+// 指纹也是 csvLastPush.tagsKey：换了一个字节，升级后首次唤醒就会多跑一遍整表清理、多推一次 CSV
+check('G7 指纹黄金值：归一去重、排序、换行拼接，非 http 与坏条目不计',
+  bg.run(`configuredUrlFingerprint(${JSON.stringify([{ urlPattern: 'https://b.test/y/' }, { urlPattern: 'https://a.test/x' },
+    { urlPattern: 'https://a.test/x/' }, { urlPattern: 'ftp://c.test' }, {}])})`) === 'https://a.test/x\nhttps://b.test/y', '');
+seed(card('tt0001'), card('tt0002', { sourceListUrl: OUT }));
+const fpBefore = bg.data.pruneFingerprint;
+let pruneError = null;
+await bg.run('pruneDramasOutsideConfiguredUrls({ urlPattern: "https://a.test" }, { force: true })').catch(e => { pruneError = e; });
+check('G8 urlTags 是坏数据（真值却不是数组）→ 清理抛错、表与指纹原样（不当成「零订阅」清库）',
+  pruneError !== null && ids() === 'tt0001,tt0002' && bg.data.pruneFingerprint === fpBefore,
+  `error=${pruneError?.message} ids=${ids()} fp=${bg.data.pruneFingerprint}`);
+
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

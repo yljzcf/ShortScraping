@@ -10,6 +10,7 @@ importScripts('../shared/scrape-rules.js'); // 与 content.js 共用的采集口
 importScripts('../shared/timeline-csv.js');
 importScripts('../shared/schedule-config.js'); // cron 解析/校验/默认值单一真源
 importScripts('../shared/translate-config.js');
+importScripts('../shared/fetch-util.js'); // 带期限的 fetch（期限连正文），须先于 translator.js / lark.js
 importScripts('../shared/translator.js');
 importScripts('../shared/lark.js');
 
@@ -54,7 +55,10 @@ let translateManualWaiter = false;
 // 不读 storage，避免拿到孤儿清理尚未落库前的僵尸 running:true。
 let translateRunStateMirror = null;
 
-const CSV_SYNC_ENDPOINT = 'http://127.0.0.1:31919/sync';
+// 本地同步服务地址（与 popup.js / settings.js 的 SYNC_BASE_URL 同名同值，unit-audit-regressions 守着三端一致；
+// 端口改了三处一起改）。下面三个端点都由它派生（v1.7.0 收拢，此前各写一遍字面量）
+const SYNC_BASE_URL = 'http://127.0.0.1:31919';
+const CSV_SYNC_ENDPOINT = `${SYNC_BASE_URL}/sync`;
 // 旧版同步服务（v1.6.18 及以前）请求体上限 20MB、超限直接断开连接：浏览器的 fetch 网络错误
 // 不带原因，扩展这头看到的 TypeError 与「服务没启动」一模一样。推送体到了这个量级又连不上时，
 // 报错里点明「多半是超限被断开」（审查 body-limit-ceiling）；新版超限回 413，走 HTTP 分支
@@ -75,7 +79,7 @@ const CSV_SYNC_BUSY_WINDOW_MS = 8000;
 const CSV_SYNC_TIMEOUT_MS = 60000;
 // 冷启动指纹比对问的 /health（本机块带 contentHash / csvInSync）与它的期限：服务没开或挂住时最多拖 3 秒，
 // 超时即按「拿不到」处理、照旧推送
-const CSV_SYNC_HEALTH_ENDPOINT = 'http://127.0.0.1:31919/health';
+const CSV_SYNC_HEALTH_ENDPOINT = `${SYNC_BASE_URL}/health`;
 const CSV_SYNC_HEALTH_TIMEOUT_MS = 3000;
 
 // 四个配置文件 ↔ storage 键 ↔ 同步服务写回端点 POST /config/<key>。请求体 { <storage 键>: 值 }
@@ -87,15 +91,16 @@ const CONFIG_FILES = {
   trans: { file: 'config/trans.json', storageKey: 'translateConfig' },
   lark: { file: 'config/lark.json', storageKey: 'larkConfig' }
 };
-const CONFIG_SYNC_BASE_URL = 'http://127.0.0.1:31919/config/';
+const CONFIG_SYNC_BASE_URL = `${SYNC_BASE_URL}/config/`;
 // 写回挂在 SW 唤醒路径上，服务没开时不能拖住后续迁移与闹钟安装
 const CONFIG_WRITE_BACK_TIMEOUT_MS = 3000;
 
 // 订阅外清理的回收站（storage.pruneTrash）只留最近几批：一批可能是整库，攒多了占空间
 const PRUNE_TRASH_MAX_BATCHES = 3;
 
-// 本文件的 setTimeout 延时（本常量与 CSV 500ms 防抖 / 8s 忙碌节流）均远小于 MV3 SW 的
-// ~30s 空闲回收阈值；极端情况下 SW 连同定时器被杀时，SW 下次唤醒的顶层
+// 调度类的 setTimeout（本常量与 CSV 500ms 防抖 / 8s 忙碌节流）均远小于 MV3 SW 的 ~30s 空闲回收阈值；
+// 更长的计时器都是「进行中的事」的期限（整页抓取 5 分钟、标签页加载 30 秒、各请求期限），那时 SW 由抓取
+// 标签页的消息往来或 startSwKeepAlive 撑着。极端情况下 SW 连同定时器被杀时，SW 下次唤醒的顶层
 // warmupCsvSyncIfStale（没推出去的那次写已换了 dramasStamp.rev，指纹必然对不上、照推）与
 // translate-task alarm 会兜底。评估后不迁移 chrome.alarms（其最小粒度 30s，反而更差）。
 const POST_SCRAPE_TRANSLATE_DELAY_MS = 10000;
@@ -136,9 +141,14 @@ const DRAMAS_LAYOUT_SUPPORTED = 1;
 let dramasLayoutAhead = null; // null＝没有更新版本的布局标记；否则为读到的 dramasMeta
 const dramasReadOnlyWarned = new Set();
 
-function noteDramasLayout(meta) {
+// 与 popup.js 的同名函数同一判据（弹窗读 storage 自己判，两边的 DRAMAS_LAYOUT_SUPPORTED 由 unit-forward-guard 守着同值）
+function isDramasLayoutAhead(meta) {
   const layout = Number(meta?.layout);
-  dramasLayoutAhead = Number.isFinite(layout) && layout > DRAMAS_LAYOUT_SUPPORTED ? meta : null;
+  return Number.isFinite(layout) && layout > DRAMAS_LAYOUT_SUPPORTED;
+}
+
+function noteDramasLayout(meta) {
+  dramasLayoutAhead = isDramasLayoutAhead(meta) ? meta : null;
 }
 
 function dramasReadOnlyMessage() {
@@ -336,6 +346,13 @@ const initPromise = loadConfigFromJsonFiles({ beforeMigrations: setupAlarms }).c
     console.error('[ShortScraping] 定时任务安装失败（看门狗或下次唤醒重建）:', e?.message || e));
 });
 
+// 顶层初始化之后的收尾（不挡 initPromise，各自兜底）：已知片单与同步服务对齐、IMDb 滚动窗口切换的后两步。
+// 后者要开标签页抓取，放进初始化里会让抓取等初始化、初始化等抓取
+initPromise.then(async () => {
+  await runGuarded('已知片单与同步服务对齐', syncKnownItemsWithServer);
+  await runGuarded('IMDb 滚动日期窗口切换收尾', resumeImdbRollingSwitch);
+});
+
 chrome.runtime.onInstalled.addListener(async (details) => {
   if (details.reason === 'update') {
     // 版本变了（含重载未打包扩展、回退后再升级）：冷启动指纹作废并强推一次，见 resetCsvSyncFingerprint
@@ -488,17 +505,7 @@ async function loadConfigFromJsonFiles({ beforeMigrations = null } = {}) {
   // 抛错＝看门狗与定时任务一起装不上）。setupAlarms 现已提前到上面的钩子，这里的兜底仍保留：
   // 后面的迁移不能被前面某一条连坐。配置种子 set 失败仍照旧向上传播：那是「配置没恢复成」。
   await runGuarded('群机器人水位线同步', () => syncBotWatermark(larkConfig));
-  for (const [label, step] of [
-    ['itemId/标签/未映射 fandom 迁移', runLegacyDramaMigrations],
-    ['company 字段移除', dropCompanyField],
-    ['半成品翻译复位', resetPartialTranslations],
-    ['非中文译名复位', resetNonChineseTitleZh],
-    ['乱码译文复位', resetGarbledTranslations],
-    ['ReelShort 播放页 URL 迁移', migrateReelshortEpisodeUrls],
-    ['Shortical 规范 id 迁移', migrateShorticalCanonicalIds]
-  ]) {
-    await runGuarded(label, step);
-  }
+  await runPendingDramaMigrations();
   await writeBackRun;
 
   console.log(`[ShortScraping] 已从 JSON 恢复配置：${urlTags.length} 个 URL，翻译模式=${translateConfig.translateMode}`);
@@ -802,11 +809,16 @@ function fullScrapeWillCoverSite(site) {
 }
 
 async function performScrapeOnce({ site = null } = {}, progress = null) {
+  // 等 SW 启动流程（回读配置、跑一次性迁移）走完再开抓（v1.7.0）：闹钟事件与顶层初始化一起到达时，
+  // 以前可能拿着迁移前的订阅抓一轮，抓到的卡随即被迁移后的订阅外清理删掉。initPromise 从不 reject
+  await initPromise;
   console.log(site ? `[ShortScraping] 开始站点抓取: ${site}` : '[ShortScraping] 开始全量抓取...');
   const writeStats = beginDramasWriteStats();
 
   try {
-    const { urlTags = [] } = await chrome.storage.local.get('urlTags');
+    const { urlTags = [], scheduleConfig } = await chrome.storage.local.get(['urlTags', 'scheduleConfig']);
+    // IMDb 滚动日期窗口（v1.7.0）：订阅 URL 不带日期，打开页面前补 release_date（SubscriptionConfig.withReleaseWindow）
+    const imdbWindowDays = ScheduleConfig.normalizeConfig(scheduleConfig).imdbWindowDays;
     let scrapeUrls = getConfiguredScrapeUrls(urlTags);
     if (site) {
       scrapeUrls = scrapeUrls.filter(url => siteOfUrl(url) === site);
@@ -819,14 +831,26 @@ async function performScrapeOnce({ site = null } = {}, progress = null) {
       return { urlCount: 0, totalNewCount: 0, results: [] };
     }
 
-    // 订阅 URL 首轮只入库不推送：开轮时库里零条的订阅 URL 挂「进行中」，收轮时基线定在完成时刻。
-    // 经队列读表顺带把缓存预热给随后的入库写，不多付一次全表读
+    // 订阅 URL 首轮只入库不推送：开轮时库里零条的订阅 URL 挂「进行中」，收轮时本轮真正抓成的那些把基线定在
+    // 完成时刻，没抓成的保持「进行中」（见 markUrlBaselines 上方注释）。经队列读表顺带把缓存预热给随后的入库写，
+    // 不多付一次全表读
+    // IMDb 日期窗口天数变了（含首次启用、v1.7.0 切换后的第一轮）同样按首轮处理：池子一变，前 50 里会冒出
+    // 一批以前挤不进来的片，那是窗口变化带进来的存量，只入库不推送（2026-09-27 用户定）。「上次生效的天数」
+    // 记在 larkBotState.imdbWindowDays，收轮时有 IMDb 页真正抓成才更新；没抓成的页各自保持「进行中」，
+    // 直到它第一次真正抓成，不因别的页抓成而跟着收口
+    let imdbWindowChanged = false;
     try {
       const existing = await enqueueDramaWrite('订阅首轮判定', getDramasInQueue);
       // 只读模式（见下）本轮不开抓：标了「进行中」也等不到收轮，不标
       if (!dramasLayoutAhead) {
         const populated = new Set(existing.map(d => UrlMatch.normalizeListUrl(d.sourceListUrl)).filter(Boolean));
-        await markUrlBaselines(scrapeUrls.filter(url => !populated.has(UrlMatch.normalizeListUrl(url))));
+        const firstRound = scrapeUrls.filter(url => !populated.has(UrlMatch.normalizeListUrl(url)));
+        const imdbUrls = scrapeUrls.filter(url => siteOfUrl(url) === 'imdb');
+        if (imdbUrls.length > 0) {
+          const botState = await updateBotState(current => current);
+          imdbWindowChanged = botState.imdbWindowDays !== imdbWindowDays;
+        }
+        await markUrlBaselines([...new Set([...firstRound, ...(imdbWindowChanged ? imdbUrls : [])])]);
       }
     } catch (e) {
       console.warn('[ShortScraping] 订阅首轮基线标记失败（不影响抓取）:', e?.message || e);
@@ -847,12 +871,17 @@ async function performScrapeOnce({ site = null } = {}, progress = null) {
     for (const url of scrapeUrls) {
       progress?.pendingSites.delete(siteOfUrl(url));
       try {
-        const response = await scrapeUrlInTab(url);
+        // 实际打开的地址：IMDb 搜索页补上滚动窗口，其余原样；结果、归属与告警一律记订阅 URL 本身
+        const openUrl = SubscriptionConfig.withReleaseWindow(url, imdbWindowDays);
+        const response = await scrapeUrlInTab(openUrl);
         if (response?.success) {
-          const newCount = (response.data || []).length;
+          const newCount = Number.isFinite(response.newCount) ? response.newCount : 0;
+          const warning = scrapeWarningOf(response);
           totalNewCount += newCount;
-          results.push({ url, success: true, newCount });
-          console.log(`[ShortScraping] 抓取完成: ${url}，新增 ${newCount} 部`);
+          results.push(warning ? { url, success: true, newCount, warning } : { url, success: true, newCount });
+          const opened = openUrl !== url ? `（打开 ${openUrl}）` : '';
+          if (warning) console.warn(`[ShortScraping] 抓取完成但一条都没拿到（${SCRAPE_WARNING_TEXT[warning]}）: ${url}${opened}`);
+          else console.log(`[ShortScraping] 抓取完成: ${url}${opened}，新增 ${newCount} 部`);
         } else {
           results.push({ url, success: false, error: response?.error || '未知错误' });
         }
@@ -862,16 +891,23 @@ async function performScrapeOnce({ site = null } = {}, progress = null) {
       }
     }
 
-    // 收轮：本轮 URL 里「进行中」的机器人基线定在此刻，此后抓到的才算「有更新」
-    await finalizeUrlBaselines(scrapeUrls).catch(e =>
+    // 收轮：本轮真正抓成的 URL 里「进行中」的机器人基线定在此刻，此后抓到的才算「有更新」。抓失败、或页面不是
+    // 订阅页 / 没找到列表（抓到 0 条告警）的不收口，下一轮照样只入库不推送，直到它第一次真正抓成（v1.7.0）
+    const scrapedUrls = results.filter(isRealScrape).map(r => r.url);
+    await finalizeUrlBaselines(scrapedUrls).catch(e =>
       console.warn('[ShortScraping] 订阅首轮基线收口失败（下轮重试）:', e?.message || e));
+    if (imdbWindowChanged && scrapedUrls.some(url => siteOfUrl(url) === 'imdb')) {
+      await updateBotState(state => ({ ...state, imdbWindowDays })).catch(e =>
+        console.warn('[ShortScraping] IMDb 日期窗口天数记录失败（下一轮 IMDb 仍按首轮静音）:', e?.message || e));
+    }
 
     // 一个都没抓成（断网 / 站点改版）不刷新 lastScrape：否则定时抓取已经停摆，弹窗底栏还是
     // 「抓取于几分钟前」（审查 lastscrape-set-on-total-failure）。另记 lastScrapeFailure 供弹窗
     // 提示「最近一轮全部失败」；有成功的轮次在同一次 set 里把它清掉
     const finishedAt = new Date().toISOString();
     if (results.some(r => r.success)) {
-      await chrome.storage.local.set({ lastScrape: finishedAt, lastScrapeFailure: null });
+      const lastScrapeWarnings = await nextScrapeWarnings(results, scrapeUrls, { partial: Boolean(site), at: finishedAt });
+      await chrome.storage.local.set({ lastScrape: finishedAt, lastScrapeFailure: null, lastScrapeWarnings });
     } else {
       console.warn(`[ShortScraping] 本轮 ${scrapeUrls.length} 个 URL 全部抓取失败，不更新上次抓取时间`);
       await chrome.storage.local.set({
@@ -906,6 +942,54 @@ async function performScrapeOnce({ site = null } = {}, progress = null) {
 }
 
 /**
+ * 「抓到 0 条」告警（v1.7.0 审查 M2）：scrape 应答成功，却是打开的页面不在订阅里（跳转了）或页面上一条列表项
+ * 都没找到（站点改版 / 页面没加载完整）。以前都记成「成功、新增 0」，某条订阅可能就此静默停摆，弹窗还一直显示
+ * 「抓取于几分钟前 / 本次刷新无新增内容」。这里不算失败（lastScrape 照常刷新），另记 storage.lastScrapeWarnings
+ * = { at, items: [{ url, kind }] }（没有告警为 null），与 lastScrape 同一次 set，弹窗底栏据此提示。
+ * 应答缺这两个字段（旧桩 / 其它来源）不告警。
+ */
+const SCRAPE_WARNING_TEXT = {
+  unsubscribed: '打开后的页面不在订阅里，可能跳转了',
+  empty: '页面上没找到列表项，可能站点改版或页面未加载完整'
+};
+
+function scrapeWarningOf(response) {
+  if (response?.subscribed === false) return 'unsubscribed';
+  if (response?.listCount === 0) return 'empty';
+  return null;
+}
+
+/**
+ * 这一页真的抓成了：应答成功，且打开的确实是订阅页、页面上找到了列表（没有上面两种告警）。订阅的「只入库不推送」
+ * 只在这时收口（v1.7.0，见 markUrlBaselines 上方注释）；IMDb 切换的首轮也按它判定有没有抓成。
+ */
+function isRealScrape(result) {
+  return Boolean(result && result.success && !result.warning);
+}
+
+/**
+ * 本轮收尾后的告警清单（按尾斜杠归一的订阅 URL 对齐）：
+ *   - 本轮抓成的 URL 以本轮结果为准（有告警记上、没有就摘掉）；
+ *   - 本轮抓失败的 URL 保留旧告警（失败没证明它恢复了）；
+ *   - 不在本轮清单里的：单站刷新（partial）保留别站的，全量轮丢掉（已退订或不再抓）。
+ */
+async function nextScrapeWarnings(results, scrapeUrls, { partial, at }) {
+  const { lastScrapeWarnings: previous } = await chrome.storage.local.get('lastScrapeWarnings');
+  const key = url => UrlMatch.normalizeListUrl(url);
+  const roundKeys = new Set(scrapeUrls.map(key));
+  const succeeded = new Set(results.filter(r => r.success).map(r => key(r.url)));
+  const items = [];
+  for (const item of Array.isArray(previous?.items) ? previous.items : []) {
+    if (!item || !item.url || succeeded.has(key(item.url))) continue;
+    if (roundKeys.has(key(item.url)) || partial) items.push(item);
+  }
+  for (const r of results) {
+    if (r.success && r.warning) items.push({ url: r.url, kind: r.warning });
+  }
+  return items.length ? { at, items } : null;
+}
+
+/**
  * 按域名判断订阅 URL 所属站点。规则单一真源在 src/shared/site-registry.js。
  */
 function siteOfUrl(url) {
@@ -913,34 +997,22 @@ function siteOfUrl(url) {
 }
 
 /**
- * 从设置中读取可抓取 URL。只抓取完整 URL，标签关键词不会被当作 URL。
+ * 从设置中读取可抓取 URL（只认完整 http(s) URL，按尾斜杠归一去重）。单一真源在
+ * src/shared/subscription-config.js 的 configuredScrapeUrls（与弹窗同一份，v1.7.0 收拢）。
  */
 function getConfiguredScrapeUrls(urlTags) {
-  const urls = (urlTags || [])
-    .map(item => item.urlPattern)
-    .filter(pattern => /^https?:\/\//i.test(pattern));
-
-  // 去重按尾斜杠归一（与 SubscriptionConfig.normalizeUrlTags、归属判定同口径），保留先出现的
-  // 原串：新写入的 urlTags 已不会并存两种写法，这里兜住旧版本写进 storage 的 '…/x' 与 '…/x/'——
-  // 按原串去重时同一页每轮要开两个标签页抓两遍（审查 urltags-dedupe-raw）
-  const seen = new Set();
-  return urls.filter(url => {
-    const key = UrlMatch.normalizeListUrl(url);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return SubscriptionConfig.configuredScrapeUrls(urlTags);
 }
 
+/**
+ * 订阅范围内的条目。归属判定＝尾斜杠归一后的精确等值（SubscriptionConfig.dramasUnderUrls，内部委托
+ * url-match.js，弹窗 / 设置页 / 同步服务同口径）。旧的 startsWith 前缀匹配会让互为前缀的订阅串扰：
+ * 退订 my-drama.com/?list=… 后，其历史卡片因前缀命中 my-drama.com/ 而清不掉且挂错归属。
+ * dramas 是真值却不是数组时抛错（收拢前 .filter 自然抛）：宁可这轮清理失败，也不当成空表清库。
+ */
 function filterDramasByConfiguredUrls(dramas, urlTags) {
-  const configuredUrls = getConfiguredScrapeUrls(urlTags);
-  if (configuredUrls.length === 0) return [];
-
-  // 归属判定＝尾斜杠归一后的精确等值（UrlMatch，三端共用）。旧的 startsWith
-  // 前缀匹配会让互为前缀的订阅串扰：退订 my-drama.com/?list=… 后，其历史
-  // 卡片因前缀命中 my-drama.com/ 而清不掉且挂错归属。
-  const configuredSet = UrlMatch.buildConfiguredUrlSet(configuredUrls);
-  return (dramas || []).filter(drama => UrlMatch.isUrlCovered(drama.sourceListUrl, configuredSet));
+  if (dramas && !Array.isArray(dramas)) throw new TypeError('dramas 表不是数组');
+  return SubscriptionConfig.dramasUnderUrls(dramas, getConfiguredScrapeUrls(urlTags));
 }
 
 /**
@@ -1184,7 +1256,9 @@ async function migrateReelshortEpisodeUrls() {
   // 标记单独先读：置位后直接返回，不再连带反序列化整张 dramas 表（SW 每次唤醒都走这里）
   const { rsEpisodeUrlMigrated } = await chrome.storage.local.get('rsEpisodeUrlMigrated');
   if (rsEpisodeUrlMigrated) return;
-  const { dramas = [] } = await chrome.storage.local.get('dramas');
+  // 经队列读表并回填缓存（v1.7.0）：以前直读 storage、绕过缓存，冷唤醒时与翻译扫描 / CSV 同步各读一遍整表。
+  // 这里只筛候选、不改条目，最终改写仍在下面的队列里按最新表做
+  const dramas = await readDramasThroughQueue('ReelShort 播放页迁移读表');
 
   const candidates = dramas.filter(drama =>
     typeof drama.url === 'string' && /^https:\/\/www\.reelshort\.com\/(movie|full-episodes)\//.test(drama.url));
@@ -1269,7 +1343,8 @@ async function migrateShorticalCanonicalIds() {
   // 标记单独先读：置位后直接返回，不连带反序列化整张 dramas 表（SW 每次唤醒都走这里）
   const { shorticalCanonicalIdsMigrated } = await chrome.storage.local.get('shorticalCanonicalIdsMigrated');
   if (shorticalCanonicalIdsMigrated) return;
-  const { dramas = [] } = await chrome.storage.local.get('dramas');
+  // 经队列读表并回填缓存（v1.7.0，同上）：导入恢复重新挂起本迁移后缓存多半是热的，不必再反序列化一遍整表
+  const dramas = await readDramasThroughQueue('Shortical 规范 id 迁移读表');
   // 没有 Shortical 条目就直接收口：绝大多数用户走这条路，零网络请求
   if (!dramas.some(drama => drama && drama.source === 'shortical')) {
     await chrome.storage.local.set({ shorticalCanonicalIdsMigrated: true });
@@ -1356,6 +1431,45 @@ function pruneUnmappedFandomEntries() {
 }
 
 /**
+ * 一次性存量迁移清单（SW 每次唤醒走一遍，每条各自 runGuarded 兜底：前面某条抛错不连坐后面的）。
+ * 代码全部保留：公开仓库的用户可能从任意旧版直升，完成标记按安装记，删掉哪条都可能让某台机器的旧数据
+ * 永远迁不过来。各条语义见各自函数注释：
+ *   imdbRollingSwitch              IMDb 订阅去掉写死的起始日期、退订 genres=short（v1.7.0；后两步在唤醒收尾做）
+ *   legacyDramaMigrated            imdbId→itemId（v1.4.11）/ 'RR'→'RoyalRoad' / 清 fandom 未映射临时键（v1.4.8）
+ *   companyFieldDropped            摘 company 字段（v1.5.13）
+ *   partialTranslationReset        半成品翻译退回待翻译（v1.5.14）
+ *   nonChineseTitleZhReset         清掉不含中文的译名（v1.6.2）
+ *   garbledTranslationReset        清掉含乱码的译文（v1.6.13）
+ *   rsEpisodeUrlMigrated           ReelShort 链接换成首集播放页（v1.4.9，要联网）
+ *   shorticalCanonicalIdsMigrated  Shortical 规范 id 与重复合并（v1.6.10，要联网；导入恢复会重新挂起）
+ * 稳态（全部完成）下八个完成标记合成一次 storage.get（v1.7.0；此前逐条各读一次）；批量读失败就退回
+ * 逐条检查——每条迁移函数内部仍自己查自己的标记，直接调用、单测与导入重新挂起都不受影响，只是有待办时
+ * 多读一次小键。清单在调用时才组装：测试会替换 resetNonChineseTitleZh 等全局函数，顶层常量会攥住原函数。
+ */
+async function runPendingDramaMigrations() {
+  const steps = [
+    ['imdbRollingSwitch', 'IMDb 订阅切换为滚动日期窗口', migrateImdbToRollingWindow],
+    ['legacyDramaMigrated', 'itemId/标签/未映射 fandom 迁移', runLegacyDramaMigrations],
+    ['companyFieldDropped', 'company 字段移除', dropCompanyField],
+    ['partialTranslationReset', '半成品翻译复位', resetPartialTranslations],
+    ['nonChineseTitleZhReset', '非中文译名复位', resetNonChineseTitleZh],
+    ['garbledTranslationReset', '乱码译文复位', resetGarbledTranslations],
+    ['rsEpisodeUrlMigrated', 'ReelShort 播放页 URL 迁移', migrateReelshortEpisodeUrls],
+    ['shorticalCanonicalIdsMigrated', 'Shortical 规范 id 迁移', migrateShorticalCanonicalIds]
+  ];
+  let done = {};
+  try {
+    done = (await chrome.storage.local.get(steps.map(([flag]) => flag))) || {};
+  } catch (e) {
+    console.warn('[ShortScraping] 迁移完成标记批量读取失败，改为逐条检查:', e?.message || e);
+  }
+  for (const [flag, label, step] of steps) {
+    if (done[flag]) continue;
+    await runGuarded(label, step);
+  }
+}
+
+/**
  * 一次性存量迁移统一入口：完成标记 legacyDramaMigrated 置位后，SW 每次唤醒
  * 零全表读（此前三个函数各自 get 整张 dramas 表、幂等零写但反序列化成本每次都付）。
  * 三个迁移全部成功才置标记，任一失败留待下次唤醒重试。
@@ -1376,6 +1490,265 @@ async function runLegacyDramaMigrations() {
   console.log('[ShortScraping] 一次性存量迁移全部完成，已置完成标记');
 }
 
+/* —— 已知片单（v1.7.0） ————————————————————————————————————
+ *
+ * 只记条目 ID、不入库的「已知条目」：抓取时与库里已有的卡同样按「已存在」跳过（scrapeContextForContent
+ * 把它们放进 known），不入库、不翻译、不推送，时间线与 CSV 里都看不到；saveDramaRecord 另外兜底拒收。
+ * 第一批来自 IMDb 订阅切换为滚动日期窗口时的一次性基线：各 IMDb 订阅不限日期的前 50 里、日期窗口外、库中
+ * 没有的老片——它们冲得上全时段榜，却不在日期窗口内，本就不该当新片进来（2026-09-27 用户定）。
+ * storage.knownItems = [{ id, site, at, reason }]，按 id 去重、只增不减。另经同步服务存一份 db/known-items.json：
+ * 扩展重装后 storage 清空，库能从 db/timeline.json 导入恢复，片单却没有别处可取。storage 里从没有过这个键
+ * （新装 / 重装）时唤醒问一次服务端恢复；本地追加后推给服务端，没推成就记 knownItemsServerStale 下次唤醒补推。
+ */
+const KNOWN_ITEMS_ENDPOINT = `${SYNC_BASE_URL}/known-items`;
+const KNOWN_ITEMS_SYNC_TIMEOUT_MS = 3000;
+
+function isKnownItemEntry(entry) {
+  return Boolean(entry) && typeof entry === 'object' && typeof entry.id === 'string' && entry.id.length > 0;
+}
+
+/** 按 id 取并集，先出现的留下（保住最早记下的时间与原因）。 */
+function mergeKnownItems(...lists) {
+  const byId = new Map();
+  for (const list of lists) {
+    for (const entry of Array.isArray(list) ? list : []) {
+      if (isKnownItemEntry(entry) && !byId.has(entry.id)) byId.set(entry.id, entry);
+    }
+  }
+  return [...byId.values()];
+}
+
+async function readKnownItems() {
+  const { knownItems } = await chrome.storage.local.get('knownItems');
+  return Array.isArray(knownItems) ? knownItems.filter(isKnownItemEntry) : [];
+}
+
+// knownItems 的读改写串成一条链（同 updateBotState）：基线追加与唤醒恢复可能并行
+let knownItemsQueue = Promise.resolve();
+function updateKnownItems(mutate) {
+  const run = knownItemsQueue.then(async () => {
+    const current = await readKnownItems();
+    const next = mutate(current);
+    if (next !== current) await chrome.storage.local.set({ knownItems: next });
+    return next;
+  });
+  knownItemsQueue = run.catch(() => {});
+  return run;
+}
+
+async function pushKnownItemsToServer(items) {
+  try {
+    const response = await fetch(KNOWN_ITEMS_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+      signal: AbortSignal.timeout(KNOWN_ITEMS_SYNC_TIMEOUT_MS)
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    await chrome.storage.local.remove('knownItemsServerStale');
+    return true;
+  } catch (e) {
+    console.warn('[ShortScraping] 已知片单写到同步服务失败（下次唤醒补推）:', e?.message || e);
+    await chrome.storage.local.set({ knownItemsServerStale: true }).catch(() => {});
+    return false;
+  }
+}
+
+/** 追加进片单（按 id 去重）并推给同步服务；返回追加后的完整片单。 */
+async function addKnownItems(entries) {
+  const additions = (Array.isArray(entries) ? entries : []).filter(isKnownItemEntry);
+  const next = await updateKnownItems(current => {
+    const merged = mergeKnownItems(current, additions);
+    return merged.length === current.length ? current : merged;
+  });
+  if (additions.length > 0) await pushKnownItemsToServer(next);
+  return next;
+}
+
+/**
+ * 唤醒时与同步服务对齐：本地从没有过片单（键不存在）就问服务端要一份恢复——服务端也没有（含旧版服务 404）
+ * 记成空数组，此后不再每次唤醒都问；本地有、且上次没推成就补推。服务没开 / 超时下次唤醒再来。
+ */
+async function syncKnownItemsWithServer() {
+  const { knownItems, knownItemsServerStale } = await chrome.storage.local.get(['knownItems', 'knownItemsServerStale']);
+  if (Array.isArray(knownItems)) {
+    if (knownItemsServerStale) await pushKnownItemsToServer(knownItems.filter(isKnownItemEntry));
+    return;
+  }
+  let serverItems;
+  try {
+    const response = await fetch(KNOWN_ITEMS_ENDPOINT, { signal: AbortSignal.timeout(KNOWN_ITEMS_SYNC_TIMEOUT_MS) });
+    if (response.status === 404) serverItems = [];
+    else if (!response.ok) return;
+    else serverItems = (await response.json())?.items;
+  } catch (e) {
+    return;
+  }
+  const restored = await updateKnownItems(current => mergeKnownItems(current, serverItems));
+  if (restored.length > 0) console.log(`[ShortScraping] 已从同步服务恢复已知片单 ${restored.length} 条`);
+}
+
+/* —— IMDb 订阅切换为滚动日期窗口（v1.7.0，2026-09-27 用户定） ————————————————
+ *
+ * 以前 IMDb 规则都把起始日期写死在订阅 URL 里（release_date=2026-01-01,），池子越积越大，只读前 50 条时新片
+ * 被老片挤出去，到 2027 年窗口会超过一年。订阅 URL 又是历史归属的身份，改日期＝退订、名下历史全删，
+ * 所以不能直接改 tag.json。一次性切换（runPendingDramaMigrations 首条，标记 imdbRollingSwitch）：
+ *   ① 去掉写死的日期：订阅 URL 换成不带日期的形态，名下条目的 sourceListUrl 在同一次写入里一起改；
+ *      退订 genres=short 并删除其名下条目（泛 Short 类型榜不限日期时前 50 全是动画剧集、广告，与短剧无关；
+ *      被删条目进自动清理回收站）。订阅本地领先于文件（configAheadOfFile.tag），随即写回 config/tag.json；
+ *   ② 唤醒收尾时（resumeImdbRollingSwitch）先抓一轮 IMDb（按设置的天数补日期；窗口天数首次生效＝首轮，
+ *      只入库不推送，也接回被删的 short 条目里仍在别的榜 180 天前 50 的那些），
+ *   ③ 再把各 IMDb 订阅不限日期的前 50 读一遍，窗口外、库里又没有的只记 ID 进已知片单（顺序不能反：先记片单
+ *      会把②里该回来的片挡在外面；窗口内的一律不记，见 collectImdbBaselineKnownItems）。
+ * 标记 phase：firstRound → baseline → done；SW 中途被回收，下次唤醒接着做没做完的那步。
+ */
+// v1.7.0 以前 IMDb 规则统一的写死起点；只迁移这个形态，用户自己写的其它日期条件原样保留
+const IMDB_LEGACY_URL = /^(https:\/\/www\.imdb\.com\/search\/title\/?\?)release_date=2026-01-01,&(.+)$/;
+// 切换时一并退订的规则（按筛选参数认）
+const IMDB_DROPPED_FILTERS = new Set(['genres=short']);
+
+async function migrateImdbToRollingWindow() {
+  const at = new Date().toISOString();
+  const { urlTags = [] } = await chrome.storage.local.get('urlTags');
+  const renames = new Map();   // 旧订阅（尾斜杠归一）→ 不带日期的新订阅 URL
+  const dropped = new Set();   // 一并退订的旧订阅（尾斜杠归一）
+  const nextTags = [];
+  for (const item of normalizeUrlTags(urlTags)) {
+    const match = item.urlPattern.match(IMDB_LEGACY_URL);
+    if (!match) {
+      nextTags.push(item);
+      continue;
+    }
+    const key = UrlMatch.normalizeListUrl(item.urlPattern);
+    if (IMDB_DROPPED_FILTERS.has(match[2])) {
+      dropped.add(key);
+      continue;
+    }
+    const urlPattern = `${match[1]}${match[2]}`;
+    renames.set(key, urlPattern);
+    nextTags.push({ ...item, urlPattern });
+  }
+  if (renames.size === 0 && dropped.size === 0) {
+    // 没有旧形态的 IMDb 订阅（新装 / 本来就不带日期）：不用迁移，也不需要切换基线
+    await chrome.storage.local.set({ imdbRollingSwitch: { phase: 'done', at, skipped: true } });
+    return;
+  }
+  const finalTags = normalizeUrlTags(nextTags);
+
+  await enqueueDramaWrite('IMDb 订阅切换为滚动日期窗口', async () => {
+    const dramas = await getDramasInQueue();
+    const removed = [];
+    const next = [];
+    for (const drama of dramas) {
+      const key = UrlMatch.normalizeListUrl(drama && drama.sourceListUrl);
+      if (dropped.has(key)) {
+        removed.push(drama);
+        continue;
+      }
+      const renamed = renames.get(key);
+      next.push(renamed ? { ...drama, sourceListUrl: renamed } : drama);
+    }
+    const { configAheadOfFile } = await chrome.storage.local.get('configAheadOfFile');
+    // 订阅、条目归属、清理指纹、本地领先标记与切换标记同一次 set：要么全落库、要么全不落——
+    // 只改了订阅没改归属，下一次订阅外清理就会把名下历史全删
+    const extra = {
+      urlTags: finalTags,
+      pruneFingerprint: configuredUrlFingerprint(finalTags),
+      configAheadOfFile: { ...(isPlainObject(configAheadOfFile) ? configAheadOfFile : {}), tag: true },
+      imdbRollingSwitch: { phase: 'firstRound', at, renamed: renames.size, removed: removed.length }
+    };
+    if (removed.length > 0) extra.pruneTrash = await nextPruneTrash('IMDb 订阅切换：退订 genres=short', removed);
+    await writeDramasInQueue(next, extra);
+    console.log(`[ShortScraping] IMDb 订阅已切换为滚动日期窗口：${renames.size} 条订阅去掉写死的起始日期（名下条目归属随之改写），`
+      + `退订 ${dropped.size} 条并删除其名下 ${removed.length} 条（已进自动清理回收站）`);
+  });
+
+  // 订阅配置此刻本地领先：写回 config/tag.json；服务没开就留着标记，下次唤醒再写（写回失败只记日志）
+  await writeBackAheadConfigs(['tag'], { urlTags: finalTags });
+}
+
+// 与抓取轮串行（同一条 scrapeQueue）：基线也要开后台标签页读列表，不能与抓取轮并行抢页面
+function runInScrapeQueue(task) {
+  const run = scrapeQueue.then(task);
+  scrapeQueue = run.then(() => {}, () => {});
+  return run;
+}
+
+/** 内容脚本读一页列表条目 ID（collectListIds）；没读成返回 null。requireItems：列表为空也算没读成。 */
+async function collectListIdsOf(url, { requireItems = false } = {}) {
+  try {
+    const response = await scrapeUrlInTab(url, { action: 'collectListIds' });
+    if (response?.success && Array.isArray(response.ids) && (!requireItems || response.ids.length > 0)) {
+      return response.ids.filter(id => typeof id === 'string' && id);
+    }
+    console.warn(`[ShortScraping] IMDb 切换基线读列表失败: ${url}`, response?.error || '列表为空');
+  } catch (e) {
+    console.warn(`[ShortScraping] IMDb 切换基线读列表失败: ${url}`, e?.message || e);
+  }
+  return null;
+}
+
+/**
+ * 切换基线：各 IMDb 订阅读两页列表条目 ID（collectListIds：不开详情页、不入库）——不限日期的前 50 与补了窗口的
+ * 前 50——前者有、后者没有、库里也没有的记进已知片单，即「冲得上全时段榜、却在日期窗口外」的老片（含没有发行
+ * 日期的条目）。窗口内那页的片子一律不记：它们每轮都会被抓，首轮某页失败或某部详情没取到的下一轮照常入库，
+ * 不能被片单永久挡住。某条订阅两页有一页没读成就整条跳过（宁可少记）；不限日期那页为空也算没读成（页面没加载
+ * 完整，不是真没有片）。一条都没读成就抛错，留待下次唤醒重来。返回新记下的条数。
+ */
+function collectImdbBaselineKnownItems() {
+  return runInScrapeQueue(async () => {
+    const { urlTags = [], scheduleConfig } = await chrome.storage.local.get(['urlTags', 'scheduleConfig']);
+    const imdbWindowDays = ScheduleConfig.normalizeConfig(scheduleConfig).imdbWindowDays;
+    const imdbUrls = getConfiguredScrapeUrls(urlTags).filter(url => siteOfUrl(url) === 'imdb');
+    const ids = new Set();
+    let succeeded = 0;
+    for (const url of imdbUrls) {
+      const wide = await collectListIdsOf(url, { requireItems: true });
+      if (!wide) continue;
+      // 不补窗口的订阅（窗口设为 0，或订阅自带日期条件）两页是同一页：每轮抓的就是它，没有窗口外的老片可记
+      const windowedUrl = SubscriptionConfig.withReleaseWindow(url, imdbWindowDays);
+      const windowed = windowedUrl === url ? wide : await collectListIdsOf(windowedUrl);
+      if (!windowed) continue;
+      const inWindow = new Set(windowed);
+      for (const id of wide) if (!inWindow.has(id)) ids.add(id);
+      succeeded++;
+    }
+    if (imdbUrls.length > 0 && succeeded === 0) throw new Error('IMDb 列表一个都没读成');
+    const inLibrary = new Set((await readDramasThroughQueue('IMDb 切换基线读表')).map(drama => drama && drama.itemId));
+    const at = new Date().toISOString();
+    const entries = [...ids].filter(id => !inLibrary.has(id))
+      .map(id => ({ id, site: 'imdb', at, reason: 'IMDb 切换基线：不限日期前 50 里、日期窗口外、库中没有的老片' }));
+    const before = (await readKnownItems()).length;
+    const after = (await addKnownItems(entries)).length;
+    console.log(`[ShortScraping] IMDb 切换基线：读成 ${succeeded}/${imdbUrls.length} 条订阅，窗口外 ${ids.size} 部里 ${entries.length} 部库中没有，已只记 ID 进已知片单（新增 ${after - before} 条）`);
+    return after - before;
+  });
+}
+
+/** 唤醒收尾：接着做 IMDb 切换没做完的那步（见上方注释 ②③）。 */
+async function resumeImdbRollingSwitch() {
+  const { imdbRollingSwitch: state } = await chrome.storage.local.get('imdbRollingSwitch');
+  if (!state || typeof state !== 'object' || state.phase === 'done') return;
+  let phase = state.phase;
+  if (phase === 'firstRound') {
+    // 这一轮里没抓成的页（失败 / 没找到列表）不收口、保持只入库不推送，之后哪一轮第一次真正抓成才收口，
+    // 所以有一页真正抓成就可以往下走；一页都没有就下次唤醒重来
+    const summary = await performScrape({ site: 'imdb' });
+    const succeeded = (summary?.results || []).some(isRealScrape);
+    if (!succeeded) {
+      console.warn('[ShortScraping] IMDb 切换后的第一轮一个页面都没真正抓成，下次唤醒重试');
+      return;
+    }
+    phase = 'baseline';
+    await chrome.storage.local.set({ imdbRollingSwitch: { ...state, phase, firstRoundAt: new Date().toISOString() } });
+  }
+  if (phase === 'baseline') {
+    const added = await collectImdbBaselineKnownItems();
+    const { imdbRollingSwitch: latest } = await chrome.storage.local.get('imdbRollingSwitch');
+    await chrome.storage.local.set({ imdbRollingSwitch: { ...(latest || state), phase: 'done', doneAt: new Date().toISOString(), knownAdded: added } });
+  }
+}
+
 /**
  * 单页抓取的整页期限。后台等内容脚本的 'scrape' 回复本身不设期限：页面里一个请求挂住
  * （回了响应头、正文迟迟不发完），sendMessage 就永远等不到回复，标签页关不掉，串行的
@@ -1389,7 +1762,7 @@ const SCRAPE_PAGE_TIMEOUT_MS = 5 * 60 * 1000;
  * 在后台打开一个非活动标签页抓取，完成后关闭。超过整页期限按失败抛出（performScrapeOnce
  * 记入该 URL 的失败结果、继续下一个 URL），finally 照常关标签页——内容脚本随页面一起销毁。
  */
-async function scrapeUrlInTab(url) {
+async function scrapeUrlInTab(url, message = { action: 'scrape' }) {
   const tab = await chrome.tabs.create({ url, active: false });
   // 超时后败下阵的那条抓取链还在后台跑：标签页关掉后它别再起「强制注入 + 轮询」对着已关的页空转 2 分钟
   const page = { closed: false };
@@ -1401,7 +1774,7 @@ async function scrapeUrlInTab(url) {
   });
 
   try {
-    return await Promise.race([scrapeLoadedTab(tab.id, url, page), expired]);
+    return await Promise.race([scrapeLoadedTab(tab.id, url, page, message), expired]);
   } finally {
     clearTimeout(timer);
     page.closed = true;
@@ -1411,12 +1784,13 @@ async function scrapeUrlInTab(url) {
   }
 }
 
-async function scrapeLoadedTab(tabId, url, page) {
+// message：发给内容脚本的指令，缺省抓取入库；IMDb 切换基线用 { action: 'collectListIds' } 只读列表条目 ID
+async function scrapeLoadedTab(tabId, url, page, message = { action: 'scrape' }) {
   try {
     await waitForTabComplete(tabId);
     // 给内容脚本一点注入和页面渲染时间
     await new Promise(resolve => setTimeout(resolve, 1500));
-    return await chrome.tabs.sendMessage(tabId, { action: 'scrape' });
+    return await chrome.tabs.sendMessage(tabId, message);
   } catch (e) {
     if (page.closed) throw e;
     // 快路径失败的两种实测场景，统一走「强制注入 + 轮询」兜底：
@@ -1442,7 +1816,7 @@ async function scrapeLoadedTab(tabId, url, page) {
       //  而这条路径正是后台节流标签页的常态入口。unit-site-registry T4a/T4b 守着）
       files: ['src/shared/site-registry.js', 'src/shared/translate-config.js', 'src/shared/scrape-rules.js', 'src/shared/url-match.js', 'src/content/content.js']
     }).catch(err => console.warn(`[ShortScraping] 强制注入失败（继续轮询）: ${err.message}`));
-    return await sendScrapeWhenReady(tabId, 40, 3000, page);
+    return await sendScrapeWhenReady(tabId, 40, 3000, page, message);
   }
 }
 
@@ -1467,10 +1841,10 @@ async function currentTabUrl(tabId, fallbackUrl) {
  * 标签页冷缓存加载 reelshort 这类重页时，DOMContentLoaded（即 document_end
  * 注入时机）实测可晚于 90s。
  */
-async function sendScrapeWhenReady(tabId, attempts = 40, intervalMs = 3000, page = null) {
+async function sendScrapeWhenReady(tabId, attempts = 40, intervalMs = 3000, page = null, message = { action: 'scrape' }) {
   for (let i = 0; i < attempts; i++) {
     try {
-      return await chrome.tabs.sendMessage(tabId, { action: 'scrape' });
+      return await chrome.tabs.sendMessage(tabId, message);
     } catch (e) {
       if (i === attempts - 1 || page?.closed) throw e;
       await new Promise(r => setTimeout(r, intervalMs));
@@ -1627,9 +2001,7 @@ async function noPendingTranslationsByStamp() {
   return enqueueDramaWrite('翻译扫描读指纹', async () => {
     if (dramasCache !== null) return false;
     const { dramasStamp, dramasMeta } = await chrome.storage.local.get(['dramasStamp', 'dramasMeta']);
-    const layout = Number(dramasMeta?.layout);
-    const layoutAhead = Number.isFinite(layout) && layout > DRAMAS_LAYOUT_SUPPORTED;
-    return !layoutAhead && validDramasStamp(dramasStamp) && dramasStamp.pending === 0;
+    return !isDramasLayoutAhead(dramasMeta) && validDramasStamp(dramasStamp) && dramasStamp.pending === 0;
   }).catch(() => false);
 }
 
@@ -2107,6 +2479,8 @@ function updateBatchDramaTranslations(entries, options = {}) {
  * 触发点③：本次把卡从 new 翻成 trans（becameTrans）时推群——新卡被 🌍 抢在批量线之前翻完后，
  * 批量线扫不到它，此前这张卡永远不会推。重译本来就是 trans 的卡不推。推送不 await：
  * 弹窗 ⏳ 不等飞书应答（与触发点② saveDrama 同款旁路），maybeBotPush 自身不会 reject。
+ * 但保活要撑到推送结束：以前应答一回就停保活，SW 在推送途中被回收时这张卡既没推成、也没进重试队列
+ * （审查 M4，v1.7.0）。推送的每个请求都有期限（fetch-util），保活不会被拖成无限。
  */
 async function handleTranslateSingle(dramaId) {
   const drama = (await getDramasSnapshot()).find(d => d.id === dramaId);
@@ -2120,6 +2494,7 @@ async function handleTranslateSingle(dramaId) {
 
   // 单卡请求最长也要等满 requestTimeoutSec（默认 60s），同批量线一样保活
   const stopKeepAlive = startSwKeepAlive();
+  let pushing = null;
   try {
     // 配置每次现读（translator 不再自己读 storage）：设置页刚改的密钥 / 模式，下一次 🌍 即生效
     const config = await readTranslateConfig();
@@ -2132,7 +2507,7 @@ async function handleTranslateSingle(dramaId) {
     const { done, becameTrans } = await updateSingleDramaTranslation(dramaId, result);
     console.log(`[ShortScraping] 单卡翻译${done ? '完成' : '只补到一半'}: ${drama.title}`);
     if (becameTrans) {
-      getDramasSnapshot()
+      pushing = getDramasSnapshot()
         .then(dramas => maybeBotPush(dramas.find(d => d.id === dramaId)))
         .catch(e => console.warn('[ShortScraping] 群机器人推送流程异常（不影响翻译）:', e?.message || e));
     }
@@ -2141,7 +2516,8 @@ async function handleTranslateSingle(dramaId) {
     console.warn('[ShortScraping] 单卡翻译失败:', e.message);
     return { success: false, error: e.message };
   } finally {
-    stopKeepAlive();
+    if (pushing) pushing.finally(stopKeepAlive);
+    else stopKeepAlive();
   }
 }
 
@@ -2169,6 +2545,9 @@ function saveDramaRecord(drama) {
       }
       return false;
     }
+
+    // 已知片单里的条目（只记 ID、不入库，v1.7.0）一律不收：内容脚本本就按「已存在」跳过，这里兜底
+    if ((await readKnownItems()).some(entry => entry.id === drama.itemId)) return false;
 
     // savedAt＝入库时刻，只在这里（新卡首次入库）写，库里已有的卡不动、导入恢复也不写：
     // 多维表格增量导出按 savedAt || scrapedAt 比水位线（Lark.exportStamp）。scrapedAt 是内容
@@ -2229,7 +2608,8 @@ function importDramaRecords(rawDramas) {
   return enqueueDramaWrite('导入恢复', async () => {
     const existing = await getDramasInQueue();
     const { urlTags = [] } = await chrome.storage.local.get('urlTags');
-    const configuredSet = UrlMatch.buildConfiguredUrlSet(getConfiguredScrapeUrls(urlTags));
+    // 与订阅外清理同一个范围判定：导入进来的卡不会下一轮就被当成订阅外清掉
+    const inScope = new Set(filterDramasByConfiguredUrls(candidates, urlTags));
 
     const seenItemIds = new Set(existing.map(d => d.itemId));
     const seenIds = new Set(existing.map(d => d.id));
@@ -2239,7 +2619,7 @@ function importDramaRecords(rawDramas) {
     let duplicates = 0;
 
     for (const normalized of candidates) {
-      if (!UrlMatch.isUrlCovered(normalized.sourceListUrl, configuredSet)) { outOfScope++; continue; }
+      if (!inScope.has(normalized)) { outOfScope++; continue; }
       if (seenItemIds.has(normalized.itemId)) { duplicates++; continue; } // 含备份文件内自重
 
       // status 白名单：非 new/trans 的怪值按「有中文标题＝已翻译」推断
@@ -2594,11 +2974,12 @@ async function syncTimelineToCsv() {
   }
 
   if (response.status === 409) {
-    // 服务端拒绝覆盖（如 EMPTY_REJECTED）且什么都没写：同内容重推只会再被拒，记下签名
-    // 不再重试这份内容；内容一变（或弹窗补喂清签名）照常推送
+    // 服务端拒绝覆盖（EMPTY_REJECTED 空推送 / TAG_CONFIG_MISSING 服务端缺 tag.json，v1.7.0）且什么都没写：
+    // 同内容重推只会再被拒，记下签名不再重试这份内容；内容一变（或弹窗补喂清签名）照常推送
     lastCsvSyncSerialized = serialized;
     const result = await response.json().catch(() => null);
-    console.warn(`[ShortScraping] CSV 同步被同步服务拒绝（${result?.code || 'HTTP 409'}）：${result?.error || ''}`);
+    const hint = result?.code === 'TAG_CONFIG_MISSING' ? '（设置页保存订阅后，打开弹窗即补推）' : '';
+    console.warn(`[ShortScraping] CSV 同步被同步服务拒绝（${result?.code || 'HTTP 409'}）：${result?.error || ''}${hint}`);
     return;
   }
 
@@ -2835,10 +3216,13 @@ async function writeBotRetryQueue(queue) {
  * 482 条，按站点判「新站」永远判不出来；新站点只是「该站所有 URL 都零条」的特例，一条规则覆盖两种情形。
  * 做法：开轮时库里零条的订阅 URL 视为首轮，本轮期间该 URL 基线挂 'pending' 一律不推（翻译线在开轮
  * 10s 后就并行跑，首批卡可能在收轮前翻完），收轮时把基线定在完成时刻，此后只推 scrapedAt 晚于基线的卡。
+ * 只有本轮**真正抓成**的 URL 才收口（isRealScrape：应答成功、确是订阅页、页面上找到了列表）；抓失败或
+ * 「抓到 0 条」的保持 'pending'，此后每一轮照样不推，直到它第一次真正抓成才定基线（v1.7.0，2026-09-27 用户定）。
+ * 以前收轮时本轮 URL 一律收口：IMDb 改天数那一轮某页没抓成，下一轮抓成时它窗口内的存量就被当成新片推了出去。
  * 存 larkBotState.urlBaseline[UrlMatch.normalizeListUrl(url)]（尾斜杠归一，与订阅归属判定同口径），
  * 与全局水位线 enabledAt 并列、互不影响。卡片按 sourceListUrl 归属（content.js 写入的就是订阅 URL
  * 本身）；无 sourceListUrl 的卡不受基线约束。标记/收口都只碰本轮 URL（弹窗单站刷新传的是过滤后的列表）。
- * SW 中途被回收会留下 'pending'：下一轮含该 URL 的收轮时统一收口为时间戳（那一轮的卡也随之不推，接受）。
+ * SW 中途被回收会留下 'pending'：之后该 URL 真正抓成的那一轮收轮时收口为时间戳（那一轮的卡也随之不推，接受）。
  * 已知边界（接受）：某 URL 长期零条（条目全与其它订阅重叠、去重命中不入库）时每轮都算首轮，它的第一条
  * 真正新卡会被吞一次；换成「有过基线就不再标」则首轮整页加载失败时下一轮会把底座全推出去，刷屏比漏一条更糟。
  * 退订 URL 的基线条目不清理（每条约 100 字节，重订阅时零条即重标覆盖）。
@@ -2905,20 +3289,25 @@ async function enqueueBotRetry(dramaId, attempts) {
 }
 
 /**
- * 重试队列处理（闹钟 larkBotRetry 触发）。逐条推送要跑好几分钟（每条请求超时 15s，最多 50 条），
- * 这期间翻译线的 maybeBotPush 照常失败入队、并新建 1 分钟后的闹钟。所以：
- * - 收尾写回在 updateBotState 内对**当前**队列做合并，不拿开轮快照整体覆盖：只摘掉本轮处理过的条目
- *   （dramaId + 开轮时的 attempts 认领），处理期间新入队的原样保留；闹钟按合并后的队列建或清。
- *   此前整体写回 remaining，期间入队的卡连同闹钟一起丢（审查 bot-retry-queue-overwrite）。
- * - 内存标记 botRetryProcessing 挡住并发的第二轮：期间入队建的闹钟到点时本轮往往还没跑完，
- *   第二轮读到的仍是未写回的整队，已推成功的卡会被再推一遍。被挡的一轮直接返回即可——
- *   本轮收尾时队列非空就会重建闹钟。标记只在内存：SW 被回收时处理也随之中断，不会误挡。
+ * 重试队列处理（闹钟 larkBotRetry 触发）。逐条推送要跑好几分钟（每条请求期限 15s、带图还要先上传封面，
+ * 最多 50 条），这期间翻译线的 maybeBotPush 照常失败入队、并新建 1 分钟后的闹钟。所以：
+ * - 逐条落账（settleBotRetryEntry）：每条推完立刻在 updateBotState 内改**当前**队列——推成功 / 放弃 /
+ *   卡已删就摘掉，失败原位把次数 +1；处理期间新入队的条目原样保留。以前收尾才统一合并写回：请求期间
+ *   SW 里没有扩展 API 调用，30s 空闲就可能被回收，已推成功的卡还在队里，下次重试整队重推，群里出现重复
+ *   卡片（审查 M4，v1.7.0）；更早整体写回开轮快照，还会把期间入队的卡连同闹钟一起丢（审查
+ *   bot-retry-queue-overwrite）。最坏只剩「推成功到落账之间被回收」的那一张可能重发。
+ * - 保活 + 预排闹钟：开跑先排上 1 分钟后的闹钟（一次性闹钟触发即删，否则跑的这几分钟里一个闹钟都没有），
+ *   整轮开着 startSwKeepAlive；万一仍被回收，闹钟到点接着处理剩下的。收尾按队列重排或清掉。
+ * - 内存标记 botRetryProcessing 挡住并发的第二轮：期间入队建的闹钟到点时本轮往往还没跑完，第二轮若照跑
+ *   会与本轮争推同一批卡。被挡的一轮补排一次闹钟再返回（它自己那个已随触发删掉）。标记只在内存：
+ *   SW 被回收时处理也随之中断，不会误挡。
  */
 let botRetryProcessing = false;
 
 async function processBotRetryQueue() {
   if (botRetryProcessing) {
-    console.log('[ShortScraping] 群机器人重试队列正在处理，本次触发跳过（收尾时按队列重建闹钟）');
+    chrome.alarms.create(BOT_RETRY_ALARM_NAME, { delayInMinutes: 1 });
+    console.log('[ShortScraping] 群机器人重试队列正在处理，本次触发跳过（已补排闹钟，收尾时按队列重建或清掉）');
     return;
   }
   botRetryProcessing = true;
@@ -2927,6 +3316,28 @@ async function processBotRetryQueue() {
   } finally {
     botRetryProcessing = false;
   }
+}
+
+/**
+ * 认领键＝dramaId + 开轮时的 attempts。处理期间同一张卡被 enqueueBotRetry 重新入队时 attempts 回到 1，
+ * 与开轮值不同即算新条目：落账时找不到本轮认领的那条，就以新条目为准、不动它（与 enqueueBotRetry
+ * 「同 id 只留最新一条」同口径）。已知边界（接受）：开轮值恰好也是 1 时两者无法区分，新条目被当作本轮
+ * 处理过的——本轮推成功则那张卡已送达，推失败则它照样留着一条次数 +1 的重试。
+ */
+const botRetryClaimKey = entry => `${entry.dramaId}\u0000${Number(entry.attempts) || 1}`;
+
+/** 一条重试推完即落账：next 为 null 摘掉本轮认领的那条，否则原位替换（保住入队先后）。 */
+function settleBotRetryEntry(entry, next) {
+  const key = botRetryClaimKey(entry);
+  return updateBotState((current) => {
+    const queue = Array.isArray(current.retryQueue) ? current.retryQueue : [];
+    const index = queue.findIndex(item => item && botRetryClaimKey(item) === key);
+    if (index === -1) return current;
+    const retryQueue = queue.slice();
+    if (next) retryQueue[index] = next;
+    else retryQueue.splice(index, 1);
+    return { ...current, retryQueue };
+  });
 }
 
 async function processBotRetryQueueOnce() {
@@ -2946,41 +3357,35 @@ async function processBotRetryQueueOnce() {
     return;
   }
 
-  const dramas = await getDramasSnapshot();
-  const remaining = [];
-  for (const entry of queue) {
-    const drama = dramas.find(d => d.id === entry.dramaId || d.itemId === entry.dramaId);
-    if (!drama) continue;   // 已被「按条件清理」删掉 → 丢弃，不白发请求
-    try {
-      await throttleBotPush();
-      await Lark.pushBotCard(config, drama);
-      console.log(`[ShortScraping] 群机器人重试成功: ${drama.titleZh || drama.title}`);
-    } catch (e) {
-      const attempts = (Number(entry.attempts) || 1) + 1;
-      if (attempts > MAX_BOT_RETRIES) {
-        console.warn(`[ShortScraping] 群机器人推送放弃（已试 ${attempts} 次）: ${entry.dramaId} - ${e.message}`);
-        continue;
+  chrome.alarms.create(BOT_RETRY_ALARM_NAME, { delayInMinutes: 1 });
+  const stopKeepAlive = startSwKeepAlive();
+  try {
+    const dramas = await getDramasSnapshot();
+    for (const entry of queue) {
+      const drama = dramas.find(d => d.id === entry.dramaId || d.itemId === entry.dramaId);
+      let next = null;   // 卡已被「按条件清理」删掉 → 摘掉，不白发请求
+      if (drama) {
+        try {
+          await throttleBotPush();
+          await Lark.pushBotCard(config, drama);
+          console.log(`[ShortScraping] 群机器人重试成功: ${drama.titleZh || drama.title}`);
+        } catch (e) {
+          const attempts = (Number(entry.attempts) || 1) + 1;
+          if (attempts > MAX_BOT_RETRIES) {
+            console.warn(`[ShortScraping] 群机器人推送放弃（已试 ${attempts} 次）: ${entry.dramaId} - ${e.message}`);
+          } else {
+            next = { dramaId: entry.dramaId, attempts };
+          }
+        }
       }
-      remaining.push({ dramaId: entry.dramaId, attempts });
+      await settleBotRetryEntry(entry, next);
     }
+  } finally {
+    stopKeepAlive();
   }
 
-  // 认领键＝dramaId + 开轮时的 attempts。处理期间同一张卡被 enqueueBotRetry 重新入队时
-  // attempts 回到 1，与开轮值不同即算新条目保留，并顶掉本轮给它留的旧重试（与 enqueueBotRetry
-  // 「同 id 只留最新一条」同口径）。已知边界（接受）：开轮值恰好也是 1 时两者无法区分，新条目
-  // 被当作本轮处理过的摘掉——本轮推成功则那张卡已送达，推失败则 remaining 里仍留着它的重试。
-  const claimKey = entry => `${entry.dramaId}\u0000${Number(entry.attempts) || 1}`;
-  const claimed = new Set(queue.map(claimKey));
-  const merged = await updateBotState((current) => {
-    const arrived = (Array.isArray(current.retryQueue) ? current.retryQueue : [])
-      .filter(entry => entry && !claimed.has(claimKey(entry)));
-    const arrivedIds = new Set(arrived.map(entry => entry.dramaId));
-    // 本轮剩下的条目入队更早，排在前面；超限丢最老的（与 enqueueBotRetry 同口径）
-    const retryQueue = remaining.filter(entry => !arrivedIds.has(entry.dramaId)).concat(arrived);
-    while (retryQueue.length > BOT_RETRY_QUEUE_LIMIT) retryQueue.shift();
-    return { ...current, retryQueue };
-  });
-  if (merged.retryQueue.length) chrome.alarms.create(BOT_RETRY_ALARM_NAME, { delayInMinutes: 1 });
+  const latest = await updateBotState(current => current);
+  if (Array.isArray(latest.retryQueue) && latest.retryQueue.length) chrome.alarms.create(BOT_RETRY_ALARM_NAME, { delayInMinutes: 1 });
   else await chrome.alarms.clear(BOT_RETRY_ALARM_NAME);
 }
 
@@ -3220,6 +3625,11 @@ async function scrapeContextForContent(sender) {
     if (!drama || !drama.itemId) continue;
     if (site && drama.source !== site && siteOfUrl(drama.sourceListUrl) !== site) continue;
     known.push([drama.itemId, Array.isArray(drama.genres) && drama.genres.length > 0]);
+  }
+  // 已知片单（v1.7.0）：只记 ID、不入库的条目同样按「已存在」下发，内容脚本直接跳过（记「已有 genres」，不去回填）
+  for (const entry of await readKnownItems()) {
+    if (site && entry.site && entry.site !== site) continue;
+    known.push([entry.id, true]);
   }
   return { success: true, urlTags: Array.isArray(urlTags) ? urlTags : [], known };
 }

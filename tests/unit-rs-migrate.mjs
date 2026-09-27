@@ -54,6 +54,9 @@ globalThis.fetch = async (url) => {
 const enqueueDramaWrite = (label, fn) => fn();
 // eslint-disable-next-line no-unused-vars
 const getDramasInQueue = async () => structuredClone(store.dramas);
+// v1.7.0 起筛候选改经队列读表（回填缓存），不再直读 storage
+// eslint-disable-next-line no-unused-vars
+const readDramasThroughQueue = async () => structuredClone(store.dramas);
 // eslint-disable-next-line no-unused-vars
 const writeDramasInQueue = async (next, extras = {}) => {
   store.dramas = structuredClone(next);
@@ -90,6 +93,8 @@ check('M3 非 ReelShort 条目不动',
 check('M4 一次性标记已写入', store.rsEpisodeUrlMigrated === true, `flag=${store.rsEpisodeUrlMigrated}`);
 check('M5 首轮恰好 2 次请求（仅候选），二跑零请求',
   firstRunFetches === 2 && fetchCalls === 2, `first=${firstRunFetches} total=${fetchCalls}`);
+check('M6 筛候选经 readDramasThroughQueue，不再绕过缓存直读 storage 的 dramas',
+  fnSrc.includes('readDramasThroughQueue(') && !/storage\.local\.get\('dramas'\)/.test(fnSrc), '');
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 process.exit(results.every(r => r.pass) ? 0 : 1);

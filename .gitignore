@@ -25,8 +25,9 @@ logs/
 tmp/
 temp/
 
-# Claude Code worktrees
+# Claude Code worktrees and per-user local settings
 .claude/worktrees/
+.claude/settings.local.json
 .playwright-mcp/
 
 # Local config

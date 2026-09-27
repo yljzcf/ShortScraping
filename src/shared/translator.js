@@ -21,6 +21,11 @@
     ? require('./translate-config.js')
     : global.TranslateConfig;
 
+  // 带期限的 fetch 单一实现（期限连响应正文一起算，v1.7.0 审查 H1），后台 importScripts 同样排在本模块之前
+  const FetchUtil = (typeof module !== 'undefined' && module.exports)
+    ? require('./fetch-util.js')
+    : global.FetchUtil;
+
   // 批量翻译的输入/输出契约（由代码固定，拼在用户风格提示词之后）。
   // 对应关系的命根子：要求模型按输入 id 一一回填，绝不靠返回顺序。
   const BATCH_CONTRACT =
@@ -169,26 +174,16 @@
   }
 
   /**
-   * 带超时的 fetch，避免第三方接口长时间挂起导致按钮卡住。
+   * 带超时的 fetch，期限**连响应正文一起算**（FetchUtil.fetchWithDeadline）。以前拿到响应头就清掉计时器，
+   * 之后的 response.json() 没有期限：接口先回 200 头、再迟迟不发正文时，后台开着 SW 保活的翻译轮会
+   * 永久挂住（审查 H1，v1.7.0）。超时文案不变，调用点照旧按 ok/status/json() 取结果。
    */
-  async function fetchWithTimeout(url, options = {}, timeoutSec = 10) {
-    const controller = new AbortController();
+  function fetchWithTimeout(url, options = {}, timeoutSec = 10) {
     const timeoutMs = Math.max(5, Number(timeoutSec) || 10) * 1000;
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      return await fetch(url, {
-        ...options,
-        signal: controller.signal
-      });
-    } catch (e) {
-      if (e.name === 'AbortError') {
-        throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}秒）`);
-      }
-      throw e;
-    } finally {
-      clearTimeout(timer);
-    }
+    return FetchUtil.fetchWithDeadline(url, options, {
+      timeoutMs,
+      timeoutMessage: `请求超时（${Math.round(timeoutMs / 1000)}秒）`
+    });
   }
 
   /**

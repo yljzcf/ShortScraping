@@ -8,6 +8,10 @@
 
   const SYNC_BASE_URL = 'http://127.0.0.1:31919';
   const SYNC_HEALTH_URL = `${SYNC_BASE_URL}/health`;
+  // 写回配置与健康检查的期限（连正文一起算，FetchUtil）：写回以前没有期限，服务接了连接却不应答时，
+  // 「保存」（含退订前的文件写回预检）会一直转（v1.7.0）
+  const SYNC_CONFIG_TIMEOUT_MS = 5000;
+  const SYNC_HEALTH_TIMEOUT_MS = 1500;
   const SUBSCRIPTION_CATALOG_FILE = 'config/tag.example.json';
   // 「本地配置领先于文件」标记 { tag?, trans?, lark?, cron? }，与后台 loadConfigFromJsonFiles 共用（见 configAheadPatch）
   const CONFIG_AHEAD_KEY = 'configAheadOfFile';
@@ -46,6 +50,7 @@
     renderLarkExportSites();
     refreshLarkExportHint();
     refreshPruneTrashButton();
+    renderKnownItemsInfo();
     bindStorageEvents();
     loadCurrentConfig();
     checkSyncServiceStatus();
@@ -116,6 +121,8 @@
       translateCron: document.getElementById('translateCronInput'),
       scrapeCronPreview: document.getElementById('scrapeCronPreview'),
       translateCronPreview: document.getElementById('translateCronPreview'),
+      imdbWindowDays: document.getElementById('imdbWindowDaysInput'),
+      knownItemsInfo: document.getElementById('knownItemsInfo'),
       save: document.getElementById('btnSaveSchedule'),
       reload: document.getElementById('btnReloadSchedule')
     };
@@ -223,6 +230,7 @@
       if (areaName !== 'local') return;
       if (changes.urlTags) handleExternalUrlTagsChange(changes.urlTags.newValue);
       if (changes[PRUNE_TRASH_KEY]) renderPruneTrashButton(changes[PRUNE_TRASH_KEY].newValue);
+      if (changes.knownItems) renderKnownItemsInfo();
     });
   }
 
@@ -544,8 +552,24 @@
     form.translateInterval.value = config.translateInterval;
     form.scrapeCron.value = config.scrapeCron;
     form.translateCron.value = config.translateCron;
+    if (form.imdbWindowDays) form.imdbWindowDays.value = ScheduleConfig.normalizeConfig(config).imdbWindowDays;
     updateScheduleModeVisibility();
     updateSchedulePreviews();
+  }
+
+  /** 已知片单条数（后台 storage.knownItems，只读展示；只记 ID、不入库、不推送，备份在 db/known-items.json）。 */
+  async function renderKnownItemsInfo() {
+    const info = elements.scheduleForm?.knownItemsInfo;
+    if (!info) return;
+    try {
+      const { knownItems } = await chrome.storage.local.get('knownItems');
+      const count = Array.isArray(knownItems) ? knownItems.length : 0;
+      info.textContent = count > 0
+        ? `已知片单 ${count} 部：切换滚动日期窗口时记下的老片，只记 ID，不入库、不推送（备份在 db/known-items.json）。`
+        : '';
+    } catch (e) {
+      info.textContent = '';
+    }
   }
 
   function updateScheduleModeVisibility() {
@@ -595,12 +619,15 @@
 
   function readScheduleConfigFromForm() {
     const form = elements.scheduleForm;
+    // 天数留空＝用默认值（Number('') 会得 0，那是「不限日期」，意思完全不同）
+    const windowText = form.imdbWindowDays ? String(form.imdbWindowDays.value).trim() : '';
     return {
       scheduleMode: form.mode.value,
       scrapeInterval: Number(form.scrapeInterval.value),
       translateInterval: Number(form.translateInterval.value),
       scrapeCron: form.scrapeCron.value.trim(),
-      translateCron: form.translateCron.value.trim()
+      translateCron: form.translateCron.value.trim(),
+      ...(windowText === '' ? {} : { imdbWindowDays: Number(windowText) })
     };
   }
 
@@ -751,10 +778,13 @@
   function createSummaryCard(label, value) {
     const card = document.createElement('div');
     card.className = 'summary-card';
-    card.innerHTML = `
-      <div class="summary-label">${escapeHtml(label)}</div>
-      <div class="summary-value">${escapeHtml(value)}</div>
-    `;
+    // textContent 天然不解析 HTML：不必再为这一处留一份 escapeHtml（v1.7.0 删）
+    for (const [className, text] of [['summary-label', label], ['summary-value', value]]) {
+      const cell = document.createElement('div');
+      cell.className = className;
+      cell.textContent = text === null || text === undefined ? '' : String(text);
+      card.appendChild(cell);
+    }
     return card;
   }
 
@@ -1177,11 +1207,11 @@
    */
   async function trySyncConfig(route, body) {
     try {
-      const response = await fetch(SYNC_BASE_URL + route, {
+      const response = await FetchUtil.fetchWithDeadline(SYNC_BASE_URL + route, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
-      });
+      }, { timeoutMs: SYNC_CONFIG_TIMEOUT_MS, timeoutMessage: `同步服务 ${SYNC_CONFIG_TIMEOUT_MS / 1000} 秒内无响应` });
 
       let result = null;
       try {
@@ -1436,9 +1466,9 @@
   const LARK_EXPORT_SAFETY_MARGIN_MS = 2 * 60 * 1000;
 
   /**
-   * 与 popup.js 的 copyTextToClipboard 同款（见 src/popup/popup.js）：无用户激活时
-   * navigator.clipboard.writeText 会无声挂起而不是拒绝，必须靠超时竞速兜到
-   * execCommand 分支。两页不共享模块，此处照搬而非新起一个共享模块。
+   * 与 popup.js 的 copyTextToClipboard 逐字相同（unit-popup-sync-control Y4 守着）：无用户激活时
+   * navigator.clipboard.writeText 会无声挂起而不是拒绝，必须靠超时竞速兜到 execCommand 分支。
+   * 两页没有都加载、又适合放 DOM 小工具的共享模块，照搬一份比新起一个模块（还要进每个测试的 vm）划算。
    * 两条路都失败时抛错：execCommand 失败不抛、只回 false，吞掉它调用方就以为已复制，
    * 照样推进水位线，这批条目下次不再导出。
    */
@@ -1582,14 +1612,9 @@
     updateSyncServiceStatus('checking');
 
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 1500);
-
-      const response = await fetch(SYNC_HEALTH_URL, {
-        cache: 'no-store',
-        signal: controller.signal
-      });
-      clearTimeout(timer);
+      // 期限连正文一起算：以前拿到响应头就清计时器，服务回了头却不发完正文时状态一直停在「检测中」
+      const response = await FetchUtil.fetchWithDeadline(SYNC_HEALTH_URL, { cache: 'no-store' },
+        { timeoutMs: SYNC_HEALTH_TIMEOUT_MS, timeoutMessage: `同步服务 ${SYNC_HEALTH_TIMEOUT_MS / 1000} 秒内无响应` });
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -1612,7 +1637,10 @@
     if (status === 'on') {
       container.classList.add('is-on');
       text.textContent = '同步服务：已开启';
-      archiveInfo.textContent = result.csvPath ? `CSV 输出路径：${result.csvPath}` : '同步服务已开启，可以写入 CSV 和配置文件。';
+      // 服务端缺 config/tag.json 时推送被 409 拒绝（v1.7.0，数据不动）：在这里点明怎么恢复
+      archiveInfo.textContent = result.tagConfigMissing === true
+        ? '同步服务找不到 config/tag.json：时间线推送被拒绝（已有的 CSV 与共享页不会被清空）。到「网页订阅」点一次保存即可重新生成该文件。'
+        : (result.csvPath ? `CSV 输出路径：${result.csvPath}` : '同步服务已开启，可以写入 CSV 和配置文件。');
       return;
     }
 
@@ -1676,12 +1704,6 @@
       statusTimer = null;
       elements.status.className = 'status';
     }, success ? STATUS_SUCCESS_MS : STATUS_ERROR_MS);
-  }
-
-  function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text || '';
-    return div.innerHTML;
   }
 
   document.addEventListener('DOMContentLoaded', init);

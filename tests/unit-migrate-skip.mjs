@@ -184,14 +184,17 @@ const readsOf = key => store.reads.filter(keys => keys === null || keys.includes
   const reads = dramasReadCount();
   // 缓存热态（同 SW 会话内二次唤醒等价路径）为 0 次；缓存冷态（真实 SW 重启）为 1 次（仅 prune）
   check('T2a 二次唤醒 dramas 全表读 ≤1 次（旧代码 4+ 次）', reads <= 1, `reads=${reads} log=${JSON.stringify(store.reads)}`);
-  const rsGets = readsOf('rsEpisodeUrlMigrated');
-  check('T2b rs 标记读取不连带 dramas', rsGets.length === 1 && rsGets[0]?.length === 1, JSON.stringify(rsGets));
+  // v1.7.0：稳态下各迁移完成标记合成一次 storage.get（runPendingDramaMigrations，此前逐条各读一次）；
+  // v1.7.0 加了 IMDb 滚动日期窗口切换（imdbRollingSwitch），共八个
+  const MIGRATION_FLAGS = ['imdbRollingSwitch', 'legacyDramaMigrated', 'companyFieldDropped', 'partialTranslationReset', 'nonChineseTitleZhReset',
+    'garbledTranslationReset', 'rsEpisodeUrlMigrated', 'shorticalCanonicalIdsMigrated'];
+  const flagReads = store.reads.filter(keys => Array.isArray(keys) && keys.some(k => MIGRATION_FLAGS.includes(k)));
+  check('T2b 八个迁移完成标记合成一次读取、不连带 dramas',
+    flagReads.length === 1 && JSON.stringify([...flagReads[0]].sort()) === JSON.stringify([...MIGRATION_FLAGS].sort()),
+    JSON.stringify(flagReads));
   check('T2c 数据未被误动', (store.dramas() || []).length === SEEDED - 1, `len=${store.dramas()?.length}`);
-  // 四个逐条复位迁移共用 runOnceDramaMigration：标记各读一次、只读标记本身，置位后零写入
-  const ONCE_FLAGS = ['companyFieldDropped', 'partialTranslationReset', 'nonChineseTitleZhReset', 'garbledTranslationReset'];
-  const flagGets = ONCE_FLAGS.map(flag => readsOf(flag));
-  check('T2d 逐条复位迁移的标记各单独读一次、不连带 dramas',
-    flagGets.every(gets => gets.length === 1 && gets[0]?.length === 1), JSON.stringify(flagGets));
+  check('T2d 标记都已置位时各迁移不再被调用（没有逐条单独读自己标记的小读）',
+    MIGRATION_FLAGS.every(flag => readsOf(flag).length === 1), JSON.stringify(MIGRATION_FLAGS.map(flag => readsOf(flag).length)));
 }
 
 // ---------- T3 set 失败：标记不置位，下轮重试成功 ----------
@@ -294,9 +297,20 @@ const readsOf = key => store.reads.filter(keys => keys === null || keys.includes
     await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
     const flagGets = readsOf('shorticalCanonicalIdsMigrated');
     check('T5i 二次唤醒标记读取不连带 dramas、零网络、数据不动',
-      flagGets.length === 1 && flagGets[0]?.length === 1 && shorticalSitemapCalls === 0
+      flagGets.length === 1 && !flagGets[0].includes('dramas') && shorticalSitemapCalls === 0
       && JSON.stringify(store.dramas()) === before,
       JSON.stringify({ flagGets, calls: shorticalSitemapCalls }));
+  }
+  {
+    // 导入恢复重新挂起（标记写 false）+ 缓存冷：迁移经队列读表并回填缓存，整轮只读一次整表
+    // （v1.7.0；以前先直读 storage 筛候选、队列里再读一次，冷唤醒要读两遍）
+    store.data.shorticalCanonicalIdsMigrated = false;
+    await resetDramasCache();
+    store.reads.length = 0;
+    await loadConfigFromJsonFiles(); // eslint-disable-line no-undef
+    check('T5m 重新挂起的 Shortical 迁移冷唤醒只读一次整表，跑完照常置位',
+      dramasReadCount() === 1 && store.data.shorticalCanonicalIdsMigrated === true,
+      JSON.stringify({ reads: dramasReadCount(), flag: store.data.shorticalCanonicalIdsMigrated }));
   }
   {
     // sitemap 取不到：标记不置位、数据一个字节不动，下轮唤醒重试（绝不退回 href 那个号）

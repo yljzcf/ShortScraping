@@ -104,6 +104,12 @@ body {
   color: #f87171;
 }
 
+.toast-bar.is-warning {
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  color: #fbbf24;
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -193,6 +199,16 @@ body {
 .sync-service.is-on .sync-service-hint,
 .sync-service.is-off .sync-service-hint {
   color: var(--text-secondary);
+}
+
+/* 服务在跑但找不到 config/tag.json（v1.7.0）：推送被拒、数据不动，黄色提示去设置页保存一次订阅 */
+.sync-service.is-on.is-warn {
+  color: var(--warning);
+}
+
+.sync-service.is-on.is-warn .sync-service-dot {
+  background: var(--warning);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.55);
 }
 
 .version-status {
@@ -445,6 +461,11 @@ body {
 /* 最近一轮抓取全部失败：「抓取于 …」后缀提示，原因在悬停 title 里 */
 #statsLastUpdate.is-failed {
   color: var(--danger);
+}
+
+/* 抓取成功却有订阅一条都没拿到（页面跳转 / 站点改版，v1.7.0）：「抓取于 …」后缀提示，明细在悬停 title 里 */
+#statsLastUpdate.is-warning {
+  color: var(--warning);
 }
 
 /* 本地数据已由更新版本升级（dramasMeta.layout 高于本版本）：状态栏换成升级提示，后台只读停摆 */

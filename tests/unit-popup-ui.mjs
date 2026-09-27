@@ -14,6 +14,8 @@ import './bootstrap.cjs';
 //   T 组：本页选站写 siteTabPrefs 的回声不再重画标签条；设置页改了分组固定项才重画
 //   G 组：「前往榜单页面」按域名归类挑当前站点的订阅页，挑不到去设置页（不再按 host 子串、不回退 urls[0]）
 //   W 组：订阅归属判定委托 SubscriptionConfig.dramasUnderUrls，popup.html 按依赖顺序加载它
+//   V 组：「抓到 0 条」告警（lastScrapeWarnings，v1.7.0 审查 M2）——底栏后缀、悬停明细、只算仍订阅的 URL、
+//         整轮全失败优先；onChanged 只刷底栏；手动刷新的三种提示
 // 用法：node tests/unit-popup-ui.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -27,6 +29,7 @@ const SiteRegistry = require(path.join(root, 'src/shared/site-registry.js'));
 const SiteTabs = require(path.join(root, 'src/shared/site-tabs.js'));
 const SubscriptionConfig = require(path.join(root, 'src/shared/subscription-config.js'));
 const UrlMatch = require(path.join(root, 'src/shared/url-match.js'));
+const ScheduleConfig = require(path.join(root, 'src/shared/schedule-config.js'));
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
@@ -117,6 +120,7 @@ async function popupFixture({ stored = {} } = {}) {
     SiteRegistry,
     SubscriptionConfig,
     UrlMatch,
+    ScheduleConfig,
     SiteTabs: { ...SiteTabs, render: (container, layout, opts) => { tabRenders.push({ layout, opts }); } },
     TimelineRender: {
       CATEGORY_SOURCES: SiteRegistry.CATEGORY_SOURCES,
@@ -244,6 +248,44 @@ const baseStore = (extra = {}) => ({
     h.toasts.at(-1)?.message === '本次刷新新增 2 条内容' && h.fx.state.refreshingSite === null, JSON.stringify(h.toasts.at(-1)));
 }
 
+// ============ V 组：「抓到 0 条」告警 ============
+{
+  const warnings = { at: T1, items: [{ url: IMDB, kind: 'empty' }, { url: 'https://gone.example/list', kind: 'unsubscribed' }] };
+  const h = await popupFixture({ stored: baseStore({ lastScrape: T1, lastScrapeWarnings: warnings }) });
+  check('V1 底栏后缀「· 1 个订阅抓到 0 条」（已退订的 URL 不算）、标黄 is-warning',
+    h.lastUpdate().textContent === `抓取于 REL(${T1}) · 1 个订阅抓到 0 条` && h.lastUpdate().classes.has('is-warning'),
+    h.lastUpdate().textContent);
+  check('V2 悬停列出站名、URL 与原因', h.lastUpdate().title.includes('IMDB') && h.lastUpdate().title.includes(IMDB)
+    && h.lastUpdate().title.includes('站点改版') && !h.lastUpdate().title.includes('gone.example'), h.lastUpdate().title);
+  check('V3 loadData 连同 lastScrapeWarnings 一起读', h.storageGets.some(keys => keys.includes('lastScrapeWarnings')), JSON.stringify(h.storageGets));
+  h.fireChange({ lastScrapeFailure: { newValue: { at: T2, failed: 2, total: 2, error: 'x' } } });
+  check('V4 整轮全失败的提示优先，不再叠加 0 条告警', h.lastUpdate().textContent === `抓取于 REL(${T1}) · 最近一轮全部失败`
+    && !h.lastUpdate().classes.has('is-warning') && h.lastUpdate().classes.has('is-failed'), h.lastUpdate().textContent);
+  const rendersBefore = h.timelineRenders();
+  h.fireChange({ lastScrape: { newValue: T2 }, lastScrapeFailure: { newValue: null }, lastScrapeWarnings: { newValue: null } });
+  h.flushTimers();
+  check('V5 告警随 onChanged 清掉；只刷底栏、不重建时间线', h.lastUpdate().textContent === `抓取于 REL(${T2})`
+    && !h.lastUpdate().classes.has('is-warning') && h.timelineRenders() === rendersBefore,
+    `${h.lastUpdate().textContent} renders=${h.timelineRenders() - rendersBefore}`);
+
+  const refresh = async (summary) => {
+    const run = h.fx.refreshActiveSource('imdb');
+    await h.settle();
+    h.pendingScrapes.shift()({ success: true, summary });
+    await run;
+    return h.toasts.at(-1);
+  };
+  const onlyWarn = await refresh({ totalNewCount: 0, results: [{ success: true, newCount: 0, warning: 'empty' }] });
+  check('V6 手动刷新只有告警：提示「1 个订阅抓到 0 条（…）」且是 warning 样式（不再说「无新增内容」）',
+    onlyWarn?.message === '1 个订阅抓到 0 条（可能站点改版或页面未加载完整）' && onlyWarn?.type === 'warning', JSON.stringify(onlyWarn));
+  const withNew = await refresh({ totalNewCount: 2, results: [{ success: true, newCount: 2 }, { success: true, newCount: 0, warning: 'unsubscribed' }] });
+  check('V7 有新增也有告警：两件事一起说', withNew?.message === '本次刷新新增 2 条；1 个订阅抓到 0 条（可能站点改版或页面未加载完整）'
+    && withNew?.type === 'warning', JSON.stringify(withNew));
+  const withFail = await refresh({ totalNewCount: 0, results: [{ success: false, error: 'x' }, { success: true, newCount: 0, warning: 'empty' }] });
+  check('V8 有失败也有告警：失败文案后补上告警条数', withFail?.message === '本次刷新新增 0 条，1 个来源失败，1 个订阅抓到 0 条'
+    && withFail?.type === 'error', JSON.stringify(withFail));
+}
+
 // ============ T 组：siteTabPrefs 回声 ============
 {
   const h = await popupFixture({ stored: baseStore({ siteTabPrefs: { activeSource: 'imdb', pins: { video: 'netflix' } } }) });
@@ -268,12 +310,14 @@ const baseStore = (extra = {}) => ({
   }) });
   check('G0 前提：活动站点为 DramaBox', h.fx.state.activeSource === 'dramabox', h.fx.state.activeSource);
   h.byId.btnGoScrape.click();
+  await h.settle();   // v1.7.0 起先读 scheduleConfig（IMDb 日期窗口）再开页
   check('G1 只订了 dramaboxdb.com：打开 DramaBox 的订阅页（修复前 host 子串不中，回退打开了 IMDB）',
     JSON.stringify(h.tabsCreated) === JSON.stringify([DRAMABOXDB]), JSON.stringify(h.tabsCreated));
 
   h.tabsCreated.length = 0;
   h.fx.state.activeSource = 'netflix';   // 当前站点名下没有订阅 URL
   h.byId.btnGoScrape.click();
+  await h.settle();
   check('G2 当前站点没有订阅页：去设置页，不再随手开 urls[0]',
     JSON.stringify(h.tabsCreated) === JSON.stringify(['chrome-extension://unit-test/src/settings/settings.html']),
     JSON.stringify(h.tabsCreated));
@@ -281,8 +325,28 @@ const baseStore = (extra = {}) => ({
   h.tabsCreated.length = 0;
   h.fx.state.activeSource = null;
   h.byId.btnGoScrape.click();
+  await h.settle();
   check('G3 没有活动站点（零订阅）：去设置页', h.tabsCreated.length === 1 && h.tabsCreated[0].endsWith('settings.html'),
     JSON.stringify(h.tabsCreated));
+}
+{
+  // G4 IMDb 订阅不带日期（v1.7.0）：「去抓取」打开时按设置的天数补 release_date，看到的就是后台实际抓的那页
+  const SEARCH = 'https://www.imdb.com/search/title/?companies=co1028734';
+  const h = await popupFixture({ stored: baseStore({
+    urlTags: [{ urlPattern: SEARCH, tags: ['IMDB', 'DramaBox'] }],
+    siteTabPrefs: { activeSource: 'imdb' },
+    scheduleConfig: { scheduleMode: 'cron', scrapeCron: '45 * * * *', translateCron: '50 * * * *', imdbWindowDays: 30 }
+  }) });
+  h.byId.btnGoScrape.click();
+  await h.settle();
+  const expected = SubscriptionConfig.withReleaseWindow(SEARCH, 30);
+  check('G4 IMDb 搜索页订阅：打开地址按设置的 30 天补上 release_date', h.tabsCreated.length === 1 && h.tabsCreated[0] === expected
+    && /&release_date=\d{4}-\d{2}-\d{2},$/.test(expected), JSON.stringify(h.tabsCreated));
+  h.tabsCreated.length = 0;
+  h.store.scheduleConfig = { ...h.store.scheduleConfig, imdbWindowDays: 0 };
+  h.byId.btnGoScrape.click();
+  await h.settle();
+  check('G5 天数设为 0（不限）：原样打开订阅地址', JSON.stringify(h.tabsCreated) === JSON.stringify([SEARCH]), JSON.stringify(h.tabsCreated));
 }
 
 // ============ W 组：订阅归属判定只在 subscription-config 一处 ============
@@ -305,6 +369,8 @@ const baseStore = (extra = {}) => ({
   const src = fs.readFileSync(path.join(root, 'src/popup/popup.js'), 'utf8');
   check('W3 popup.js 委托 SubscriptionConfig.dramasUnderUrls，不再自拼 UrlMatch 集合',
     src.includes('SubscriptionConfig.dramasUnderUrls(') && !src.includes('UrlMatch.buildConfiguredUrlSet'), '');
+  check('W5 订阅 URL 清单也委托 SubscriptionConfig.configuredScrapeUrls（与后台同一份、同一去重口径）',
+    src.includes('SubscriptionConfig.configuredScrapeUrls(') && !/\.map\(item => item\.urlPattern \|\| item\.url\)/.test(src), '');
   const html = fs.readFileSync(path.join(root, 'src/popup/popup.html'), 'utf8');
   const at = needle => html.indexOf(`src="${needle}"`);
   check('W4 popup.html 按依赖顺序加载：url-match → subscription-config → popup.js',

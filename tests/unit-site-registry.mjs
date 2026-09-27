@@ -25,10 +25,14 @@ check('T1a CATEGORY_SOURCES 顺序与全集',
 check('T1b SOURCE_NAMES 字面量（含键序）',
   deepEq(SiteRegistry.SOURCE_NAMES, { imdb: 'IMDB', netflix: 'Netflix', appletv: 'AppleTV', steam: 'Steam', mydrama: 'MyDrama', reelshort: 'ReelShort', dramashorts: 'DramaShorts', netshort: 'NetShort', flickreels: 'FlickReels', goodshort: 'GoodShort', shortical: 'Shortical', shortmax: 'ShortMax', dramabox: 'DramaBox', royalroad: 'RoyalRoad', pinedrama: 'PinesDramas' }),
   JSON.stringify(SiteRegistry.SOURCE_NAMES));
-// dramabox 有两条 host 条目，hostBySource 取**首条**＝主域 dramabox.com（弹窗「去抓取」用它挑订阅 URL）
-check('T1c hostBySource 字面量（含键序）',
-  deepEq(SiteRegistry.hostBySource, { imdb: 'imdb.com', netflix: 'netflix.com', appletv: 'tv.apple.com', steam: 'store.steampowered.com', mydrama: 'my-drama.com', reelshort: 'reelshort.com', dramashorts: 'dramashorts.io', netshort: 'netshort.com', flickreels: 'flickreels.net', goodshort: 'goodshort.com', shortical: 'shortical.com', shortmax: 'shorttv.live', dramabox: 'dramabox.com', royalroad: 'royalroad.com', pinedrama: 'pinedrama.com' }),
-  JSON.stringify(SiteRegistry.hostBySource));
+// hostBySource（站点→主域）只剩测试在用，弹窗「去抓取」早已改用 siteOfUrl 按域名归类：v1.7.0 删导出
+check('T1c 无人使用的 hostBySource 导出已删', !('hostBySource' in SiteRegistry), JSON.stringify(Object.keys(SiteRegistry)));
+
+// ---------- T1s 卡片归属站点 siteOfDrama（v1.7.0 收拢 timeline-render 的 dramaSource 与 sync-server 的副本） ----------
+check('T1s siteOfDrama：站点全集里的 source 原样，注册表外 / 缺失的归 imdb（source 字段出现前只有 IMDB）',
+  SiteRegistry.siteOfDrama({ source: 'dramabox' }) === 'dramabox' && SiteRegistry.siteOfDrama({ source: 'pinedrama' }) === 'pinedrama'
+    && SiteRegistry.siteOfDrama({ source: 'unittest' }) === 'imdb' && SiteRegistry.siteOfDrama({}) === 'imdb'
+    && SiteRegistry.siteOfDrama(null) === 'imdb', '');
 
 // ---------- T1e 同键多 host 的注册表不变量（v1.6.11 新引入，DramaBox 两域名） ----------
 // 三条缺一即静默出错：键集不等会渲染出重复标签；同键异名会让显示名取决于遍历顺序
@@ -172,22 +176,27 @@ for (const [rel, prefix] of [
 }
 check('T4j 共享页静态白名单含 translate-config', serverSrc.includes("'/shared/translate-config.js'"), '');
 
-// lark.js 在**模块求值时**就取 SiteRegistry.SOURCE_NAMES / TranslateConfig.titleDisplay / TimelineCsv
-// （lark.js:42-55），排在它们前面＝设置页加载即白屏、后台 SW 启动即 ReferenceError。只有设置页与后台
-// 加载它，两处加载序都要逐个守（2026-09-17 审计 H4：此前顺序对但零测试）
+// lark.js 在**模块求值时**就取 SiteRegistry.SOURCE_NAMES / TranslateConfig.titleDisplay / TimelineCsv /
+// FetchUtil（lark.js 顶部依赖区），排在它们前面＝设置页加载即白屏、后台 SW 启动即 ReferenceError。只有设置页
+// 与后台加载它，两处加载序都要逐个守（2026-09-17 审计 H4：此前顺序对但零测试；fetch-util 为 v1.7.0 新增）
 {
-  const LARK_DEPS = ['site-registry.js', 'timeline-csv.js', 'translate-config.js'];
+  const LARK_DEPS = ['site-registry.js', 'timeline-csv.js', 'translate-config.js', 'fetch-util.js'];
   const settingsHtml = fs.readFileSync(path.join(worktreeRoot, 'src/settings/settings.html'), 'utf8');
   const htmlAt = needle => settingsHtml.indexOf(`src="../shared/${needle}"`);
   const htmlLarkAt = htmlAt('lark.js');
-  check('T4k settings.html 里 site-registry / timeline-csv / translate-config 都排在 lark 之前',
+  check('T4k settings.html 里 site-registry / timeline-csv / translate-config / fetch-util 都排在 lark 之前',
     htmlLarkAt >= 0 && LARK_DEPS.every(n => htmlAt(n) >= 0 && htmlAt(n) < htmlLarkAt),
     `lark=${htmlLarkAt} deps=${JSON.stringify(LARK_DEPS.map(htmlAt))}`);
   const bgAt = needle => bgSrc.indexOf(`importScripts('../shared/${needle}')`);
   const bgLarkAt = bgAt('lark.js');
-  check('T4l 后台 importScripts 里 site-registry / timeline-csv / translate-config 都排在 lark 之前',
+  check('T4l 后台 importScripts 里 site-registry / timeline-csv / translate-config / fetch-util 都排在 lark 之前',
     bgLarkAt >= 0 && LARK_DEPS.every(n => bgAt(n) >= 0 && bgAt(n) < bgLarkAt),
     `lark=${bgLarkAt} deps=${JSON.stringify(LARK_DEPS.map(bgAt))}`);
+  // translator.js 同样在求值时取 FetchUtil（与 TranslateConfig 并列），它只由后台加载
+  const bgTranslatorAt = bgAt('translator.js');
+  check('T4m 后台 importScripts 里 fetch-util 与 translate-config 都排在 translator 之前',
+    bgTranslatorAt >= 0 && ['fetch-util.js', 'translate-config.js'].every(n => bgAt(n) >= 0 && bgAt(n) < bgTranslatorAt),
+    `translator=${bgTranslatorAt} fetch-util=${bgAt('fetch-util.js')} translate-config=${bgAt('translate-config.js')}`);
 }
 
 // ---------- T7 content.js 适配器注册表 ≡ 站点全集 ----------
@@ -360,7 +369,19 @@ check('T6d notimdb.com 站点归属怪癖保真', SiteRegistry.siteOfUrl('https:
 
 // ---------- T5 Node 侧消费契约（lark 经 require 间接取数） ----------
 const Lark = require(path.join(worktreeRoot, 'src/shared/lark.js'));
-check('T5 Lark.SOURCE_NAMES 契约保留且同源', deepEq(Lark.SOURCE_NAMES, SiteRegistry.SOURCE_NAMES), '');
+// 转手导出的 Lark.SOURCE_NAMES 已删（v1.7.0）；buildPayload 的 source_name 仍取自注册表
+check('T5 lark 不再转手导出 SOURCE_NAMES，source_name 照旧取自注册表',
+  !('SOURCE_NAMES' in Lark) && Lark.buildPayload({ source: 'dramabox', title: 't' }).source_name === SiteRegistry.SOURCE_NAMES.dramabox,
+  JSON.stringify(Lark.buildPayload({ source: 'dramabox', title: 't' }).source_name));
+
+// ---------- T9 siteOfDrama 的接线：共享页 / 弹窗标签与同步服务分站点告警都走注册表那一份 ----------
+{
+  const renderSrc = fs.readFileSync(path.join(worktreeRoot, 'src/shared/timeline-render.js'), 'utf8');
+  const serverSrcT9 = fs.readFileSync(path.join(worktreeRoot, 'server/sync-server.js'), 'utf8');
+  check('T9 timeline-render 的 dramaSource 与同步服务都委托 SiteRegistry.siteOfDrama（不再各写一份）',
+    /SiteRegistry\.siteOfDrama\(/.test(renderSrc) && !/function dramaSource\(/.test(renderSrc)
+      && /SiteRegistry\.siteOfDrama\(/.test(serverSrcT9) && !/function siteOfDrama\(/.test(serverSrcT9), '');
+}
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

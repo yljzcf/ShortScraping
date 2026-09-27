@@ -317,6 +317,21 @@ const ok = { status: 200, body: { ok: true } };
   check('S4a 409 不抛异常', threw === null, String(threw?.message));
   check('S4b 409 后同内容不再重推', syncPosts(bg).length === before + 1, `posts=${syncPosts(bg).length - before}`);
   check('S4c 409 告警带服务端错误码', bg.warnings.some(w => w.includes('EMPTY_REJECTED')), JSON.stringify(bg.warnings));
+
+  // S4d-f 服务端缺 config/tag.json 的 409（TAG_CONFIG_MISSING，v1.7.0）：同样不抛、不重推同内容，
+  // 告警带错误码并点明恢复路径（设置页保存订阅 → 打开弹窗补推）
+  bg.server = async () => ({ status: 409, body: { ok: false, code: 'TAG_CONFIG_MISSING', error: '未找到 config/tag.json，已拒绝按零订阅覆盖现有 3 条时间线（未写入任何文件）；请在扩展设置页「网页订阅」点一次保存以重新生成该文件' } });
+  bg.seed(card('tt0404'));
+  resetSync(bg);
+  const beforeMissing = syncPosts(bg).length;
+  let threwMissing = null;
+  await bg.run('syncTimelineToCsv()').catch(e => { threwMissing = e; });
+  await bg.run('syncTimelineToCsv()').catch(e => { threwMissing = e; });
+  check('S4d TAG_CONFIG_MISSING 的 409 不抛异常', threwMissing === null, String(threwMissing?.message));
+  check('S4e TAG_CONFIG_MISSING 后同内容不再重推（每次唤醒最多被拒一次，不刷请求）',
+    syncPosts(bg).length === beforeMissing + 1, `posts=${syncPosts(bg).length - beforeMissing}`);
+  check('S4f 告警带 TAG_CONFIG_MISSING 与恢复路径（设置页 / 打开弹窗即补推）',
+    bg.warnings.some(w => w.includes('TAG_CONFIG_MISSING') && w.includes('设置页') && w.includes('打开弹窗即补推')), JSON.stringify(bg.warnings));
 }
 
 // ---------- S5/S6 设置页「按条件清理」：清空时间线才写 allowEmptySync ----------

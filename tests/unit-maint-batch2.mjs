@@ -54,7 +54,7 @@ const chromeStub = {
     async sendMessage(id, msg) {
       if (msg?.action !== 'scrape') return undefined;
       await new Promise(r => setTimeout(r, scrapeMessageDelayMs));
-      return { success: true, data: [{ status: 'new' }] };
+      return { success: true, newCount: 1, subscribed: true, listCount: 1 };
     },
     onUpdated: {
       addListener(fn) { listeners.tabUpdated.push(fn); },

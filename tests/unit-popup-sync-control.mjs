@@ -18,6 +18,10 @@ import './bootstrap.cjs';
 //   R 组：重启——进程号变了才算成功；失败时刷新状态栏；logPath 提示按 mode 区分
 //   S 组：停止——轮询到 /health 不再应答才算停止
 //   W 组：服务健康时发给后台的补喂消息带上 /health 的 contentHash / csvInSync（v1.6.22 冷启动指纹），旧版服务不带
+//   Y 组：复制失败如实提示（v1.7.0）——以前 execCommand 失败被吞掉，📁 / 局域网链接照样说「已复制」；
+//        弹窗与设置页的 copyTextToClipboard 逐字相同
+//   D 组：服务在跑却缺 config/tag.json（/health.tagConfigMissing，v1.7.0）：状态栏黄色「缺订阅配置」、⏹/🔄 照常可用、
+//        不发注定被 409 拒绝的补喂、每次打开只提示一次；文件补回后恢复「已开启」并重新补喂
 // 用法：node tests/unit-popup-sync-control.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -41,6 +45,7 @@ class FakeEl {
     this.disabled = false;
     this.dataset = {};
     this.focused = 0;
+    this.value = '';
     this.classList = {
       add: (...names) => names.forEach(n => this.classes.add(n)),
       remove: (...names) => names.forEach(n => this.classes.delete(n)),
@@ -55,6 +60,8 @@ class FakeEl {
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   contains(node) { for (let n = node; n; n = n.parentNode) if (n === this) return true; return false; }
   focus() { this.focused++; }
+  select() {}
+  remove() {}
   querySelectorAll() { return []; }
 }
 
@@ -106,8 +113,16 @@ function popupFixture() {
   doc.getElementById = id => byId[id] || (byId[id] = new FakeEl(id, 'div', doc));
   const misc = {};
   doc.querySelector = sel => misc[sel] || (misc[sel] = new FakeEl(sel, 'div', doc));
-  doc.createElement = tag => new FakeEl('', tag, null);
+  // 剪贴板三态（Y 组）：ok＝writeText 成功；fallback＝writeText 被拒、execCommand 兜底成功；fail＝两条路都失败
+  let clipboardMode = 'ok';
+  let lastCreated = null;
+  doc.createElement = tag => (lastCreated = new FakeEl('', tag, null));
   doc.body = { appendChild() {} };
+  doc.execCommand = () => {
+    if (clipboardMode !== 'fallback') return false;
+    clipboard.push(lastCreated?.value);
+    return true;
+  };
 
   // 可编排的同步服务：health() 返回 /health 的 body，null 表示连不上
   const server = {
@@ -145,14 +160,22 @@ function popupFixture() {
     console: { log() {}, warn() {}, error() {} },
     document: doc,
     window,
-    navigator: { platform: 'MacIntel', clipboard: { writeText: async text => { clipboard.push(text); } } },
+    navigator: {
+      platform: 'MacIntel',
+      clipboard: {
+        writeText: async text => {
+          if (clipboardMode !== 'ok') throw new Error('Document is not focused');
+          clipboard.push(text);
+        }
+      }
+    },
     chrome: {
       runtime: { sendMessage: message => { messages.push(structuredClone(message)); return Promise.resolve(undefined); }, getURL: p => `chrome-extension://unit-test/${p}` },
       storage: { local: { get: async () => ({}), set: async () => {} }, onChanged: { addListener() {} } },
       tabs: { create() {} }
     },
     QrCode: { drawToCanvas: (canvas, url) => { qrDraws.push(url); } },
-    SiteRegistry: { hostBySource: {} },
+    SiteRegistry: {},
     AbortController,
     fetch,
     setTimeout(fn, ms = 0) { const id = ++seq; timers.set(id, { due: now + ms, fn }); return id; },
@@ -163,7 +186,7 @@ function popupFixture() {
   const marker = "document.addEventListener('DOMContentLoaded', init);";
   if (!script.includes(marker)) throw new Error('popup.js 的 DOMContentLoaded 注册行已变，夹具需同步');
   script = script.replace(marker, 'globalThis.fixture = { elements, state, cacheElements, bindEvents, '
-    + 'checkSyncServiceStatus, runSyncControl, postSyncControl, onSyncRestartClick, onSyncStopClick, '
+    + 'checkSyncServiceStatus, runSyncControl, postSyncControl, onSyncRestartClick, onSyncStopClick, onLanShareClick, onSyncFolderClick, '
     + 'setToast: fn => { showToast = fn; } };');
   vm.runInContext(script, context);
   const fx = context.fixture;
@@ -211,7 +234,7 @@ function popupFixture() {
   const hidden = id => byId[id].classes.has('hidden');
   return {
     fx, byId, server, calls, posts, healthCalls, toasts, clipboard, window, qrDraws, messages,
-    idle, drive, statusText, hidden, now: () => now
+    idle, drive, statusText, hidden, now: () => now, setClipboard: mode => { clipboardMode = mode; }
   };
 }
 
@@ -498,6 +521,62 @@ function scheduleRestart(h, { body, oldMs = 1500, downMs = 1000, newPid = 200 })
   h.server.health = () => null;
   await h.drive(h.fx.checkSyncServiceStatus());
   check('W4 服务不在：不发补喂消息', !h.messages.some(m => m.action === 'warmupCsvSync'), JSON.stringify(h.messages));
+}
+
+// ============ Y 组：复制失败如实提示 ============
+{
+  const h = await onlineFixture();
+  const lanText = () => h.byId.lanShareText.textContent;
+  h.setClipboard('fail');
+  await h.drive(h.fx.onLanShareClick());
+  check('Y1 局域网链接复制失败：区块显示「复制失败」、错误提示里给出链接（不再说「已复制 ✓」）',
+    lanText() === '复制失败' && h.toasts.some(t => t.type === 'error' && t.message.includes('http://192.168.1.8:31919')),
+    JSON.stringify({ text: lanText(), toasts: h.toasts }));
+  await h.idle();
+  check('Y1b 1.2 秒后区块恢复显示地址', lanText() === '192.168.1.8:31919', lanText());
+
+  h.setClipboard('fallback');
+  h.toasts.length = 0;
+  await h.drive(h.fx.onLanShareClick());
+  check('Y2 writeText 被拒、execCommand 兜底成功：照常「已复制 ✓」，剪贴板拿到链接',
+    lanText() === '已复制 ✓' && h.clipboard.at(-1) === 'http://192.168.1.8:31919' && !h.toasts.some(t => t.type === 'error'),
+    JSON.stringify({ text: lanText(), clipboard: h.clipboard, toasts: h.toasts }));
+  await h.idle();
+
+  h.setClipboard('fail');
+  h.toasts.length = 0;
+  await h.drive(h.fx.onSyncFolderClick());
+  check('Y3 📁 复制路径失败：错误提示直接给出路径，不再说「路径已复制」',
+    h.toasts.length === 1 && h.toasts[0].type === 'error' && h.toasts[0].message.includes('/proj/ShortScraping/server')
+      && !h.toasts[0].message.includes('路径已复制'), JSON.stringify(h.toasts));
+
+  const grabCopy = rel => (fs.readFileSync(path.join(root, rel), 'utf8').match(/async function copyTextToClipboard\(text\) \{[\s\S]*?\n  \}/) || [])[0];
+  const popupCopy = grabCopy('src/popup/popup.js');
+  const settingsCopy = grabCopy('src/settings/settings.js');
+  check('Y4 弹窗与设置页的 copyTextToClipboard 逐字相同（两页各留一份，靠这条防漂移）',
+    Boolean(popupCopy) && popupCopy === settingsCopy && popupCopy.includes('if (!copied) throw'), '');
+}
+
+// ============ D 组：服务端缺 config/tag.json ============
+{
+  const h = popupFixture();
+  h.server.health = () => ({ ok: true, pid: 100, lanUrls: ['http://192.168.1.8:31919'], contentHash: 'abc', csvInSync: true, tagConfigMissing: true });
+  await h.drive(h.fx.checkSyncServiceStatus());
+  const container = h.byId.syncServiceStatus;
+  check('D1 缺订阅配置：状态栏文案「缺订阅配置」、黄色（is-on + is-warn），悬停说明怎么恢复',
+    h.statusText() === '同步服务：缺订阅配置' && container.classes.has('is-on') && container.classes.has('is-warn')
+      && /tag\.json/.test(container.title) && /网页订阅/.test(container.title), JSON.stringify({ text: h.statusText(), title: container.title }));
+  check('D2 服务仍在跑：⏹/🔄 照常可见，▶ 隐藏', !h.hidden('btnSyncStop') && !h.hidden('btnSyncRestart') && h.hidden('btnSyncStart'), '');
+  check('D3 不发注定被 409 拒绝的补喂消息', !h.messages.some(m => m.action === 'warmupCsvSync'), JSON.stringify(h.messages));
+  const hints = () => h.toasts.filter(t => /tag\.json/.test(t.message));
+  check('D4 提示一次去设置页「网页订阅」保存（error 样式）', hints().length === 1 && hints()[0].type === 'error' && /网页订阅/.test(hints()[0].message),
+    JSON.stringify(h.toasts));
+  await h.drive(h.fx.checkSyncServiceStatus());
+  check('D5 同一次打开里重新检测不重复提示', hints().length === 1, JSON.stringify(h.toasts));
+  h.server.health = () => ({ ok: true, pid: 100, lanUrls: [], contentHash: 'abc', csvInSync: true, tagConfigMissing: false });
+  await h.drive(h.fx.checkSyncServiceStatus());
+  check('D6 文件补回后：恢复「已开启」、去掉 is-warn、重新发补喂', h.statusText() === '同步服务：已开启'
+    && !container.classes.has('is-warn') && h.messages.some(m => m.action === 'warmupCsvSync'), JSON.stringify({ text: h.statusText(), messages: h.messages }));
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

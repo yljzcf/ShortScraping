@@ -17,4 +17,15 @@ if launchctl print "$AGENT" >/dev/null 2>&1; then
   launchctl kickstart "$AGENT" && echo "[ShortScraping] 已拉起后台同步服务（开机自启）"
   exit 0
 fi
-exec node server/sync-server.js
+# 从访达双击时 PATH 可能不含 Homebrew：按常见安装位置兜底（同 restart-sync.command / setup-autostart.command）。
+# 放在开机自启分支之后：那条路只用 launchctl、不依赖 node
+NODE="$(command -v node || true)"
+for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
+  [ -n "$NODE" ] && break
+  [ -x "$candidate" ] && NODE="$candidate"
+done
+if [ -z "$NODE" ]; then
+  echo "[ShortScraping] 未找到 Node.js（需要 22 或更新版本）：可用 brew install node 安装后重试"
+  exit 1
+fi
+exec "$NODE" server/sync-server.js

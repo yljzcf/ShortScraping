@@ -17,15 +17,26 @@
     scrapeInterval: 6,
     translateInterval: 1,
     scrapeCron: '45 * * * *',
-    translateCron: '50 * * * *'
+    translateCron: '50 * * * *',
+    // IMDb 搜索页订阅的滚动日期窗口（v1.7.0）：抓取时只看近 N 天发行的片——订阅 URL 不再写死起始日期，
+    // 后台打开页面前在地址末尾补 release_date（SubscriptionConfig.withReleaseWindow）。0＝不限日期
+    imdbWindowDays: 180
   };
+  const MAX_IMDB_WINDOW_DAYS = 3650;
 
   function toPositiveNumber(value, fallback) {
     const num = Number(value);
     return Number.isFinite(num) && num > 0 ? num : fallback;
   }
 
-  /** 5 字段白名单归一：mode 只认 cron/interval，interval 必须为正数，cron 串仅 trim。 */
+  /** IMDb 日期窗口：0～3650 的整数（0＝不限）；缺省或不合法回落 fallback。 */
+  function toWindowDays(value, fallback) {
+    if (value === null || value === undefined || value === '') return fallback;
+    const num = Number(value);
+    return Number.isInteger(num) && num >= 0 && num <= MAX_IMDB_WINDOW_DAYS ? num : fallback;
+  }
+
+  /** 6 字段白名单归一：mode 只认 cron/interval，interval 必须为正数，cron 串仅 trim，IMDb 窗口为 0～3650 的整数。 */
   function normalizeConfig(rawConfig) {
     const config = { ...DEFAULT_CONFIG, ...(rawConfig || {}) };
     return {
@@ -33,7 +44,8 @@
       scrapeInterval: toPositiveNumber(config.scrapeInterval, DEFAULT_CONFIG.scrapeInterval),
       translateInterval: toPositiveNumber(config.translateInterval, DEFAULT_CONFIG.translateInterval),
       scrapeCron: String(config.scrapeCron || DEFAULT_CONFIG.scrapeCron).trim(),
-      translateCron: String(config.translateCron || DEFAULT_CONFIG.translateCron).trim()
+      translateCron: String(config.translateCron || DEFAULT_CONFIG.translateCron).trim(),
+      imdbWindowDays: toWindowDays(config.imdbWindowDays, DEFAULT_CONFIG.imdbWindowDays)
     };
   }
 
@@ -199,11 +211,17 @@
       if (!(Number(config.scrapeInterval) > 0)) errors.scrapeInterval = '抓取间隔必须大于 0';
       if (!(Number(config.translateInterval) > 0)) errors.translateInterval = '翻译间隔必须大于 0';
     }
+    // 窗口天数写错（小数、负数、超上限、非数字）明确拒绝，不静默回落 180——那会让用户以为改成功了
+    const rawDays = rawConfig && rawConfig.imdbWindowDays;
+    if (rawDays !== undefined && rawDays !== null && rawDays !== '' && Number.isNaN(toWindowDays(rawDays, NaN))) {
+      errors.imdbWindowDays = `IMDb 日期窗口须为 0-${MAX_IMDB_WINDOW_DAYS} 的整数天数（0 表示不限日期）`;
+    }
 
     return { ok: Object.keys(errors).length === 0, errors, config };
   }
 
-  const api = { DEFAULT_CONFIG, normalizeConfig, parseSimpleCron, matchesCron, getNextCronRun, validateConfig };
+  // matchesCron 只在 getNextCronRun 内部用，导出无人消费（v1.7.0 删）；parseSimpleCron 留作测试直查解析错误
+  const api = { DEFAULT_CONFIG, normalizeConfig, parseSimpleCron, getNextCronRun, validateConfig };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;

@@ -12,11 +12,15 @@
  * 扩展内部形态 { urlPattern, tags }（storage.urlTags）；文件形态 { url, tags }
  * （config/tag.json）由 toTagFileEntries 投影。两者都只输出这两个键，多余字段不透传。
  *
- * v1.6.7 追加退订侧的两个纯函数（removedSubscriptionUrls / countDramasUnderUrls）：
+ * v1.6.7 追加退订侧的两个纯函数（removedSubscriptionUrls / dramasUnderUrls）：
  * 设置页要在写 storage **之前**算出「这次退订会删掉几条历史」并弹确认，判定口径
  * 必须与后台 filterDramasByConfiguredUrls 逐字一致，故同样委托 url-match.js。
+ * v1.7.0 把「要抓的订阅 URL 清单」（configuredScrapeUrls）也收进来：后台与弹窗此前各写一份，
+ * 去重口径还不一样（后台按尾斜杠归一，弹窗按原串）。
+ * v1.7.0 加「抓取时实际打开的地址」（withReleaseWindow）：IMDb 订阅 URL 不再写死起始日期，
+ * 滚动日期窗口在打开页面前补到地址末尾，后台抓取与弹窗「去抓取」共用。
  *
- * 加载方式：后台 importScripts / 设置页 <script>（挂 globalThis.SubscriptionConfig）/
+ * 加载方式：后台 importScripts / 设置页与弹窗 <script>（挂 globalThis.SubscriptionConfig）/
  * 同步服务 require（module.exports）。**须在 url-match.js 之后加载**。
  */
 (function (global) {
@@ -66,6 +70,56 @@
   }
 
   /**
+   * 要抓的订阅 URL 清单（后台抓取 / 订阅外清理 / 导入范围判定与弹窗共用）：取 urlPattern（缺省退回 url），
+   * 只认完整的 http(s) URL，按尾斜杠归一去重、保留先出现的原串。新写入的 urlTags 已不会并存两种写法，
+   * 这里兜住旧版本写进 storage 的 '…/x' 与 '…/x/'——按原串去重时同一页每轮要开两个标签页抓两遍
+   * （审查 urltags-dedupe-raw）。
+   * urlTags 为 null / undefined 得 []；是真值却不是数组则抛错：宁可这一轮清理失败，也不能把坏数据当成
+   * 「零订阅」，让订阅外清理把整库挪进回收站（与收拢前后台 `(urlTags || []).map` 自然抛错同口径）。
+   */
+  function configuredScrapeUrls(urlTags) {
+    if (!urlTags) return [];
+    if (!Array.isArray(urlTags)) throw new TypeError('订阅配置 urlTags 不是数组');
+    const seen = new Set();
+    const out = [];
+    for (const item of urlTags) {
+      const url = item && typeof item === 'object' ? (item.urlPattern || item.url) : undefined;
+      if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) continue;
+      const key = UrlMatch.normalizeListUrl(url);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(url);
+    }
+    return out;
+  }
+
+  /**
+   * 抓取时实际打开的地址（v1.7.0）：IMDb 搜索页的订阅不再把发行日期写死在 URL 里——以前的
+   * `release_date=2026-01-01,` 起点固定，池子一年年越来越宽，只读前 50 条时新片被老片挤出去。现在订阅 URL
+   * 不带日期（它是历史归属的身份，改了就等于退订），打开页面前才在末尾补滚动窗口 `&release_date=<今天−N 天>,`。
+   * 内容脚本照样认得出这页：url-match.js 的前缀轮容忍订阅 URL 尾部多出来的 `&…`，归属仍写订阅 URL 本身。
+   * 只处理 imdb.com 的 /search/title 页、订阅自己没写 release_date、也没带 #片段的；windowDays 不是正整数
+   * （含 0＝不限日期）原样返回。日期按本机时区的日历日倒推，跨月跨年与夏令时都由 Date 构造器处理。
+   */
+  function withReleaseWindow(url, windowDays, now = new Date()) {
+    const days = Number(windowDays);
+    if (typeof url !== 'string' || !Number.isInteger(days) || days <= 0 || url.includes('#')) return url;
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (e) {
+      return url;
+    }
+    const isImdbSearch = (parsed.hostname === 'imdb.com' || parsed.hostname.endsWith('.imdb.com'))
+      && parsed.pathname.startsWith('/search/title');
+    if (!isImdbSearch || parsed.searchParams.has('release_date')) return url;
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - days);
+    const pad = n => String(n).padStart(2, '0');
+    const date = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`;
+    return `${url}${url.includes('?') ? '&' : '?'}release_date=${date},`;
+  }
+
+  /**
    * 保存订阅时「这次取消掉了哪些订阅 URL」。返回**旧配置里的原始写法**（未归一），
    * 供确认框原样展示；比对本身走 UrlMatch 的尾斜杠归一，故仅尾斜杠差异不算退订。
    * 只改标签不改 URL 也不算退订——那是编辑，历史不该被牵连。
@@ -99,13 +153,9 @@
       .filter(drama => drama && UrlMatch.isUrlCovered(drama.sourceListUrl, set));
   }
 
-  function countDramasUnderUrls(dramas, urls) {
-    return dramasUnderUrls(dramas, urls).length;
-  }
-
   const api = {
-    MAX_TAGS, normalizeUrlTags, toTagFileEntries,
-    removedSubscriptionUrls, dramasUnderUrls, countDramasUnderUrls
+    normalizeUrlTags, toTagFileEntries, configuredScrapeUrls, withReleaseWindow,
+    removedSubscriptionUrls, dramasUnderUrls
   };
 
   if (typeof module !== 'undefined' && module.exports) {

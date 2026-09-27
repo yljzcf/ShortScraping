@@ -49,7 +49,24 @@ try {
   assert.equal((await post('/sync', { dramas: [] }, { 'Content-Type': 'text/plain' })).status, 415);
   assert.equal((await post('/sync', {})).status, 400);
   assert.equal((await post('/sync', { dramas: [null] })).status, 400);
-  assert.equal((await post('/config/tag', {})).status, 500);
+  // Malformed JSON is the caller's mistake (400), not a server fault (500 + a full stack trace, before v1.7.0);
+  // nothing is written.
+  const postRawText = async (route, text) => {
+    const response = await fetch(base + route, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text, signal: AbortSignal.timeout(3000)
+    });
+    return { status: response.status, body: await response.json() };
+  };
+  for (const route of ['/sync', '/config/tag', '/config/trans', '/config/lark', '/config/cron']) {
+    const malformed = await postRawText(route, '{"dramas": [');
+    assert.equal(malformed.status, 400, `${route} ${JSON.stringify(malformed.body)}`);
+    assert.match(malformed.body.error, /不是合法 JSON/);
+  }
+  assert.equal(fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8'), csv);
+  assert.equal(fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8'), snapshot);
+  // Missing / invalid subscription lists are request errors (400) like the other config routes (500 before v1.7.0)
+  assert.equal((await post('/config/tag', {})).status, 400);
+  assert.equal((await post('/config/tag', { urlTags: [{ url: 'not-a-url', tags: ['x'] }] })).status, 400);
   // An empty push may only replace a non-empty shared snapshot when the extension declares allowEmpty
   // (a user-confirmed clear); otherwise a fresh profile's warm-up push of [] would wipe db/timeline.*.
   const emptyPush = await post('/sync', { dramas: [] });
@@ -146,11 +163,18 @@ try {
   assert.equal(bomSync.status, 200, JSON.stringify(bomSync.body));
   assert.equal(bomSync.body.count, 2);
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8')).dramas.length, 2);
-  // A missing file means "no subscriptions saved yet", not an error that blocks every push.
+  // A missing file while the snapshot has data is not "zero subscriptions": the push is rejected (409
+  // TAG_CONFIG_MISSING, v1.7.0) and nothing is written. Filtering it to [] used to wipe the timeline.
+  // (The bootstrap case — no file and an empty snapshot — is covered in unit-server-tag-missing.)
   fs.unlinkSync(tagFile);
+  const beforeCsv = fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8');
+  const beforeJson = fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8');
   const missing = await post('/sync', { dramas: [card('tt1')] });
-  assert.equal(missing.status, 200);
-  assert.equal(missing.body.count, 0);
+  assert.equal(missing.status, 409, JSON.stringify(missing.body));
+  assert.equal(missing.body.code, 'TAG_CONFIG_MISSING');
+  assert.equal(fs.readFileSync(path.join(directory, 'db/timeline.csv'), 'utf8'), beforeCsv);
+  assert.equal(fs.readFileSync(path.join(directory, 'db/timeline.json'), 'utf8'), beforeJson);
+  // An explicitly saved empty subscription list is a real "unsubscribe everything" and still clears.
   assert.equal((await post('/config/tag', { urlTags: [] })).status, 200);
   assert.deepEqual(JSON.parse(fs.readFileSync(tagFile, 'utf8')), []);
   assert.equal((await post('/sync', { dramas: [card('tt1')] })).body.count, 0);

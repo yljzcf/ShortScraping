@@ -22,9 +22,8 @@
     assetsBase: '../../assets/icons'
   };
 
-  function dramaSource(drama) {
-    return CATEGORY_SOURCES.includes(drama.source) ? drama.source : 'imdb';
-  }
+  // 卡片归哪个站点：单一真源在 SiteRegistry.siteOfDrama（与同步服务同口径，v1.7.0 收拢）
+  const dramaSource = drama => global.SiteRegistry.siteOfDrama(drama);
 
   // 标题文案单一真源在 translate-config.js（弹窗/共享页卡片、多维表格 payload、
   // 群机器人卡片三处共用，见那边 titleDisplay 的注释）。须先加载该模块

@@ -371,6 +371,7 @@ check('S7e 非 local 区域的变更忽略', externalUrlTagsCalls.length === 1, 
 {
   // eslint-disable-next-line no-unused-vars
   const SYNC_BASE_URL = constValue('SYNC_BASE_URL');
+  const SYNC_CONFIG_TIMEOUT_MS = Number(src.match(/const SYNC_CONFIG_TIMEOUT_MS = (\d+);/)?.[1]);
   const realTrySyncConfig = eval(`(${grab('async function trySyncConfig')})`);
   const requests = [];
   const respond = (status, body) => async (url, init) => {
@@ -410,6 +411,30 @@ check('S7e 非 local 区域的变更忽略', externalUrlTagsCalls.length === 1, 
   check('S9i 四个保存入口都走 trySyncConfig，旧的 trySync*Config 已删除',
     ['/config/tag', '/config/trans', '/config/lark', '/config/cron'].every(route => src.includes(`trySyncConfig('${route}'`))
     && !/trySync(Tag|Trans|Lark|Cron)Config/.test(src), '');
+
+  // v1.7.0：写回有期限且连正文一起算（以前没有期限，服务接了连接却不应答时「保存」一直转，
+  // 退订前的文件写回预检同样卡死）。期限缩到 30ms 重新求值同一份函数源码
+  check('S9j0 写回期限常量为正数（秒级）', SYNC_CONFIG_TIMEOUT_MS >= 1000 && SYNC_CONFIG_TIMEOUT_MS <= 30000, String(SYNC_CONFIG_TIMEOUT_MS));
+  {
+    // eslint-disable-next-line no-unused-vars, no-shadow
+    const SYNC_CONFIG_TIMEOUT_MS = 30;
+    const quickTrySyncConfig = eval(`(${grab('async function trySyncConfig')})`);
+    const runQuick = async (fetchImpl) => {
+      const saved = globalThis.fetch;
+      globalThis.fetch = fetchImpl;
+      try { return await quickTrySyncConfig('/config/tag', { urlTags: [] }); } finally { globalThis.fetch = saved; }
+    };
+    const stalledBody = await runQuick(async () => ({ ok: true, status: 200, text: () => new Promise(() => {}) }));
+    check('S9j 响应头来了、正文迟迟不发完：到期返回 { ok:false }（不再无限挂起）',
+      stalledBody.ok === false && /秒内无响应/.test(stalledBody.error), JSON.stringify(stalledBody));
+    const noHeaders = await runQuick(() => new Promise(() => {}));
+    check('S9k 连响应头都不来：同样到期返回 { ok:false }',
+      noHeaders.ok === false && /秒内无响应/.test(noHeaders.error), JSON.stringify(noHeaders));
+  }
+  check('S9l trySyncConfig 与 checkSyncServiceStatus 都走 FetchUtil.fetchWithDeadline（不再手写 AbortController）',
+    /FetchUtil\.fetchWithDeadline\(/.test(grab('async function trySyncConfig'))
+    && /FetchUtil\.fetchWithDeadline\(/.test(grab('async function checkSyncServiceStatus'))
+    && !/new AbortController/.test(grab('async function checkSyncServiceStatus')), '');
 }
 
 // ---------- S10-S12：vm 跑真实 settings.js（只把 DOMContentLoaded 注册行换成导出内部函数） ----------
@@ -427,8 +452,11 @@ async function settingsVm({ fetchImpl } = {}) {
     chrome: { runtime: { getURL: p => `chrome-extension://unit-test/${p}` } },
     fetch: fetchImpl || (async () => { throw new TypeError('Failed to fetch'); }),
     setTimeout(fn, ms = 0) { const id = ++seq; timers.set(id, { due: now + ms, fn }); return id; },
-    clearTimeout(id) { timers.delete(id); }
+    clearTimeout(id) { timers.delete(id); },
+    AbortController, TextDecoder, Blob
   });
+  // 与 settings.html 同序：fetch-util 先于 settings.js，且在本 vm 里求值（用 vm 的 fetch 与虚拟时钟）
+  vm.runInContext(fs.readFileSync(path.join(root, 'src/shared/fetch-util.js'), 'utf8'), context);
   const marker = "document.addEventListener('DOMContentLoaded', init);";
   if (!src.includes(marker)) throw new Error('settings.js 的 DOMContentLoaded 注册行已变，夹具需同步');
   vm.runInContext(src.replace(marker, 'globalThis.fixture = { elements, showStatus, switchTab, fetchJsonFile };'), context);
@@ -531,6 +559,11 @@ async function settingsVm({ fetchImpl } = {}) {
   const calls = [...src.matchAll(/fetchJsonFile\(([^)]*)\)/g)].map(m => m[1]).filter(args => !/^fileName/.test(args));
   check('S12c 调用点都显式传了 fallback', calls.length >= 9 && calls.every(args => args.split(',').length === 2), JSON.stringify(calls));
 }
+
+// ---------- S13 摘要卡用 textContent 组装（v1.7.0）：设置页唯一的 innerHTML 拼接点删掉后，不再需要私有的 escapeHtml ----------
+check('S13 createSummaryCard 用 textContent、设置页不再留 escapeHtml',
+  /textContent/.test(grab('function createSummaryCard')) && !/innerHTML/.test(grab('function createSummaryCard'))
+    && !/function escapeHtml\(/.test(src) && !/escapeHtml\(/.test(src), '');
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

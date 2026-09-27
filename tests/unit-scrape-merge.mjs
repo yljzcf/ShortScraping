@@ -23,6 +23,9 @@ const tag = url => ({ urlPattern: url, tags: ['T'] });
 async function setup(urls) {
   const bg = await background();
   bg.data.urlTags = urls.map(tag);
+  // 本套件拿 IMDb 搜索页地址当占位、按打开的地址认页面：关掉 v1.7.0 的 IMDb 日期窗口（0＝不限），
+  // 免得打开的地址末尾多出 release_date、对不上闸门
+  bg.data.scheduleConfig = { ...bg.data.scheduleConfig, imdbWindowDays: 0 };
   bg.context.setTimeout = (fn, ms, ...args) => (ms === 1500 ? realSetTimeout(fn, 0, ...args) : {});
   const tabs = new Map();
   const opened = [];                 // 按开页顺序记 URL
@@ -33,7 +36,7 @@ async function setup(urls) {
     async remove(id) { tabs.delete(id); },
     async sendMessage(tabId) {
       const url = tabs.get(tabId);
-      return new Promise(resolve => gates.set(url, () => { gates.delete(url); resolve({ success: true, data: [] }); }));
+      return new Promise(resolve => gates.set(url, () => { gates.delete(url); resolve({ success: true, newCount: 0, subscribed: true, listCount: 3 }); }));
     },
     onUpdated: {
       addListener(fn) { setImmediate(() => { for (const id of tabs.keys()) fn(id, { status: 'complete' }); }); },
@@ -116,7 +119,9 @@ async function setup(urls) {
   const realGet = bg.context.chrome.storage.local.get;
   let unblock = null;
   bg.context.chrome.storage.local.get = async (keys) => {
-    if (keys === 'urlTags' && !unblock) await new Promise(r => { unblock = r; });
+    // 开轮读订阅（v1.7.0 起与 scheduleConfig 同一次读：['urlTags', 'scheduleConfig']）
+    const readsUrlTags = keys === 'urlTags' || (Array.isArray(keys) && keys.includes('urlTags'));
+    if (readsUrlTags && !unblock) await new Promise(r => { unblock = r; });
     return realGet(keys);
   };
   bg.context.full = bg.run('performScrape()');

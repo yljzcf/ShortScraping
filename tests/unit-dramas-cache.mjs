@@ -122,6 +122,18 @@ const send = (msg) => bg.send(msg, POPUP_SENDER);
   check('T5d 推送体超旧版 20MB 上限又连不上：点明多半是超限被断开', big.includes('超限被断开') && big.includes('21.0MB'), big);
 }
 
+// ---------- T6 棘轮：dramas 整表只经 readDramasFromStorage 直读 storage（v1.7.0 两处迁移改走队列后） ----------
+// 其余读表一律经缓存 / 写队列（getDramasSnapshot、readDramasThroughQueue、getDramasInQueue）：绕过缓存的直读
+// 在冷唤醒时会与翻译扫描、CSV 同步各自再反序列化一遍整表
+{
+  const { readFileSync } = await import('node:fs');
+  const bgSrc = readFileSync(new URL('../src/background/background.js', import.meta.url), 'utf8');
+  const direct = bgSrc.match(/storage\.local\.get\(\s*(\[[^\]]*'dramas'[^\]]*\]|'dramas')/g) || [];
+  check('T6 background.js 只剩一处直读 dramas（readDramasFromStorage）', direct.length === 1
+    && /async function readDramasFromStorage\(\) \{\n  const \{ dramas = \[\], dramasMeta, dramasStamp \} = await chrome\.storage\.local\.get\(\['dramas'/.test(bgSrc),
+    JSON.stringify(direct));
+}
+
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

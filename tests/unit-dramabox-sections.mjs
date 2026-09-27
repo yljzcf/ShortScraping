@@ -297,8 +297,8 @@ for (const [name, nextData] of [
       { page: '/channel/[position]' }))
   });
   check('D1 同一 bookId 跨两站只留一张卡（先到先得，标签不被后抓的订阅改写）',
-    saved.length === 1 && eq(saved[0].tags, ['DramaBox', 'Trending']) && eq(response?.data, []),
-    show({ n: saved.length, tags: saved[0]?.tags, data: response?.data?.length }));
+    saved.length === 1 && eq(saved[0].tags, ['DramaBox', 'Trending']) && response?.newCount === 0,
+    show({ n: saved.length, tags: saved[0]?.tags, newCount: response?.newCount }));
   check('D1b 已有 genres 的去重命中 → 零 saveDrama（回填闸门）',
     saveCalls.length === 0, show(saveCalls.length));
 }

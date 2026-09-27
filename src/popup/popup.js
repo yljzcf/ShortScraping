@@ -17,6 +17,8 @@
     lastScrape: null,
     // 后台写的「最近一轮全部失败」{ at, failed, total, error }；有 URL 成功时后台同一次写清成 null
     lastScrapeFailure: null,
+    // 后台写的「抓到 0 条」告警 { at, items: [{ url, kind }] }（v1.7.0）：抓取成功却一条都没拿到的订阅
+    lastScrapeWarnings: null,
     activeSource: null,
     // 分组代表 logo 的固定项（设置页写入）：{ [group]: site|null }
     groupPins: {},
@@ -79,6 +81,9 @@
       if (changes.lastScrapeFailure) {
         state.lastScrapeFailure = changes.lastScrapeFailure.newValue ?? null;
       }
+      if (changes.lastScrapeWarnings) {
+        state.lastScrapeWarnings = changes.lastScrapeWarnings.newValue ?? null;
+      }
 
       if (changes.urlTags) {
         state.urlTags = changes.urlTags.newValue || [];
@@ -98,7 +103,7 @@
       if (changes.dramas || changes.urlTags) {
         // 抓取洪峰期 storage 每保存一张卡变更一次，整树重渲染合并为 ≤1 次/秒
         scheduleRender();
-      } else if (changes.lastScrape || changes.lastScrapeFailure || changes.dramasMeta) {
+      } else if (changes.lastScrape || changes.lastScrapeFailure || changes.lastScrapeWarnings || changes.dramasMeta) {
         // 只有抓取时间（收轮时单独写）或布局标记变了：刷底栏即可，不重建时间线
         updateStats();
       }
@@ -226,7 +231,7 @@
       }
     });
 
-    elements.buttons.goScrape.addEventListener('click', () => {
+    elements.buttons.goScrape.addEventListener('click', async () => {
       // 按域名归类挑当前站点的订阅页，与图标栏 getSubscribedSites 同一标准（siteOfUrl）。
       // 此前按 host 子串挑：DramaBox 只订了 dramaboxdb.com 时 'dramabox.com' 子串不中，
       // 回退到 urls[0] 打开了别的站。找不到就去设置页，不再随手开一条别站的订阅
@@ -234,7 +239,14 @@
         ? getConfiguredScrapeUrls().find(u => siteOfUrl(u) === state.activeSource)
         : null;
       if (target) {
-        chrome.tabs.create({ url: target });
+        // IMDb 订阅 URL 不带日期（v1.7.0），打开时同样补上滚动窗口：看到的就是后台实际抓的那一页
+        let scheduleConfig;
+        try {
+          ({ scheduleConfig } = await chrome.storage.local.get('scheduleConfig'));
+        } catch (e) {
+          // 读不到就按默认天数
+        }
+        chrome.tabs.create({ url: SubscriptionConfig.withReleaseWindow(target, ScheduleConfig.normalizeConfig(scheduleConfig).imdbWindowDays) });
         return;
       }
 
@@ -266,11 +278,21 @@
 
     const result = await fetchSyncHealth(1500);
     const ok = Boolean(result?.ok);
-    updateSyncServiceStatus(ok ? 'on' : 'off');
+    // 服务在跑、却找不到 config/tag.json（v1.7.0）：推送会被 409 TAG_CONFIG_MISSING 拒绝（服务端不再按零订阅
+    // 清空时间线），状态栏改黄色提示，也不再发注定被拒的补喂
+    const tagConfigMissing = ok && result.tagConfigMissing === true;
+    updateSyncServiceStatus(!ok ? 'off' : (tagConfigMissing ? 'degraded' : 'on'));
     updateLanShare(ok ? (Array.isArray(result.lanUrls) ? result.lanUrls : []) : null);
     if (ok) {
       try {
         cacheSyncServerDir(result);
+        if (tagConfigMissing) {
+          if (!tagConfigMissingToasted) {
+            tagConfigMissingToasted = true;
+            showToast('同步服务找不到 config/tag.json，时间线暂停写入：到设置页「网页订阅」点一次保存即可恢复', { type: 'error', duration: 6000 });
+          }
+          return;
+        }
         // 服务健康即请后台补喂共享快照：服务比扩展后启动时，
         // SW 启动时的预热推送已丢失，靠弹窗打开补喂（服务端同内容不广播）；
         // 后台先比对冷启动指纹，服务上已是本地这一版就不推（见 warmupCsvSyncMessage）
@@ -296,20 +318,12 @@
   }
 
   /**
-   * 缓存同步服务脚本目录：优先服务端新字段 serverDir，旧版服务从 csvPath
-   * （<项目>/db/timeline.csv）推导。落库后即使服务已关闭，📁 也能给出路径
-   * （扩展无法感知自己的磁盘路径，只能从服务端学来）。
+   * 缓存同步服务脚本目录（/health 本机块的 serverDir）。落库后即使服务已关闭，📁 也能给出路径
+   * （扩展无法感知自己的磁盘路径，只能从服务端学来）。v1.4.0 以前的服务没有 serverDir、要从 csvPath 推导，
+   * 那段兼容 v1.7.0 删了：跑过任何新一点的服务的用户早已缓存了路径，真遇到也只是回落「尚未获取到路径」提示。
    */
   function cacheSyncServerDir(health) {
-    let dir = (typeof health?.serverDir === 'string' && health.serverDir) ? health.serverDir : null;
-
-    if (!dir && typeof health?.csvPath === 'string' && health.csvPath) {
-      const sep = health.csvPath.includes('\\') ? '\\' : '/';
-      const parts = health.csvPath.split(/[\\/]/);
-      if (parts.length >= 3) {
-        dir = parts.slice(0, -2).concat('server').join(sep);
-      }
-    }
+    const dir = (typeof health?.serverDir === 'string' && health.serverDir) ? health.serverDir : null;
 
     if (dir && dir !== state.syncServerDir) {
       state.syncServerDir = dir;
@@ -355,7 +369,13 @@
       return;
     }
 
-    await copyTextToClipboard(dir);
+    try {
+      await copyTextToClipboard(dir);
+    } catch (e) {
+      // 复制失败就把路径直接给出来，别再说「路径已复制」
+      showToast(`复制路径失败（${e.message}）：${dir}`, { type: 'error', duration: 6000 });
+      return;
+    }
     showToast(
       isWindowsPlatform()
         ? '路径已复制：未自动打开时 Win+E 粘贴，或运行 setup-launcher.bat 注册一键打开'
@@ -532,8 +552,9 @@
   }
 
   /**
-   * 复制文本到剪贴板。无用户激活/文档失焦时 writeText 可能既不成功也不
-   * 拒绝地挂起，600ms 超时即退回隐藏输入框方案。
+   * 复制文本到剪贴板。无用户激活/文档失焦时 writeText 可能既不成功也不拒绝地挂起，600ms 超时即退回隐藏输入框方案。
+   * 两条路都失败时抛错（v1.7.0）：execCommand 失败不抛、只回 false，以前这里吞掉它，调用方照样提示「已复制」。
+   * 与 settings.js 的同名函数逐字相同（两页没有共同载体的共享模块，unit-popup-sync-control Y4 守着不漂移）。
    */
   async function copyTextToClipboard(text) {
     try {
@@ -545,9 +566,14 @@
       const input = document.createElement('textarea');
       input.value = text;
       document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      input.remove();
+      let copied = false;
+      try {
+        input.select();
+        copied = document.execCommand('copy');
+      } finally {
+        input.remove();
+      }
+      if (!copied) throw new Error(`浏览器拒绝写入剪贴板（${e.message}）`);
     }
   }
 
@@ -561,10 +587,16 @@
     }
 
     const url = state.lanUrls[0];
-    await copyTextToClipboard(url);
+    let copied = true;
+    try {
+      await copyTextToClipboard(url);
+    } catch (e) {
+      copied = false;
+      showToast(`复制链接失败（${e.message}）：${url}`, { type: 'error', duration: 6000 });
+    }
 
     const restore = url.replace(/^https?:\/\//, '');
-    elements.lanShare.text.textContent = '已复制 ✓';
+    elements.lanShare.text.textContent = copied ? '已复制 ✓' : '复制失败';
     setTimeout(() => {
       elements.lanShare.text.textContent = restore;
     }, 1200);
@@ -592,17 +624,26 @@
   function updateSyncServiceStatus(status) {
     const container = elements.syncService.container;
     const text = elements.syncService.text;
+    const running = status === 'on' || status === 'degraded';
 
-    container.classList.remove('is-on', 'is-off');
-    // ▶ 启动只在确认服务未开启时出现；⏹ 停止 / 🔄 重启只在确认已开启时出现
+    container.classList.remove('is-on', 'is-off', 'is-warn');
+    // ▶ 启动只在确认服务未开启时出现；⏹ 停止 / 🔄 重启只在确认已开启（含缺订阅配置）时出现
     elements.syncService.startBtn.classList.toggle('hidden', status !== 'off');
-    elements.syncService.stopBtn.classList.toggle('hidden', status !== 'on');
-    elements.syncService.restartBtn.classList.toggle('hidden', status !== 'on');
+    elements.syncService.stopBtn.classList.toggle('hidden', !running);
+    elements.syncService.restartBtn.classList.toggle('hidden', !running);
 
     if (status === 'on') {
       container.classList.add('is-on');
       container.title = '本地 CSV 同步服务已开启，点击可重新检测';
       text.textContent = '同步服务：已开启';
+      return;
+    }
+
+    if (status === 'degraded') {
+      container.classList.add('is-on', 'is-warn');
+      container.title = '同步服务在运行，但找不到 config/tag.json：推送被拒绝（已有的 CSV 与共享页不会被清空）。'
+        + '到设置页「网页订阅」点一次保存即可重新生成该文件，再打开弹窗就会补推；点击可重新检测';
+      text.textContent = '同步服务：缺订阅配置';
       return;
     }
 
@@ -725,13 +766,14 @@
     showLoading(true);
 
     try {
-      const result = await chrome.storage.local.get(['dramas', 'dramasMeta', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'syncServerDir', 'siteTabPrefs']);
+      const result = await chrome.storage.local.get(['dramas', 'dramasMeta', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'lastScrapeWarnings', 'syncServerDir', 'siteTabPrefs']);
 
       state.dramasLayoutAhead = isDramasLayoutAhead(result.dramasMeta);
       state.urlTags = result.urlTags || [];
       state.dramas = filterDramasByConfiguredUrls(result.dramas || []);
       state.lastScrape = result.lastScrape;
       state.lastScrapeFailure = result.lastScrapeFailure || null;
+      state.lastScrapeWarnings = result.lastScrapeWarnings || null;
       state.syncServerDir = result.syncServerDir || state.syncServerDir;
 
       // 上次看的站点与分组固定项；首帧之后 activeSource 只由用户操作改写
@@ -751,6 +793,8 @@
    * 状态栏下方的临时提示条。重复调用清旧计时器换新文案（last-write-wins）。
    */
   let toastTimer = null;
+  // 「缺订阅配置」提示每次打开弹窗只弹一次（状态栏重新检测不再重复弹）
+  let tagConfigMissingToasted = false;
 
   function showToast(message, { type = 'info', duration = 3000 } = {}) {
     const bar = elements.toastBar;
@@ -760,7 +804,7 @@
     }
 
     bar.textContent = message;
-    bar.classList.remove('hidden', 'is-info', 'is-success', 'is-error');
+    bar.classList.remove('hidden', 'is-info', 'is-success', 'is-error', 'is-warning');
     bar.classList.add(`is-${type}`);
 
     toastTimer = setTimeout(() => {
@@ -775,6 +819,8 @@
   function toastScrapeSummary(summary) {
     const results = summary?.results || [];
     const failedCount = results.filter(r => !r.success).length;
+    // 抓取成功却一条都没拿到的订阅（页面跳转 / 站点改版，v1.7.0）：以前也报「无新增内容」
+    const warnedCount = results.filter(r => r.success && r.warning).length;
     const newCount = summary?.totalNewCount || 0;
 
     if (results.length > 0 && failedCount === results.length) {
@@ -784,7 +830,14 @@
     }
 
     if (failedCount > 0) {
-      showToast(`本次刷新新增 ${newCount} 条，${failedCount} 个来源失败`, { type: newCount > 0 ? 'success' : 'error' });
+      const warned = warnedCount > 0 ? `，${warnedCount} 个订阅抓到 0 条` : '';
+      showToast(`本次刷新新增 ${newCount} 条，${failedCount} 个来源失败${warned}`, { type: newCount > 0 ? 'success' : 'error' });
+      return;
+    }
+
+    if (warnedCount > 0) {
+      const warned = `${warnedCount} 个订阅抓到 0 条（可能站点改版或页面未加载完整）`;
+      showToast(newCount > 0 ? `本次刷新新增 ${newCount} 条；${warned}` : warned, { type: 'warning', duration: 5000 });
       return;
     }
 
@@ -1282,12 +1335,9 @@
     restoreScroll();
   }
 
+  // 订阅 URL 清单单一真源在 src/shared/subscription-config.js（与后台同一份，按尾斜杠归一去重；v1.7.0 收拢）
   function getConfiguredScrapeUrls() {
-    const urls = (state.urlTags || [])
-      .map(item => item.urlPattern || item.url)
-      .filter(pattern => /^https?:\/\//i.test(pattern));
-
-    return Array.from(new Set(urls));
+    return SubscriptionConfig.configuredScrapeUrls(state.urlTags);
   }
 
   function filterDramasByConfiguredUrls(dramas) {
@@ -1309,14 +1359,17 @@
     // 整轮全失败时后台不更新 lastScrape（断网/站点改版时定时抓取停摆），「抓取于」停在上次成功；
     // 失败记录比它新就在后面点明，原因放悬停提示
     const failure = latestRoundFailure();
+    // 抓取成功却一条都没拿到的订阅（v1.7.0）：整轮全失败的提示优先，那时不另报
+    const warnings = failure ? [] : currentScrapeWarnings();
     elements.stats.lastUpdate.textContent = (state.lastScrape
       ? `抓取于 ${TimelineRender.formatRelativeTime(state.lastScrape)}`
-      : '未抓取') + (failure ? ' · 最近一轮全部失败' : '');
+      : '未抓取') + (failure ? ' · 最近一轮全部失败' : (warnings.length ? ` · ${warnings.length} 个订阅抓到 0 条` : ''));
     const counts = failure && Number.isFinite(failure.total) ? ` ${failure.failed}/${failure.total} 个来源` : '';
     elements.stats.lastUpdate.title = failure
       ? `${TimelineRender.formatRelativeTime(failure.at)}那一轮${counts}全部失败：${failure.error || '未知错误'}`
-      : '';
+      : (warnings.length ? scrapeWarningsTitle(warnings) : '');
     elements.stats.lastUpdate.classList.toggle('is-failed', Boolean(failure));
+    elements.stats.lastUpdate.classList.toggle('is-warning', warnings.length > 0);
     // 数据已是更新版本的布局：后台只读停摆（不入库、不推送、不翻译），翻译计数也已冻结不再变化，
     // 状态栏改成升级提示，免得用户以为扩展还在正常工作
     const ahead = state.dramasLayoutAhead;
@@ -1329,6 +1382,28 @@
       ? '本地数据已被更新版本的扩展升级为新的存储格式，当前版本只读：不再抓取入库、同步与翻译。请安装最新版扩展'
       : '';
     elements.stats.status.classList.toggle('is-warning', ahead);
+  }
+
+  const SCRAPE_WARNING_REASONS = {
+    unsubscribed: '打开后的页面不在订阅里（可能跳转了）',
+    empty: '页面上没找到列表项（可能站点改版或页面未加载完整）'
+  };
+
+  /** 后台记下的「抓到 0 条」告警里仍在订阅中的那些（退订了的不再提示）；归属与卡片同一口径（按 sourceListUrl）。 */
+  function currentScrapeWarnings() {
+    const items = (Array.isArray(state.lastScrapeWarnings?.items) ? state.lastScrapeWarnings.items : [])
+      .filter(item => item && item.url)
+      .map(item => ({ ...item, sourceListUrl: item.url }));
+    return SubscriptionConfig.dramasUnderUrls(items, getConfiguredScrapeUrls());
+  }
+
+  function scrapeWarningsTitle(warnings) {
+    const lines = warnings.map(item => {
+      const site = siteOfUrl(item.url);
+      const name = (site && SiteRegistry.SOURCE_NAMES[site]) || '';
+      return `· ${name ? `${name} ` : ''}${item.url}：${SCRAPE_WARNING_REASONS[item.kind] || '一条都没拿到'}`;
+    });
+    return `最近一次抓取这些订阅一条都没拿到：\n${lines.join('\n')}`;
   }
 
   /** 比最近一次成功抓取更新的「整轮全失败」记录；没有或已被成功轮盖过时为 null。 */

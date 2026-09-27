@@ -44,15 +44,24 @@
 
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       if (request.action === 'scrape') {
+        // 只回条数与判定（v1.7.0）：以前回整批新卡对象，后台只用它的长度，却要跨进程结构化克隆一遍；
+        // 也丢了「当前页不在订阅里 / 页面上没找到列表」这两个信号，后台只能当成「没有新增」（审查 M2）
         runScrape().then(result => {
-          sendResponse({ success: true, data: result.dramas });
+          sendResponse({ success: true, newCount: result.dramas.length, subscribed: result.subscribed, listCount: result.listCount });
         }).catch(e => {
           console.error('[ShortScraping] 抓取出错:', e);
           sendResponse({ success: false, error: e.message });
         });
         return true;
       }
-      // 非 scrape 消息不保留异步响应通道，避免发送方端口悬挂
+      if (request.action === 'collectListIds') {
+        collectListIds().then(sendResponse).catch(e => {
+          console.error('[ShortScraping] 读列表条目 ID 出错:', e);
+          sendResponse({ success: false, error: e.message });
+        });
+        return true;
+      }
+      // 其余消息不保留异步响应通道，避免发送方端口悬挂
       return false;
     });
 
@@ -61,6 +70,28 @@
     if (adapter && adapter.matches(window.location.href)) {
       addScrapeButton();
     }
+  }
+
+  /**
+   * 只读当前列表页的条目 ID（v1.7.0，IMDb 订阅切换为滚动日期窗口时的一次性基线用）：不向后台要抓取上下文、
+   * 不开详情页、不入库，后台把库里没有的记进已知片单。页面不是该站适配器认得的列表页时回空（listCount 0），
+   * 后台据此不记任何 ID。单项解析失败只跳过这一项。
+   */
+  async function collectListIds() {
+    const site = detectSite(window.location.hostname);
+    const adapter = site ? ADAPTERS[site] : null;
+    if (!adapter || !adapter.matches(window.location.href)) return { success: true, ids: [], listCount: 0 };
+    const listItems = await adapter.getListItems();
+    const ids = [];
+    for (const item of listItems) {
+      try {
+        const id = adapter.extractId(item);
+        if (id && !ids.includes(id)) ids.push(id);
+      } catch (e) {
+        console.warn('[ShortScraping] 列表项 ID 解析失败，跳过:', e.message);
+      }
+    }
+    return { success: true, ids, listCount: listItems.length };
   }
 
   /**
@@ -117,6 +148,8 @@
    * 调用方原有写法（ok/status/url + text()/json()）一行不用改。
    * 超时即 abort 底层请求并抛出带地址的中文错误，由各调用方的 catch 按「本轮取不到」收口。
    * 期限用 Promise.race 兜底：底层即使不理会 abort 信号，也保证按时返回。
+   * 后台 SW / 设置页用的是同语义的 src/shared/fetch-util.js（FetchUtil.fetchWithDeadline，v1.7.0）；
+   * 这里刻意留一份：迁过去要改 manifest content_scripts 与后台强制注入清单、连带一串守卫测试，只省二十几行。
    */
   const FETCH_TIMEOUT_MS = 25000;
 
@@ -962,11 +995,14 @@
       btn.disabled = true;
 
       try {
-        const { subscribed, dramas } = await runScrape();
+        const { subscribed, dramas, listCount } = await runScrape();
         // dramas 就是本轮实际入库的新卡；再按 status 过滤会把平台自带
         // 中文（Steam/MyDrama 直接 trans）的新卡漏计，与后台通知/弹窗 toast 口径不一致。
-        // 当前页不在订阅里时明说，不再显示一个误导的「新增 0 部」
-        btn.textContent = subscribed ? `✅ 新增 ${dramas.length} 部` : '⚠️ 当前页不在订阅中';
+        // 当前页不在订阅里、或页面上一条列表都没找到（站点改版 / 没加载完整）时明说，
+        // 不再显示一个误导的「新增 0 部」
+        if (!subscribed) btn.textContent = '⚠️ 当前页不在订阅中';
+        else if (listCount === 0) btn.textContent = '⚠️ 页面上没找到列表';
+        else btn.textContent = `✅ 新增 ${dramas.length} 部`;
       } catch (e) {
         console.error('[ShortScraping] 抓取失败:', e);
         btn.textContent = '❌ 抓取失败';
@@ -1038,9 +1074,10 @@
   }
 
   /**
-   * 抓取当前页面 - 站点无关骨架，逐条保存。返回 { subscribed, dramas }：dramas 是本轮
-   * 实际入库的新卡（'scrape' 消息只回它）；subscribed 为 false 表示当前页不在订阅里，
-   * 按钮据此提示，而不是显示「新增 0 部」。
+   * 抓取当前页面 - 站点无关骨架，逐条保存。返回 { subscribed, dramas, listCount }：dramas 是本轮
+   * 实际入库的新卡（'scrape' 消息只回它的条数）；subscribed 为 false 表示当前页不在订阅里；
+   * listCount 是页面上找到的列表项数（不在订阅里时为 null）——为 0 多半是站点改版或页面没加载完整，
+   * 后台据此记「抓到 0 条」告警、按钮据此提示，而不是一律显示「新增 0 部」（审查 M2，v1.7.0）。
    */
   async function scrapePage() {
     console.log('[ShortScraping] 开始抓取页面...');
@@ -1051,15 +1088,16 @@
     const subscription = findSubscriptionForUrl(currentUrl, urlTags);
     if (!subscription) {
       console.log('[ShortScraping] 当前页面不在用户订阅配置中，跳过保存');
-      return { subscribed: false, dramas: [] };
+      return { subscribed: false, dramas: [], listCount: null };
     }
     const tags = subscription.tags;
 
     const site = detectSite(window.location.hostname);
     const adapter = site ? ADAPTERS[site] : null;
     if (!adapter || !adapter.matches(currentUrl)) {
+      // 订阅了这页、适配器却认不出它是列表页（订阅 URL 手写错路径）：按「页面上没找到列表」报给后台
       console.log('[ShortScraping] 当前站点无对应适配器，跳过');
-      return { subscribed: true, dramas: [] };
+      return { subscribed: true, dramas: [], listCount: 0 };
     }
     console.log(`[ShortScraping] 站点=${site}，标签: ${tags.join(', ')}`);
 
@@ -1146,7 +1184,7 @@
     }
 
     console.log(`[ShortScraping] 抓取完成，新增 ${allNewDramas.length} 部`);
-    return { subscribed: true, dramas: allNewDramas };
+    return { subscribed: true, dramas: allNewDramas, listCount: listItems.length };
   }
 
   /**

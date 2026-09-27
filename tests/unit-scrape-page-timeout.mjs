@@ -24,6 +24,9 @@ const OK_URL = 'https://www.imdb.com/search/title/?genres=ok';
 
 async function setup({ completes = true } = {}) {
   const bg = await background();
+  // 本套件拿 IMDb 搜索页地址当占位、按打开的地址认挂死页：关掉 v1.7.0 的 IMDb 日期窗口（0＝不限），
+  // 免得打开的地址末尾多出 release_date、认不出 HANG_URL
+  bg.data.scheduleConfig = { ...bg.data.scheduleConfig, imdbWindowDays: 0 };
   const pageTimeoutMs = bg.run('SCRAPE_PAGE_TIMEOUT_MS');
   const translateDelayMs = bg.run('POST_SCRAPE_TRANSLATE_DELAY_MS');
   const scaled = new Map([[pageTimeoutMs, 60], [1500, 1], [30000, 5], [3000, 1]]);
@@ -55,7 +58,7 @@ async function setup({ completes = true } = {}) {
       const url = tabs.get(tabId);
       if (!url) throw new Error(`No tab with id: ${tabId}.`);
       if (url === HANG_URL) return new Promise((_, reject) => pending.set(tabId, reject));
-      return { success: true, data: [] };
+      return { success: true, newCount: 0, subscribed: true, listCount: 3 };
     },
     onUpdated: {
       addListener(fn) {
@@ -209,8 +212,9 @@ async function setup({ completes = true } = {}) {
   bg.log.length = 0;
   await Promise.race([bg.run('performScrapeOnce()'), sleep(3000)]);
   check('T8c 有成功的轮次照常刷新 lastScrape', typeof bg.data.lastScrape === 'string' && bg.data.lastScrape !== OLD, String(bg.data.lastScrape));
+  // v1.7.0 起同一次 set 还带上「抓到 0 条」告警 lastScrapeWarnings（本轮没有告警时为 null）
   check('T8d 同一次 set 把 lastScrapeFailure 清成 null', bg.data.lastScrapeFailure === null
-    && bg.log.includes('set:lastScrape,lastScrapeFailure'), `${JSON.stringify(bg.data.lastScrapeFailure)} log=${JSON.stringify(bg.log)}`);
+    && bg.log.includes('set:lastScrape,lastScrapeFailure,lastScrapeWarnings'), `${JSON.stringify(bg.data.lastScrapeFailure)} log=${JSON.stringify(bg.log)}`);
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

@@ -171,7 +171,8 @@ async function makeBg({ dramas = [done('tt0001')], data = {}, translator = null 
   const summary = h.logs.find(l => l.includes('站点抓取（imdb） dramas 整表写入'));
   check('Q7a 抓取轮收尾打一行 dramas 写入汇总（次数 / 平均 / 最长）',
     Boolean(summary) && /写入 4 次，平均 [\d.]+ms，最长 [\d.]+ms/.test(summary), String(summary));
-  check('Q7b 埋点只打日志、不写 storage', !Object.keys(h.bg.data).some(k => /stat|timing/i.test(k)), Object.keys(h.bg.data).join(','));
+  // 只认统计 / 计时类键名（…Stats、…Timing）：larkBotState 这类正常的状态键不算（v1.7.0 起首轮 IMDb 会写机器人基线）
+  check('Q7b 埋点只打日志、不写 storage', !Object.keys(h.bg.data).some(k => /stats?$|timing/i.test(k)), Object.keys(h.bg.data).join(','));
 }
 
 // ---------- Q4c 空闲时保持 500ms 尾随防抖 ----------

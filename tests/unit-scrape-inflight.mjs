@@ -7,6 +7,7 @@ import './bootstrap.cjs';
 // T5：页面上的抓取按钮也走同一个 in-flight 护栏（审查 button-bypasses-inflight-guard）——
 // 按钮以前直接调 scrapePage，抓取进行中点一下同样两轮并跑。
 // 抓取上下文经 getScrapeContext 消息向后台要（content.js 不再读 storage），「跑了几轮」按它计数。
+// T10：只读列表条目 ID 的 collectListIds（v1.7.0 IMDb 切换基线用）不取抓取上下文、不入库。
 // 用法：node tests/unit-scrape-inflight.mjs
 //   修复前（每条消息各起一个 scrapePage）：T1/T2 应 FAIL（RED）；按钮直调 scrapePage 时 T5 应 FAIL
 //   修复后（重复消息与按钮都复用进行中的 Promise）：全部 PASS（GREEN）
@@ -123,14 +124,14 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
   const p2 = sendScrape();
   const [r1, r2] = await Promise.all([p1, p2]);
 
-  const ids = resp => (resp?.data || []).map(d => d.itemId).sort();
+  // 应答 v1.7.0 起只回条数与判定（newCount / subscribed / listCount），不再回整批卡片对象
+  const storedIds = () => rawStore.dramas.map(d => d.itemId).sort();
   check('T1a 两条消息都成功响应', r1?.success === true && r2?.success === true,
     JSON.stringify({ r1: r1?.success, r2: r2?.success }));
-  check('T1b 两条消息都拿到完整结果', ids(r1).length === 4 && ids(r2).length === 4,
-    `r1=${ids(r1).length} r2=${ids(r2).length}（应各 4）`);
-  check('T1c 两份结果一致且覆盖全部条目',
-    JSON.stringify(ids(r1)) === JSON.stringify(ALL_IDS) && JSON.stringify(ids(r2)) === JSON.stringify(ALL_IDS),
-    `r1=[${ids(r1).join(',')}] r2=[${ids(r2).join(',')}]`);
+  check('T1b 两条消息都拿到完整结果', r1?.newCount === 4 && r2?.newCount === 4,
+    `r1=${r1?.newCount} r2=${r2?.newCount}（应各 4）`);
+  check('T1c 入库的正好是全部条目',
+    JSON.stringify(storedIds()) === JSON.stringify(ALL_IDS), `stored=[${storedIds().join(',')}]`);
   check('T1d 入库恰好 4 条（后台去重兜底不变）', rawStore.dramas.length === 4, `len=${rawStore.dramas.length}`);
   check('T2a 抓取只执行一轮（只取一次抓取上下文）', contextCalls === 1, `contextCalls=${contextCalls}（应 1）`);
   check('T2b 每条目只保存一次', saveDramaCalls === 4, `saveDramaCalls=${saveDramaCalls}（应 4）`);
@@ -142,8 +143,8 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
   const r3 = await sendScrape();
   check('T3a 完成后再触发开启新一轮抓取', contextCalls === before + 1,
     `contextCalls=${contextCalls}（应 ${before + 1}）`);
-  check('T3b 新一轮成功且 0 新增（全部已存在）', r3?.success === true && (r3?.data || []).length === 0,
-    JSON.stringify({ success: r3?.success, len: (r3?.data || []).length }));
+  check('T3b 新一轮成功且 0 新增（全部已存在）', r3?.success === true && r3?.newCount === 0 && r3?.listCount === 4,
+    JSON.stringify(r3));
 }
 
 // ---------- T4 抓取出错后护栏须复位：失败不粘死后续抓取 ----------
@@ -180,8 +181,8 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
     check('T5b 按钮复用进行中的那一轮：抓取上下文只取一次', contextCalls === contextBefore + 1,
       `contextCalls 增加 ${contextCalls - contextBefore}（应 1）`);
     check('T5c 两边拿到同一份结果：消息回 4 条、按钮显示新增 4 部',
-      (r?.data || []).length === 4 && scrapeButton.textContent === '✅ 新增 4 部',
-      JSON.stringify({ data: (r?.data || []).length, button: scrapeButton.textContent }));
+      r?.newCount === 4 && scrapeButton.textContent === '✅ 新增 4 部',
+      JSON.stringify({ newCount: r?.newCount, button: scrapeButton.textContent }));
     check('T5d 每条目只保存一次', saveDramaCalls - saveBefore === 4, `saveDramaCalls 增加 ${saveDramaCalls - saveBefore}（应 4）`);
   }
 }
@@ -198,6 +199,52 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
     check('T6 当前页不在订阅中 → 按钮提示「⚠️ 当前页不在订阅中」', false, '按钮未挂载');
   }
   globalThis.window.location.href = LIST_URL;
+}
+
+// ---------- T8 应答形态（v1.7.0 审查 M2）：只回条数与两个判定，不再跨进程克隆整批卡片 ----------
+{
+  rawStore.dramas = [];
+  const r = await sendScrape();
+  check('T8 应答只有 { success, newCount, subscribed, listCount }，不再带 data',
+    JSON.stringify(Object.keys(r || {}).sort()) === JSON.stringify(['listCount', 'newCount', 'subscribed', 'success'])
+      && r.subscribed === true && r.listCount === 4 && r.newCount === 4, JSON.stringify(r));
+}
+
+// ---------- T9 页面上一条列表都没找到（站点改版 / 没加载完整）：listCount=0，按钮明说 ----------
+{
+  const saved = NEXT_DATA.props.pageProps.movies;
+  NEXT_DATA.props.pageProps.movies = [];
+  const r = await sendScrape();
+  check('T9a 列表为空 → 应答 subscribed=true、listCount=0（后台据此记「抓到 0 条」告警）',
+    r?.success === true && r.subscribed === true && r.listCount === 0 && r.newCount === 0, JSON.stringify(r));
+  const click = scrapeButton?.handlers?.click?.[0];
+  if (typeof click === 'function') {
+    await click();
+    check('T9b 列表为空 → 按钮提示「⚠️ 页面上没找到列表」（不再显示「新增 0 部」）',
+      scrapeButton.textContent === '⚠️ 页面上没找到列表', JSON.stringify(scrapeButton.textContent));
+  } else {
+    check('T9b 列表为空 → 按钮提示「⚠️ 页面上没找到列表」（不再显示「新增 0 部」）', false, '按钮未挂载');
+  }
+  NEXT_DATA.props.pageProps.movies = saved;
+}
+
+// ---------- T10 只读列表条目 ID（v1.7.0 IMDb 切换基线用）：不要抓取上下文、不入库 ----------
+{
+  const collect = () => new Promise(resolve => {
+    for (const fn of listeners) fn({ action: 'collectListIds' }, { tab: { id: 1 } }, resolve);
+  });
+  const contextBefore = contextCalls;
+  const saveBefore = saveDramaCalls;
+  const r = await collect();
+  check('T10a collectListIds 回本页全部条目 ID 与列表条数，不取抓取上下文、不发 saveDrama',
+    r?.success === true && JSON.stringify([...(r.ids || [])].sort()) === JSON.stringify(ALL_IDS) && r.listCount === 4
+      && contextCalls === contextBefore && saveDramaCalls === saveBefore, JSON.stringify(r));
+  const href = window.location.href;
+  window.location.href = 'https://dramashorts.io/about';
+  const off = await collect();
+  window.location.href = href;
+  check('T10b 当前页不是该站认得的列表页：回空（listCount 0），后台据此不记任何 ID',
+    off?.success === true && Array.isArray(off.ids) && off.ids.length === 0 && off.listCount === 0, JSON.stringify(off));
 }
 
 // ---------- T7 源码守卫：content.js 不再碰 chrome.storage（抓取上下文只经消息向后台要） ----------

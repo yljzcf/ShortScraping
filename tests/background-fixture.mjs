@@ -122,7 +122,7 @@ export async function background({
   else throw new TypeError(`timers 只能是 'noop' | 'manual' | 'real'，收到 ${timers}`);
   const context = vm.createContext({
     console: { log() {}, warn() {}, error() {} }, Date: Clock, URL, AbortController, AbortSignal,
-    structuredClone, TextEncoder, crypto: webcrypto, ...timerGlobals,
+    structuredClone, TextEncoder, TextDecoder, Blob, performance, crypto: webcrypto, ...timerGlobals,
     chrome: {
       storage: {
         local: store.local,

@@ -58,6 +58,8 @@ const SHARED_DIR = path.join(PROJECT_DIR, 'src', 'shared');
 const ICONS_DIR = path.join(PROJECT_DIR, 'assets', 'icons');
 const CSV_PATH = path.join(DB_DIR, 'timeline.csv');
 const TIMELINE_JSON_PATH = path.join(DB_DIR, 'timeline.json');
+// 已知片单（v1.7.0）：只记 ID、不入库的条目（扩展 storage.knownItems 的备份，扩展重装后据此恢复）
+const KNOWN_ITEMS_PATH = path.join(DB_DIR, 'known-items.json');
 const TAG_CONFIG_PATH = path.join(CONFIG_DIR, 'tag.json');
 const TRANS_CONFIG_PATH = path.join(CONFIG_DIR, 'trans.json');
 const LARK_CONFIG_PATH = path.join(CONFIG_DIR, 'lark.json');
@@ -180,7 +182,7 @@ function parseJsonText(text) {
 // timeline.csv 与 timeline.json 两份本地副本同时消失（原子写 rename 不留旧文件）。
 // 两档留痕，都只挂在**真正要覆盖**的那一支（同内容推送本就不重写，见 /sync），
 // 所以 SW 每次唤醒的预热推送不会刷屏：
-//   每日档 timeline-YYYYMMDD.{csv,json}   当天第一次改写前的状态，保留最近 14 天；
+//   每日档 timeline-YYYYMMDD.{csv,json}   当天第一次改写前的状态，保留最近 14 份（每个有改写的日子至多一份）；
 //   drop 档 timeline-YYYYMMDD-HHMMSS-mmm-drop.{csv,json}
 //                                        条数清空或跌超 20%、或任一站点（原有 ≥10 条）跌超 20% 时
 //                                        额外留一份，保留最近 10 份。
@@ -193,16 +195,10 @@ const HISTORY_DROP_RATIO = 0.8;
 // 不留任何 drop 档。站点原有不足 10 条时不算：小站换榜、下架几条就是 20%，会把 10 份 drop 档挤成噪声
 const HISTORY_SITE_DROP_MIN = 10;
 
-// 站点归属与共享页标签同口径（TimelineRender.dramaSource：注册表外的 source 归 imdb）。
-// timeline-render.js 在 Node 里加载不了（加载即读全局 TranslateConfig），这里直接用注册表
-function siteOfDrama(drama) {
-  return SiteRegistry.CATEGORY_SOURCES.includes(drama.source) ? drama.source : 'imdb';
-}
-
 function countBySite(dramas) {
   const counts = new Map();
   for (const drama of dramas) {
-    const site = siteOfDrama(drama);
+    const site = SiteRegistry.siteOfDrama(drama); // 与共享页站点标签同口径（注册表外的 source 归 imdb）
     counts.set(site, (counts.get(site) || 0) + 1);
   }
   return counts;
@@ -300,11 +296,15 @@ function normalizeTagConfig(rawTags) {
   return SubscriptionConfig.toTagFileEntries(rawTags);
 }
 
-/** 写入前的强校验：设置页只会发合法条目，坏数据一律拒绝落盘（绝不静默收窄）。 */
+/**
+ * 写入前的强校验：设置页只会发合法条目，坏数据一律拒绝落盘（绝不静默收窄）。拒绝回 400（带 statusCode，
+ * 与另外三个配置写回接口缺键时同口径；v1.7.0 前是 500 并打整段堆栈，像服务自己出了错）。
+ */
 function assertTagConfig(rawTags) {
-  if (!Array.isArray(rawTags)) throw new Error('网页订阅必须是数组');
+  const reject = message => Object.assign(new Error(message), { statusCode: 400 });
+  if (!Array.isArray(rawTags)) throw reject('网页订阅必须是数组');
   const tags = normalizeTagConfig(rawTags);
-  if (tags.length !== rawTags.length) throw new Error('网页订阅包含无效或重复条目');
+  if (tags.length !== rawTags.length) throw reject('网页订阅包含无效或重复条目');
   return tags;
 }
 
@@ -337,13 +337,13 @@ function writeLarkConfig(rawConfig) {
   return config;
 }
 
-// 拒绝坏配置范式（同 /config/tag）：cron 表达式校验不过直接抛（→500），
+// 拒绝坏配置范式（同 /config/tag）：cron 表达式校验不过直接抛（→400，v1.7.0 前是 500），
 // 文件不动——非法调度落盘会让扩展 SW 每次唤醒都读到坏配置
 function writeCronConfig(rawConfig) {
   const { ok, errors, config } = ScheduleConfig.validateConfig(rawConfig);
   if (!ok) {
     const detail = Object.entries(errors).map(([key, msg]) => `${key}: ${msg}`).join('；');
-    throw new Error(`Cron 配置无效——${detail}`);
+    throw Object.assign(new Error(`Cron 配置无效——${detail}`), { statusCode: 400 });
   }
 
   writeJsonAtomic(CRON_CONFIG_PATH, config);
@@ -354,8 +354,9 @@ let missingTagConfigWarned = false;
 
 /**
  * 读取订阅配置，三态而非二态（2026-09-11 复查）：
- *   1) 文件不存在＝尚未在设置页保存过订阅的引导态 → 按零订阅处理、只提示一次，
- *      不能变成每次推送都 500 的错误态（新 clone 必然没有这个 gitignored 文件）；
+ *   1) 文件不存在 → 返回 null，由调用方区分两种情形（见 filterDramasByTagConfig）：现有快照为空＝尚未在
+ *      设置页保存过订阅的引导态，按零订阅处理（新 clone 必然没有这个 gitignored 文件，不能每次推送都报错）；
+ *      现有快照非空＝文件被删 / 改名 / 项目挪了位置，拒绝推送（409 TAG_CONFIG_MISSING，v1.7.0）；
  *   2) 读不动 / JSON 损坏 / 根不是数组 / 整份条目全部失效 → 抛错，由调用方拒绝
  *      本次同步并保住已有 CSV 与共享快照——这是「坏配置不清空数据」的底线；
  *   3) 个别条目无效或重复 → 告警后丢弃该条，与扩展端 normalizeUrlTags 口径一致，
@@ -367,11 +368,7 @@ function readTagConfig() {
     text = fs.readFileSync(TAG_CONFIG_PATH, 'utf8');
   } catch (error) {
     if (error.code !== 'ENOENT') throw new Error(`读取 tag.json 失败，保留现有数据：${error.message}`);
-    if (!missingTagConfigWarned) {
-      missingTagConfigWarned = true;
-      console.warn(`[ShortScraping Sync] 未找到 ${TAG_CONFIG_PATH}，按零订阅处理；在设置页保存一次网页订阅即可生成`);
-    }
-    return [];
+    return null;
   }
   missingTagConfigWarned = false;
 
@@ -393,10 +390,34 @@ function readTagConfig() {
   return tags;
 }
 
+/**
+ * tag.json 不见了、现有快照却非空：拒绝按「零订阅」把整张时间线滤成空再覆盖（v1.7.0 审查 M1）。
+ * 以前缺文件一律当零订阅，下一次非空推送被滤成 []，照写 db/timeline.json / .csv 与共享页，只剩一份 drop 档；
+ * 扩展那头读不到文件时保留上一次的订阅照常推，用户毫无察觉。发生在备份与落盘之前，什么都不写；
+ * 扩展 409 分支不重推同内容，弹窗按 /health 的 tagConfigMissing 提示去设置页保存一次订阅（重建本文件）。
+ */
+function tagConfigMissingError(existingCount) {
+  const error = new Error(`未找到 config/tag.json，已拒绝按零订阅覆盖现有 ${existingCount} 条时间线（未写入任何文件）；` +
+    '请在扩展设置页「网页订阅」点一次保存以重新生成该文件');
+  error.statusCode = 409;
+  error.apiCode = 'TAG_CONFIG_MISSING';
+  return error;
+}
+
 // 与扩展端同规则：尾斜杠归一后的精确等值、零订阅返回 []。归属判定单一真源是
 // SubscriptionConfig.dramasUnderUrls（内部委托 src/shared/url-match.js），这里不再另写一份
 function filterDramasByTagConfig(dramas) {
-  return SubscriptionConfig.dramasUnderUrls(dramas, readTagConfig().map(item => item.url));
+  const tags = readTagConfig();
+  if (tags === null) {
+    // 推送本身为空（扩展声明 allowEmpty 的清空）照常放行：滤不滤结果都是空
+    if (dramas.length > 0 && latestDramas.length > 0) throw tagConfigMissingError(latestDramas.length);
+    if (!missingTagConfigWarned) {
+      missingTagConfigWarned = true;
+      console.warn(`[ShortScraping Sync] 未找到 ${TAG_CONFIG_PATH}，按零订阅处理；在设置页保存一次网页订阅即可生成`);
+    }
+    return [];
+  }
+  return SubscriptionConfig.dramasUnderUrls(dramas, tags.map(item => item.url));
 }
 
 // —— 局域网共享：快照持久化、SSE 广播与地址枚举 ——
@@ -502,22 +523,49 @@ function isAllowedHost(hostHeader) {
 }
 
 const EXTENSION_ORIGIN_PATTERN = /^chrome-extension:\/\/[a-p]{32}$/;
+// 会改盘或进程状态的写路由：只有「来源合格 + JSON 请求体 + 这些路由」的请求才可能触发首见即固定（v1.7.0）。
+// 以前固定发生在 Content-Type 与路由判定之前，未固定期间任何扩展发个 415 / 404 的 POST 也能抢走固定位
+const WRITE_ROUTES = new Set(['/sync', '/config/tag', '/config/trans', '/config/lark', '/config/cron', '/known-items', '/shutdown', '/restart']);
 let pinnedWriteOrigin = null;
 
-function loadPinnedWriteOrigin() {
+/** 盘上的固定来源：{ state: 'missing' }（文件不在）/ { state: 'ok', origin } / { state: 'unreadable' }（读不动、坏 JSON、来源不合法）。 */
+function readPinnedWriteOriginFile() {
+  let text;
   try {
-    const raw = parseJsonText(fs.readFileSync(SYNC_ORIGIN_PATH, 'utf8'));
-    if (EXTENSION_ORIGIN_PATTERN.test(raw && raw.origin)) pinnedWriteOrigin = raw.origin;
+    text = fs.readFileSync(SYNC_ORIGIN_PATH, 'utf8');
   } catch (error) {
-    // 尚未固定：等第一次扩展写入时建立
+    return { state: error.code === 'ENOENT' ? 'missing' : 'unreadable' };
   }
+  try {
+    const raw = parseJsonText(text);
+    if (EXTENSION_ORIGIN_PATTERN.test(raw && raw.origin)) return { state: 'ok', origin: raw.origin };
+  } catch (error) {
+    // 坏 JSON：同下，按读不动处理
+  }
+  return { state: 'unreadable' };
+}
+
+function loadPinnedWriteOrigin() {
+  const file = readPinnedWriteOriginFile();
+  // 尚未固定（或文件坏了）时内存留空：前者等第一次合格写入建立，后者由 writeOriginVerdict 重读后拒绝（fail closed）
+  if (file.state === 'ok') pinnedWriteOrigin = file.origin;
 }
 
 /**
- * 写接口来源判定。chrome-extension:// 正则只能证明「是某个扩展」——同一 profile 下
- * 任何持 localhost 主机权限的扩展都能冒名清空数据，因此只认「首次写入时固定下来的
- * 那一个」（首见即固定 / TOFU，存 config/sync-origin.json，已 gitignore）；换目录重载
- * 扩展导致 ID 变化时，删掉该文件即可重新固定。Node 管理工具不带 Origin，照常放行。
+ * 写接口来源判定（无副作用的读判定）：'allow' 放行；'pin' 放行，并在请求过完 Content-Type 与路由闸门后
+ * 固定为写入来源（pinWriteOrigin）；'deny' 拒绝。
+ *
+ * chrome-extension:// 正则只能证明「是某个扩展」——同一 profile 下任何持 localhost 主机权限的扩展都能
+ * 冒名清空数据，因此只认「首次写入时固定下来的那一个」（首见即固定 / TOFU，存 config/sync-origin.json，
+ * 已 gitignore）；换目录重载扩展导致 ID 变化时，删掉该文件即可重新固定。Node 管理工具不带 Origin，照常放行。
+ *
+ * 内存里的固定值与请求来源不符（或尚未固定）时**重读**该文件（v1.7.0 审查 M3）：以前只在启动时读一次，
+ * 照 README 删了文件照样 403——服务（开机自启下常驻）还攥着内存里的旧值，弹窗 🔄 重启请求自己也被 403，
+ * 只剩 npm run restart 这条不带 Origin 的路。现在：
+ *   - 文件已删 → 回到未固定，这个请求过完其余闸门即重新固定（与首次启动同一个 TOFU 窗口）；
+ *   - 文件里正是请求来源（用户手改）→ 采用并放行；是别的来源 → 采用该值并拒绝；
+ *   - 读不动 / 坏 JSON / 来源不合法 → 拒绝（fail closed：一个坏文件不能把写接口敞开），403 提示删文件重来。
+ * 只在来源不符时读一次小文件，正常写入零磁盘读。
  *
  * 为什么不按项目路径推算扩展 ID 做强校验：manifest 没有 key 字段，未打包扩展的 ID 确实
  * 由加载目录的绝对路径派生（SHA-256 取前 16 字节映射到 a-p），PROJECT_DIR 在手，理论上
@@ -528,28 +576,47 @@ function loadPinnedWriteOrigin() {
  * 或按 README 删掉该文件后）抢先写入的，只能是已装进同一 profile、持 127.0.0.1 或全站
  * 主机权限的扩展，它本就能读全部网页数据，增量风险很低，因此维持首见即固定（2026-09 复核）。
  */
-function checkWriteOrigin(req) {
+function writeOriginVerdict(req) {
   const origin = req.headers.origin;
   if (origin === undefined) {
     // 浏览器发起的请求一定带 Origin 或 Sec-Fetch-*；两者皆无才视为本机 Node 工具
-    return req.headers['sec-fetch-site'] === undefined;
+    return req.headers['sec-fetch-site'] === undefined ? 'allow' : 'deny';
   }
-  if (!EXTENSION_ORIGIN_PATTERN.test(origin)) return false;
-  if (!pinnedWriteOrigin) {
-    pinnedWriteOrigin = origin;
-    try {
-      writeJsonAtomic(SYNC_ORIGIN_PATH, { origin, pinnedAt: new Date().toISOString() });
-    } catch (error) {
-      console.warn('[ShortScraping Sync] 写入来源固定失败（本次运行内仍生效）:', error.message);
-    }
-    console.log(`[ShortScraping Sync] 已固定写入来源扩展：${origin}；换目录重载扩展后如被拒，删除 ${SYNC_ORIGIN_PATH} 重新固定`);
-    return true;
+  if (!EXTENSION_ORIGIN_PATTERN.test(origin)) return 'deny';
+  if (origin === pinnedWriteOrigin) return 'allow';
+  const file = readPinnedWriteOriginFile();
+  if (file.state === 'missing') {
+    pinnedWriteOrigin = null;
+    return 'pin';
   }
-  if (origin !== pinnedWriteOrigin) {
+  if (file.state === 'ok') {
+    pinnedWriteOrigin = file.origin;
+    if (file.origin === origin) return 'allow';
     console.warn(`[ShortScraping Sync] 拒绝非固定扩展的写入请求：${origin}`);
-    return false;
+    return 'deny';
   }
-  return true;
+  console.warn(`[ShortScraping Sync] ${SYNC_ORIGIN_PATH} 读不动或内容无效，拒绝写入请求：${origin}；删除该文件后重试即可重新固定`);
+  return 'deny';
+}
+
+function pinWriteOrigin(origin) {
+  pinnedWriteOrigin = origin;
+  try {
+    writeJsonAtomic(SYNC_ORIGIN_PATH, { origin, pinnedAt: new Date().toISOString() });
+  } catch (error) {
+    console.warn('[ShortScraping Sync] 写入来源固定失败（本次运行内仍生效）:', error.message);
+  }
+  console.log(`[ShortScraping Sync] 已固定写入来源扩展：${origin}；换目录重载扩展后如被拒，删除 ${SYNC_ORIGIN_PATH} 即可重新固定（无需重启服务）`);
+}
+
+/** 403 应答体：格式合法的扩展来源被拒时点明怎么恢复（换目录重载扩展是最常见的原因），其余来源只给短句。 */
+function originDeniedBody(req) {
+  if (!EXTENSION_ORIGIN_PATTERN.test(req.headers.origin || '')) return { ok: false, error: '写入请求来源不受信任' };
+  return {
+    ok: false,
+    code: 'ORIGIN_NOT_PINNED',
+    error: '写入请求来源与已固定的扩展不符：若是换目录重载了扩展，删除 config/sync-origin.json 后重试即可重新固定（无需重启同步服务）'
+  };
 }
 
 // —— 静态文件（显式白名单，防路径穿越） ——
@@ -720,6 +787,58 @@ function readBody(req, maxBytes = MAX_REQUEST_BODY_BYTES) {
   });
 }
 
+/* —— 已知片单（v1.7.0）：扩展 storage.knownItems 的备份 ——
+ * 扩展把「只记 ID、不入库」的条目（IMDb 切换基线等）存在自己的 storage 里，重装扩展就没了；库能从
+ * db/timeline.json 导入恢复，片单没有别处可取，所以每次追加后整份推到这里，扩展唤醒发现本地从没有过片单时
+ * 取回。POST 是整份替换（扩展推的是按 id 去重后的全集），GET 只给本机。
+ */
+const KNOWN_ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const MAX_KNOWN_ITEMS = 100000;
+
+function normalizeKnownItems(raw) {
+  const reject = message => Object.assign(new Error(message), { statusCode: 400 });
+  if (!Array.isArray(raw)) throw reject('已知片单必须是数组，未写入');
+  if (raw.length > MAX_KNOWN_ITEMS) throw reject(`已知片单超过 ${MAX_KNOWN_ITEMS} 条上限，未写入`);
+  const text = (value, max) => (typeof value === 'string' ? value.slice(0, max) : '');
+  const seen = new Set();
+  const items = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || !KNOWN_ITEM_ID.test(entry.id)) {
+      throw reject('已知片单包含无效条目（每条须有合法的 id），未写入');
+    }
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    items.push({ id: entry.id, site: text(entry.site, 32), at: text(entry.at, 40), reason: text(entry.reason, 200) });
+  }
+  return items;
+}
+
+function readKnownItems() {
+  try {
+    const raw = parseJsonText(fs.readFileSync(KNOWN_ITEMS_PATH, 'utf8'));
+    return Array.isArray(raw?.items) ? raw.items : [];
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn('[ShortScraping Sync] 读取 db/known-items.json 失败，按空片单返回:', error.message);
+    return [];
+  }
+}
+
+/**
+ * 读完请求体并解析成 JSON（五个写接口共用，v1.7.0 收拢）：坏 JSON 回 400（带 statusCode，经 sendRouteError），
+ * 以前各路由直接 JSON.parse(body || '{}')，SyntaxError 一路冒成 500 并打整段堆栈，像是服务自己出了错。
+ * 超限照旧是 readBody 的 413。
+ */
+async function readJsonBody(req) {
+  const body = await readBody(req);
+  try {
+    return JSON.parse(body || '{}');
+  } catch (error) {
+    const bad = new Error(`请求体不是合法 JSON，未写入任何文件：${error.message}`);
+    bad.statusCode = 400;
+    throw bad;
+  }
+}
+
 // 写接口 catch 的统一出口：带 statusCode 的请求错误只记一行原因，其余照旧打印完整错误并回 500
 function sendRouteError(res, label, error) {
   if (error.statusCode) console.warn(`[ShortScraping Sync] ${label}: ${error.message}`);
@@ -752,14 +871,20 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'POST') {
-    if (!checkWriteOrigin(req)) {
-      return sendJson(res, 403, { ok: false, error: '写入请求来源不受信任' });
+    const originVerdict = writeOriginVerdict(req);
+    if (originVerdict === 'deny') {
+      return sendJson(res, 403, originDeniedBody(req));
     }
     // 所有写接口都要求 application/json：非简单请求必须先过预检，
     // 无主机权限的扩展连「发出去就生效」的副作用请求都构造不出来。
     if ((req.headers['content-type'] || '').split(';')[0].trim().toLowerCase() !== 'application/json') {
       return sendJson(res, 415, { ok: false, error: '请使用 application/json' });
     }
+    if (!WRITE_ROUTES.has(pathname)) {
+      return sendJson(res, 404, { ok: false, error: '没有这个写接口' });
+    }
+    // 过完全部闸门才固定；判定到固定之间没有 await，两个并发的首次写入不会各自固定一次
+    if (originVerdict === 'pin') pinWriteOrigin(req.headers.origin);
   }
 
   if (req.method === 'GET' && pathname === '/health') {
@@ -778,6 +903,8 @@ async function handleRequest(req, res) {
       // 扩展冷启动指纹比对用（v1.6.21 起提供）：内容指纹 + CSV 是否已知与快照一致，两者都对得上才可能跳过推送
       body.contentHash = contentHash;
       body.csvInSync = csvInSync();
+      // 订阅配置文件缺失（v1.7.0）：推送会被 409 TAG_CONFIG_MISSING 拒绝，弹窗据此提示去设置页保存一次订阅
+      body.tagConfigMissing = !fs.existsSync(TAG_CONFIG_PATH);
     }
     return sendJson(res, 200, body);
   }
@@ -824,6 +951,23 @@ async function handleRequest(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/known-items') {
+    // 片单只给本机扩展：局域网共享页用不到它
+    if (!isLocalRequest(req)) return sendJson(res, 403, { ok: false, error: '已知片单只对本机开放' });
+    return sendJson(res, 200, { ok: true, items: readKnownItems() });
+  }
+
+  if (req.method === 'POST' && pathname === '/known-items') {
+    try {
+      const payload = await readJsonBody(req);
+      const items = normalizeKnownItems(payload?.items);
+      writeJsonAtomic(KNOWN_ITEMS_PATH, { updatedAt: new Date().toISOString(), items });
+      return sendJson(res, 200, { ok: true, count: items.length });
+    } catch (error) {
+      return sendRouteError(res, '写入已知片单失败', error);
+    }
+  }
+
   if (req.method === 'GET' && pathname === '/api/timeline') {
     return sendTimeline(req, res);
   }
@@ -857,8 +1001,7 @@ async function handleRequest(req, res) {
 
   if (req.method === 'POST' && pathname === '/sync') {
     try {
-      const body = await readBody(req);
-      const payload = JSON.parse(body || '{}');
+      const payload = await readJsonBody(req);
       if (!payload || !Array.isArray(payload.dramas) || payload.dramas.some(d => !d || typeof d !== 'object' || Array.isArray(d))) {
         return sendJson(res, 400, { ok: false, error: '缺少有效的 dramas 数组' });
       }
@@ -866,7 +1009,8 @@ async function handleRequest(req, res) {
       // 空库护栏：新 profile / 重装扩展后 storage 为空，SW 启动的预热推送会带着 []
       // 把 db/timeline.* 与共享页一起清空。「原始就是空数组」只在扩展声明 allowEmpty:true
       // （用户在扩展页确认过的清空/退订）时才接受；共享快照本就为空时无可覆盖，照常放行。
-      // 只看原始数组：非空推送被 tag.json 过滤成空（订阅已取消）仍走下方的告警 + drop 档留痕。
+      // 只看原始数组：非空推送被 tag.json 过滤成空（订阅已取消）仍走下方的告警 + drop 档留痕；
+      // tag.json 整个不见了（快照又非空）则在下面过滤时 409 拒绝（TAG_CONFIG_MISSING，v1.7.0）。
       // 409 拒绝不写任何文件（连备份都不留），扩展端据此不重试这份内容
       if (dramas.length === 0 && payload.allowEmpty !== true && latestDramas.length > 0) {
         const error = `拒绝用空时间线覆盖现有 ${latestDramas.length} 条（未带 allowEmpty）`;
@@ -944,10 +1088,13 @@ async function handleRequest(req, res) {
 
   if (req.method === 'POST' && pathname === '/config/tag') {
     try {
-      const body = await readBody(req);
-      const payload = JSON.parse(body || '{}');
+      const payload = await readJsonBody(req);
       const rawTags = payload?.urlTags;
+      const existed = fs.existsSync(TAG_CONFIG_PATH);
       const count = writeTagConfig(rawTags);
+      if (!existed && latestDramas.length > 0) {
+        console.log(`[ShortScraping Sync] 已重新生成 ${TAG_CONFIG_PATH}：此前被拒的推送在扩展下次推送（或打开弹窗）时补上`);
+      }
       return sendJson(res, 200, { ok: true, count, configPath: TAG_CONFIG_PATH });
     } catch (error) {
       return sendRouteError(res, '写入网页订阅配置失败', error);
@@ -956,8 +1103,7 @@ async function handleRequest(req, res) {
 
   if (req.method === 'POST' && pathname === '/config/trans') {
     try {
-      const body = await readBody(req);
-      const payload = JSON.parse(body || '{}');
+      const payload = await readJsonBody(req);
       const rawConfig = pickConfigObject(payload, 'translateConfig');
       if (!rawConfig) return sendJson(res, 400, { ok: false, error: '缺少有效的 translateConfig 对象，未写入' });
       const config = writeTransConfig(rawConfig);
@@ -969,8 +1115,7 @@ async function handleRequest(req, res) {
 
   if (req.method === 'POST' && pathname === '/config/lark') {
     try {
-      const body = await readBody(req);
-      const payload = JSON.parse(body || '{}');
+      const payload = await readJsonBody(req);
       const rawConfig = pickConfigObject(payload, 'larkConfig');
       if (!rawConfig) return sendJson(res, 400, { ok: false, error: '缺少有效的 larkConfig 对象，未写入' });
       const config = writeLarkConfig(rawConfig);
@@ -982,8 +1127,7 @@ async function handleRequest(req, res) {
 
   if (req.method === 'POST' && pathname === '/config/cron') {
     try {
-      const body = await readBody(req);
-      const payload = JSON.parse(body || '{}');
+      const payload = await readJsonBody(req);
       const rawConfig = pickConfigObject(payload, 'scheduleConfig');
       if (!rawConfig) return sendJson(res, 400, { ok: false, error: '缺少有效的 scheduleConfig 对象，未写入' });
       const config = writeCronConfig(rawConfig);

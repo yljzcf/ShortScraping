@@ -12,6 +12,7 @@
  *   三端可用：后台 importScripts / 设置页 <script> 标签 / 同步服务 require；
  * - 效果层（pushDrama 等带 fetch 的函数）只允许在后台 service worker 调用：
  *   弹窗关闭后请求仍需完成，且设置页「发送测试」也走后台消息，测试路径=真实路径。
+ *   请求一律经 fetch-util.js 的 FetchUtil.fetchWithDeadline（期限连正文一起算，v1.7.0 审查 H1）。
  *
  * payload 键集合必须稳定（空值发空串、绝不省略键）：飞书触发器按首次收到的
  * 样例捕获参数结构，键忽隐忽现会导致工作流引用不到参数。
@@ -38,9 +39,8 @@
   const FEISHU_TOKEN_API = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
   const FEISHU_IMAGE_API = 'https://open.feishu.cn/open-apis/im/v1/images';
 
-  // 站点显示名单一真源在 site-registry.js（本模块 buildPayload 的 source_name 取自它）。导出的
-  // Lark.SOURCE_NAMES 已无生产消费方（sync-server 从不读它，页面与后台都直接用 SiteRegistry），
-  // 只剩 unit-site-registry T5 守着「与注册表同源」；删导出须连 T5 一起删
+  // 站点显示名单一真源在 site-registry.js（本模块 buildPayload 的 source_name 取自它）。
+  // 页面、后台与同步服务都直接用 SiteRegistry.SOURCE_NAMES；本模块不再转手导出（v1.7.0 删）
   const SOURCE_NAMES = (typeof module !== 'undefined' && module.exports)
     ? require('./site-registry.js').SOURCE_NAMES
     : global.SiteRegistry.SOURCE_NAMES;
@@ -56,6 +56,11 @@
   const TimelineCsv = (typeof module !== 'undefined' && module.exports)
     ? require('./timeline-csv.js')
     : global.TimelineCsv;
+
+  // 带期限的 fetch 单一实现（fetch-util.js；后台 importScripts 与设置页 <script> 都排在本模块之前）
+  const FetchUtil = (typeof module !== 'undefined' && module.exports)
+    ? require('./fetch-util.js')
+    : global.FetchUtil;
 
   function normalizeConfig(rawConfig) {
     const config = { ...DEFAULT_CONFIG, ...(rawConfig || {}) };
@@ -567,27 +572,16 @@
   }
 
   /**
-   * 带超时的 fetch（与 translator.js 同款 AbortController 模式；translator
-   * 刻意只导出翻译方法，不改它）。
+   * 带超时的 fetch，期限**连响应正文一起算**（FetchUtil.fetchWithDeadline，与 translator.js 同一实现）。
+   * 以前拿到响应头就清掉计时器，之后读正文（readJsonBody / 封面 blob()）没有期限：飞书或封面 CDN
+   * 回了头却不发完正文时，推送卡在后台翻译线里（审查 H1，v1.7.0）。超时文案不变。
    */
-  async function fetchWithTimeout(url, options = {}, timeoutSec = 15) {
-    const controller = new AbortController();
+  function fetchWithTimeout(url, options = {}, timeoutSec = 15) {
     const timeoutMs = Math.max(5, Number(timeoutSec) || 15) * 1000;
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      return await fetch(url, {
-        ...options,
-        signal: controller.signal
-      });
-    } catch (e) {
-      if (e.name === 'AbortError') {
-        throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}秒）`);
-      }
-      throw e;
-    } finally {
-      clearTimeout(timer);
-    }
+    return FetchUtil.fetchWithDeadline(url, options, {
+      timeoutMs,
+      timeoutMessage: `请求超时（${Math.round(timeoutMs / 1000)}秒）`
+    });
   }
 
   /**
@@ -776,7 +770,6 @@
 
   const api = {
     DEFAULT_CONFIG,
-    SOURCE_NAMES,
     TABLE_COLUMNS,
     TABLE_HEADERS,
     normalizeConfig,

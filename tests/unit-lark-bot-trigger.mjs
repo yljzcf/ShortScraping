@@ -106,7 +106,9 @@ const mk = (id, over = {}) => ({
 
 const setupBot = async ({ enabled = true, enabledAt = ENABLED_AT } = {}) => {
   store.data.larkConfig = { webhookUrl: '', botWebhookUrl: BOT_HOOK, botEnabled: enabled, requestTimeoutSec: 5 };
-  store.data.larkBotState = enabledAt ? { enabledAt } : {};
+  // imdbWindowDays：IMDb 日期窗口「已生效」的天数（v1.7.0）。不记的话每轮 IMDb 都按「窗口变了」整轮静音，
+  // 本套件测的是订阅首轮 / 水位线本身，窗口变化的静音在 unit-imdb-rolling
+  store.data.larkBotState = enabledAt ? { enabledAt, imdbWindowDays: ScheduleConfig.DEFAULT_CONFIG.imdbWindowDays } : {};
   store.data.urlTags = [{ urlPattern: SUB, tags: ['T'] }];
   store.data.translateConfig = { translateMode: 'api', delayMs: 1 };
 };
@@ -519,12 +521,17 @@ const mkOldTrans = (id, source, sub, over = {}) => mkSub(id, source, sub, { stat
 const baselineOf = url => store.data.larkBotState?.urlBaseline?.[url];
 const transCount = pred => (store.dramas() || []).filter(d => pred(d) && d.status === 'trans').length;
 const posted = text => botPosts.some(p => JSON.stringify(p).includes(text));
-// 抓取桩按 URL 回放：模拟内容脚本在本轮期间把该订阅页的卡片经 saveDrama 入库
+// 抓取桩按 URL 回放：模拟内容脚本在本轮期间把该订阅页的卡片经 saveDrama 入库。页面上的列表项按「新卡之外还有
+// 10 条已入库的」算：v1.7.0 起列表为空（抓到 0 条告警）的页不收口首轮基线，桩得像一张真的抓成了的页。
+// fakePageByUrl[url] 可改写这一页的应答：{ fail: true } 存完卡后整页失败（超时），{ empty: true } 页面上没找到列表
 let fakeSavesByUrl = {};
+let fakePageByUrl = {};
 globalThis.scrapeUrlInTab = async (url) => {
   const saves = fakeSavesByUrl[url] || [];
   for (const drama of saves) await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama });
-  return { success: true, data: saves };
+  const page = fakePageByUrl[url] || {};
+  if (page.fail) return { success: false, error: '整页抓取超时（桩）' };
+  return { success: true, newCount: saves.length, subscribed: true, listCount: page.empty ? 0 : saves.length + 10 };
 };
 const setupSubs = async (dramas) => {
   await resetDramasCache(); await setupBot();
@@ -596,12 +603,12 @@ await sleep(300);
 check('B8 老订阅 URL 本轮入库即 trans 的卡照常推、不设基线', botPosts.length === 1 && baselineOf(NS_SUB) === undefined,
   `posts=${botPosts.length} baseline=${String(baselineOf(NS_SUB))}`);
 
-// SW 中途被回收会留下「进行中」：下一轮含该 URL 的收轮时收口成时间戳；但只碰本轮 URL——
+// SW 中途被回收会留下「进行中」：之后该 URL 真正抓成的那一轮收轮时收口成时间戳；但只碰本轮 URL——
 // 弹窗单站刷新传的是过滤后的列表，别站遗留的 pending 原样保留、零条的别站 URL 也不被标记
 store.data.larkBotState = { ...store.data.larkBotState, urlBaseline: { ...(store.data.larkBotState?.urlBaseline || {}), [FR_SUB]: 'pending', [IMDB_B]: 'pending' } };
 fakeSavesByUrl = {};
 await performScrapeOnce({ site: 'flickreels' });   // eslint-disable-line no-undef
-check('B9 遗留的「进行中」在下一轮收轮时收口为时间戳', typeof baselineOf(FR_SUB) === 'string' && baselineOf(FR_SUB) !== 'pending', String(baselineOf(FR_SUB)));
+check('B9 遗留的「进行中」在下一轮真正抓成时收口为时间戳', typeof baselineOf(FR_SUB) === 'string' && baselineOf(FR_SUB) !== 'pending', String(baselineOf(FR_SUB)));
 check('B9b 单站刷新只碰本轮 URL：别站遗留 pending 原样保留、零条的别站 URL 不被标记',
   baselineOf(IMDB_B) === 'pending' && baselineOf(IMDB_A) === undefined, JSON.stringify(store.data.larkBotState?.urlBaseline));
 
@@ -635,6 +642,45 @@ delete orphan.sourceListUrl;
 await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: orphan });
 await sleep(300);
 check('B12 无 sourceListUrl 的卡不受基线约束（落到既有水位线判定）', botPosts.length === 1 && posted('无归属卡'), `posts=${botPosts.length}`);
+
+// —— 只有真正抓成的页才收口（v1.7.0，2026-09-27 用户定）：首轮抓到一半整页失败、或页面上没找到列表，
+// 该 URL 保持「进行中」，此后每一轮照样只入库不推送，直到它第一次真正抓成。以前收轮时本轮 URL 一律收口，
+// 抓到一半失败的订阅库里已有几条、下一轮不再算首轮，没抓到的存量就被当成新片推了出去
+const NS_HOT = 'https://netshort.com/?list=hot';
+await setupSubs([mkOldTrans('ns-existing3', 'netshort', NS_SUB)]);
+store.data.urlTags.push({ urlPattern: NS_HOT, tags: ['NetShort', 'Hot'] });
+botPosts.length = 0;
+fakeSavesByUrl = { [NS_HOT]: [mkNative('hot-1', 'netshort', NS_HOT, '半截首轮第一条')] };
+fakePageByUrl = { [NS_HOT]: { fail: true } };
+await performScrapeOnce({ site: 'netshort' });   // eslint-disable-line no-undef
+await sleep(300);
+check('B15a 新订阅首轮抓到一半整页失败：已入库的那条不推，基线保持「进行中」（不收口）',
+  botPosts.length === 0 && baselineOf(NS_HOT) === 'pending' && transCount(d => d.id === 'hot-1') === 1,
+  `posts=${botPosts.length} baseline=${String(baselineOf(NS_HOT))}`);
+await sleep(5);
+const hotRetryStart = nowIso();
+fakeSavesByUrl = { [NS_HOT]: [mkNative('hot-2', 'netshort', NS_HOT, '半截首轮补抓')] };
+fakePageByUrl = {};
+await performScrapeOnce({ site: 'netshort' });   // eslint-disable-line no-undef
+await sleep(300);
+check('B15b 下一轮（库里已有条目、不再按零条判首轮）真正抓成：补抓进来的存量照样不推，这时才收口',
+  botPosts.length === 0 && typeof baselineOf(NS_HOT) === 'string' && baselineOf(NS_HOT) !== 'pending' && baselineOf(NS_HOT) >= hotRetryStart,
+  `posts=${botPosts.length} baseline=${String(baselineOf(NS_HOT))}`);
+await sleep(5);
+await chromeStub.runtime.sendMessage({ action: 'saveDrama', drama: mkNative('hot-3', 'netshort', NS_HOT, '收口之后的新卡') });
+await sleep(300);
+check('B15c 收口之后的新卡照常推', botPosts.length === 1 && posted('收口之后的新卡'), `posts=${botPosts.length}`);
+
+// 页面上没找到列表（站点改版 / 没加载完整）同样不收口
+const FR_NEW = 'https://www.flickreels.net/?list=new_arrivals';
+store.data.urlTags.push({ urlPattern: FR_NEW, tags: ['FlickReels', 'New'] });
+store.data.larkBotState = { ...store.data.larkBotState, urlBaseline: { ...(store.data.larkBotState?.urlBaseline || {}), [FR_NEW]: 'pending' } };
+botPosts.length = 0;
+fakeSavesByUrl = {};
+fakePageByUrl = { [FR_NEW]: { empty: true } };
+await performScrapeOnce({ site: 'flickreels' });   // eslint-disable-line no-undef
+check('B16 页面上没找到列表（抓到 0 条告警）：基线保持「进行中」', baselineOf(FR_NEW) === 'pending', String(baselineOf(FR_NEW)));
+fakePageByUrl = {};
 
 // —— v1.6.6 遗留的 larkBotState.siteBaseline（存量形如 { flickreels: ISO }）：首次收轮时折进同站所有订阅 URL 里
 // 尚无基线的那些、再删掉该键——FlickReels 首轮里尚未翻完的卡仍按老基线拦住，不因换粒度被补推。

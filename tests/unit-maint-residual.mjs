@@ -109,7 +109,7 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
   check('T1a IMDB 正常项入库且标题正确', good?.title === 'Good Title', JSON.stringify(good));
   check('T1b IMDB 无标题项被跳过（不产生标题=ID 的残卡）', !ids.includes('tt0000002'),
     JSON.stringify(rawStore.dramas.map(d => ({ id: d.itemId, title: d.title }))));
-  check('T1c 响应只报告成功项', resp?.success === true && (resp.data || []).length === 1, JSON.stringify(resp?.data?.length));
+  check('T1c 响应只报告成功项', resp?.success === true && resp.newCount === 1, JSON.stringify(resp));
 }
 
 // ---------- T2 RoyalRoad：good 入库、bad（无标题）跳过 ----------

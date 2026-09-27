@@ -35,8 +35,11 @@ console.warn = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origWa
   // background-fixture 经 bootstrap.cjs 预载过 translate-config（主 realm 全局已有 TranslateConfig）。
   // 先摘掉全局再 require：translator 若仍靠 global.TranslateConfig，下面归一化时就会抛错
   const savedTranslateConfig = globalThis.TranslateConfig;
+  const savedFetchUtil = globalThis.FetchUtil;
   const savedFetch = globalThis.fetch;
   delete globalThis.TranslateConfig;
+  // FetchUtil（v1.7.0 带期限的 fetch）同理：bootstrap 预载过，摘掉全局后请求仍须照发
+  delete globalThis.FetchUtil;
   let T = null;
   let loadError = null;
   try { T = require('../src/shared/translator.js'); } catch (e) { loadError = e; }
@@ -76,6 +79,9 @@ console.warn = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origWa
       !aiError && fetchLog.length === 1 && fetchLog[0].url === 'https://ai.test/v1/chat' && fetchLog[0].method === 'POST'
         && fetchLog[0].auth === 'Bearer k-umd' && aiOut?.[0]?.title === '甲' && aiOut?.[1]?.title === '乙',
       JSON.stringify({ error: aiError?.message, fetchLog, aiOut }));
+    check('U6 FetchUtil 经 require 解析（全局 FetchUtil 摘掉后请求照发、应答照常解析）',
+      globalThis.FetchUtil === undefined && !aiError && fetchLog.length === 1 && aiOut?.[0]?.title === '甲',
+      JSON.stringify({ globalFetchUtil: typeof globalThis.FetchUtil, error: aiError?.message }));
 
     fetchLog.length = 0;
     const rejects = async (fn) => { try { await fn(); return null; } catch (e) { return e; } };
@@ -96,6 +102,7 @@ console.warn = (...a) => { if (!String(a[0]).includes('[ShortScraping]')) origWa
 
   globalThis.fetch = savedFetch;
   globalThis.TranslateConfig = savedTranslateConfig;
+  globalThis.FetchUtil = savedFetchUtil;
 }
 
 // ============ G 组：background.js 调用点源码守卫 ============

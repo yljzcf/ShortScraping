@@ -90,7 +90,8 @@ if (SC) {
 // 逐字一致（尾斜杠归一后的**精确等值**，不是 startsWith），否则提示的条数与实际删的对不上。
 if (SC) {
   const removed = SC.removedSubscriptionUrls;
-  const countUnder = SC.countDramasUnderUrls;
+  // v1.7.0 删掉了只剩测试在用的 countDramasUnderUrls 导出：条数就是 dramasUnderUrls 的长度
+  const countUnder = (dramas, urls) => SC.dramasUnderUrls(dramas, urls).length;
 
   const prev = [{ urlPattern: 'https://a.test/x', tags: ['A'] }, { urlPattern: 'https://b.test/y', tags: ['B'] }];
 
@@ -141,8 +142,61 @@ if (SC) {
   const picked = SC.dramasUnderUrls(dramas, ['https://b.test/y']);
   check('R13 dramasUnderUrls 返回命中的原始条目',
     deepEq(picked.map(d => d.id), ['2', '3']), show(picked.map(d => d.id)));
-  check('R14 countDramasUnderUrls 恒等于 dramasUnderUrls 的长度',
-    countUnder(dramas, ['https://b.test/y', 'https://c.test/z']) === SC.dramasUnderUrls(dramas, ['https://b.test/y', 'https://c.test/z']).length, '');
+  check('R14 无人使用的导出已删（countDramasUnderUrls / MAX_TAGS），dramasUnderUrls 仍在',
+    !('countDramasUnderUrls' in SC) && !('MAX_TAGS' in SC) && typeof SC.dramasUnderUrls === 'function', show(Object.keys(SC)));
+}
+
+// ---------- C 组：要抓的订阅 URL 清单 configuredScrapeUrls（v1.7.0 收拢后台与弹窗两份） ----------
+// 后台原实现：取 urlPattern、只认 http(s)、按尾斜杠归一去重保留首次原串；弹窗那份按原串去重、还认 url 字段。
+// 统一成前者（外加 url 回退），且清单为坏数据时抛错而不是当成「零订阅」（订阅外清理会据此清库）
+if (SC) {
+  const urls = SC.configuredScrapeUrls;
+  check('C1 取 urlPattern，缺省退回 url；只认完整 http(s)',
+    deepEq(urls([{ urlPattern: 'https://a.test/x' }, { url: 'http://b.test/y' }, { urlPattern: 'ftp://c.test' }, { urlPattern: 'imdb' }]),
+      ['https://a.test/x', 'http://b.test/y']), show(urls([{ urlPattern: 'https://a.test/x' }, { url: 'http://b.test/y' }])));
+  check('C2 按尾斜杠归一去重、保留先出现的原串', deepEq(urls([{ urlPattern: 'https://a.test/x/' }, { urlPattern: 'https://a.test/x' }, { urlPattern: 'https://b.test' }]),
+    ['https://a.test/x/', 'https://b.test']), show(urls([{ urlPattern: 'https://a.test/x/' }, { urlPattern: 'https://a.test/x' }])));
+  check('C3 null / 原始值 / 非字符串 url 的条目跳过不抛', deepEq(urls([null, 'x', 42, { urlPattern: 123 }, { urlPattern: 'https://ok.test' }]), ['https://ok.test']), '');
+  check('C4 null / undefined 得空数组', deepEq(urls(null), []) && deepEq(urls(undefined), []), '');
+  let threw = null;
+  try { urls({ urlPattern: 'https://a.test' }); } catch (e) { threw = e; }
+  check('C5 真值却不是数组 → 抛错（不能当成「零订阅」让订阅外清理清库）', threw instanceof TypeError, String(threw));
+  // 与收拢前后台的算法逐条比对（目录里全部订阅 + 手造的尾斜杠 / 非 http 条目）
+  const legacyBackground = (urlTags) => {
+    const list = (urlTags || []).map(item => item.urlPattern).filter(pattern => /^https?:\/\//i.test(pattern));
+    const seen = new Set();
+    return list.filter(url => { const key = String(url).trim().replace(/\/+$/, ''); if (seen.has(key)) return false; seen.add(key); return true; });
+  };
+  const catalog = SC.normalizeUrlTags(JSON.parse(fs.readFileSync(path.join(root, 'config/tag.example.json'), 'utf8')));
+  const mixed = [...catalog, { urlPattern: catalog[0].urlPattern + '/' }, { urlPattern: 'not-a-url' }];
+  check('C6 对正常数据与收拢前的后台算法逐条一致（订阅外清理的指纹不变，升级不触发额外清理）',
+    deepEq(urls(mixed), legacyBackground(mixed)) && urls(catalog).length === catalog.length, `${urls(mixed).length} vs ${legacyBackground(mixed).length}`);
+}
+
+// ---------- D 组：抓取时实际打开的地址 withReleaseWindow（v1.7.0 IMDb 滚动日期窗口） ----------
+// 订阅 URL 不带日期（它是历史归属的身份），打开页面前才在末尾补 release_date；内容脚本靠 url-match 前缀轮认回订阅
+if (SC) {
+  const UrlMatch = require(path.join(root, 'src/shared/url-match.js'));
+  const win = SC.withReleaseWindow;
+  const now = new Date(2026, 8, 27, 10, 30);   // 本地 2026-09-27
+  const sub = 'https://www.imdb.com/search/title/?companies=co1028734';
+  check('D1 IMDb 搜索页订阅末尾补 &release_date=<今天−N 天>,（180 天 → 2026-03-31）',
+    win(sub, 180, now) === `${sub}&release_date=2026-03-31,`, win(sub, 180, now));
+  check('D2 补过参数的页面仍命中原订阅（前缀轮），归属写回不带日期的订阅 URL',
+    UrlMatch.matchSubscription(win(sub, 180, now), [{ urlPattern: sub, tags: ['IMDB'] }])?.urlPattern === sub, '');
+  check('D3 按日历日倒推：跨月 / 跨年 / 闰年二月', win(sub, 30, new Date(2026, 2, 1)).endsWith('release_date=2026-01-30,')
+    && win(sub, 1, new Date(2027, 0, 1)).endsWith('release_date=2026-12-31,')
+    && win(sub, 1, new Date(2028, 2, 1)).endsWith('release_date=2028-02-29,'), '');
+  check('D4 订阅自己写了 release_date 的原样不动（尊重显式日期）',
+    win('https://www.imdb.com/search/title/?release_date=2026-01-01,&genres=short', 180, now) === 'https://www.imdb.com/search/title/?release_date=2026-01-01,&genres=short', '');
+  check('D5 0（不限）/ 非整数 / 负数 / 缺省：原样', [0, 1.5, -3, undefined, null, 'x'].every(days => win(sub, days, now) === sub), '');
+  check('D6 非 IMDb、IMDb 非搜索页、带 #片段、坏 URL：原样', win('https://www.reelshort.com/', 180, now) === 'https://www.reelshort.com/'
+    && win('https://www.imdb.com/chart/moviemeter/', 180, now) === 'https://www.imdb.com/chart/moviemeter/'
+    && win(`${sub}#x`, 180, now) === `${sub}#x` && win('not a url', 180, now) === 'not a url'
+    && win('https://notimdb.com/search/title/?x=1', 180, now) === 'https://notimdb.com/search/title/?x=1', '');
+  check('D7 没有查询串的搜索页用 ? 起头，同样命中原订阅',
+    win('https://www.imdb.com/search/title/', 7, now) === 'https://www.imdb.com/search/title/?release_date=2026-09-20,'
+      && UrlMatch.matchSubscription(win('https://www.imdb.com/search/title/', 7, now), [{ urlPattern: 'https://www.imdb.com/search/title/', tags: ['I'] }]) !== null, '');
 }
 
 // ---------- W 组：接线探针（三端 + 夹具） ----------
@@ -183,6 +237,12 @@ check('W12 bootstrap.cjs 预载 url-match（subscription-config 的新依赖）'
 
 check('W13 设置页归属归一委托 UrlMatch（不再自带 normalizeUrlForMatch 实现）',
   !settings.includes('function normalizeUrlForMatch('), '');
+
+check('W14 后台订阅 URL 清单与归属过滤都委托共享模块（不再各写一份）',
+  bg.includes('return SubscriptionConfig.configuredScrapeUrls(urlTags);')
+    && bg.includes('return SubscriptionConfig.dramasUnderUrls(dramas, getConfiguredScrapeUrls(urlTags));'), '');
+const popup = read('src/popup/popup.js');
+check('W15 弹窗订阅 URL 清单委托共享模块（去重口径与后台一致）', popup.includes('return SubscriptionConfig.configuredScrapeUrls(state.urlTags);'), '');
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;

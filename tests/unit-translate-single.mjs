@@ -38,6 +38,8 @@ const POPUP_SENDER = { id: 'fixture', url: 'chrome-extension://fixture/src/popup
 // 只放行群机器人 webhook（B 组捕获推送），其余一律断网
 const BOT_HOOK = 'https://open.larksuite.com/open-apis/bot/v2/hook/unit-test';
 const botPosts = [];
+// K1d：把机器人 webhook 应答挂住，制造「弹窗已拿到应答、推送还在飞」的窗口
+let botGate = null;
 
 // Translator 桩：记录 SW 内实际收到的入参；plan 决定返回什么（或抛错）
 const translatorCalls = [];
@@ -58,6 +60,7 @@ const bg = await background({
   },
   fetch: async (url, options) => {
     if (String(url) === BOT_HOOK) {
+      if (botGate) await botGate;
       botPosts.push(JSON.parse(options?.body || '{}'));
       return { ok: true, status: 200, async text() { return JSON.stringify({ code: 0, msg: 'success' }); } };
     }
@@ -284,10 +287,40 @@ await seed(mk('apply'));
       platformInfoCalls === 1 && live.size === 1, `calls=${platformInfoCalls} live=${live.size}`);
     release();
     const resp = await pending;
-    check('K1c 请求结束即停：保活定时器被清掉、不再续跳', resp?.success === true && live.size === 0,
+    // 保活撑到推群流程结束（v1.7.0）：本组没配机器人，推送判定几拍内就返回，稍等即停
+    await sleep(30);
+    check('K1c 请求（连同推群流程）结束即停：保活定时器被清掉、不再续跳', resp?.success === true && live.size === 0,
       JSON.stringify({ resp, live: live.size }));
   } finally {
     disarm();
+  }
+
+  // K1d 翻成 trans 触发推群：弹窗照旧不等推送，但保活撑到推送结束（以前应答一回就停保活，
+  // SW 在推送途中被回收时这张卡既没推成、也没进重试队列；审查 M4，v1.7.0）
+  await seed(mk('ka1d', { scrapedAt: '2026-09-12T06:00:00.000Z' }));
+  bg.storage.seed({
+    larkConfig: { webhookUrl: '', botWebhookUrl: BOT_HOOK, botEnabled: true, requestTimeoutSec: 5 },
+    larkBotState: { enabledAt: '2026-09-12T00:00:00.000Z' }
+  });
+  botPosts.length = 0;
+  let openBot;
+  botGate = new Promise(r => { openBot = r; });
+  arm();
+  try {
+    const resp = await send({ action: 'translateSingle', dramaId: 'ka1d' });
+    await sleep(400);   // 越过 250ms 推送节流，推送请求此刻挂在闸门上
+    check('K1d 应答不等推送；推送在飞期间保活仍在', resp?.success === true && botPosts.length === 0 && live.size === 1,
+      JSON.stringify({ resp, posts: botPosts.length, live: live.size }));
+    openBot();
+    botGate = null;
+    await sleep(50);
+    check('K1e 推送完成后保活随之停掉', botPosts.length === 1 && live.size === 0,
+      JSON.stringify({ posts: botPosts.length, live: live.size }));
+  } finally {
+    botGate = null;
+    disarm();
+    delete bg.data.larkConfig;
+    delete bg.data.larkBotState;
   }
 
   // K2 批量翻译轮（独立 translate-task / 手动 🌐，没有抓取标签页的消息陪跑）

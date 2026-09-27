@@ -156,7 +156,8 @@ const Config = require('../src/shared/translate-config.js');
 
 {
   const bg = await background();
-  bg.context.scrapeUrlInTab = async () => ({ success: true, data: [card('tt1', { status: 'trans' }), card('tt2')] });
+  // 内容脚本 v1.7.0 起只回条数（newCount）与判定，不再回整批卡片对象
+  bg.context.scrapeUrlInTab = async () => ({ success: true, newCount: 2, subscribed: true, listCount: 2 });
   assert.equal((await bg.run('performScrapeOnce()')).totalNewCount, 2);
 }
 
@@ -259,8 +260,10 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
         storage: { local: { get: async () => ({}), set: deps.set } },
         runtime: { getManifest: () => ({ version: 'fixture' }), sendMessage: async () => ({ success: true }) }
       },
-      fetch: deps.fetch
+      fetch: deps.fetch, setTimeout, clearTimeout, AbortController
     });
+    // settings.js 的写回经 FetchUtil（settings.html 里排在它前面），在本 vm 里求值才用得上上面的 fetch 桩
+    vm.runInContext(fs.readFileSync(new URL('../src/shared/fetch-util.js', import.meta.url), 'utf8'), context);
     let script = fs.readFileSync(new URL('../src/settings/settings.js', import.meta.url), 'utf8');
     script = script.replace('document.addEventListener(\'DOMContentLoaded\', init);',
       "globalThis.fixture = { state, saveSubscriptions, setDom: fn => { readSubscriptionsFromDom = fn; }, setStatus: fn => { showStatus = fn; } };"
@@ -445,6 +448,33 @@ assert.ok(manifest.permissions.includes('unlimitedStorage'));
   });
   assert.equal(signals.length, 1);
   assert.equal(typeof signals[0]?.aborted, 'boolean', 'ReelShort 迁移请求须带超时 signal');
+}
+
+// macOS 双击脚本（v1.7.0）：从访达启动时 PATH 常不含 Homebrew，直接敲 node 会「command not found」。
+// 需要 node 的脚本一律按 restart-sync.command 的写法找 $NODE（含 /opt/homebrew/bin/node 兜底），不许裸调 node
+{
+  const scripts = ['server/start-sync.command', 'server/setup-autostart.command', 'server/tools/stop-sync.command',
+    'server/tools/restart-sync.command', 'server/tools/remove-autostart.command'];
+  for (const rel of scripts) {
+    const text = fs.readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+    const code = text.split('\n').filter(line => !line.trim().startsWith('#')).join('\n');
+    assert.ok(!/(^|[\s;&|(])(exec\s+)?node\s+server\//m.test(code), `${rel} 不得裸调 node（从访达启动时 PATH 可能没有它）`);
+    if (/\$\{?NODE/.test(code)) assert.ok(code.includes('/opt/homebrew/bin/node'), `${rel} 用了 $NODE 就要带 Homebrew 兜底`);
+  }
+}
+
+// 同步服务端口：扩展三处（后台 / 弹窗 / 设置页）各持一份 SYNC_BASE_URL，服务端与 stop.js 各持 DEFAULT_PORT，
+// 改端口时漏一处＝那一端静默连不上。后台只允许 SYNC_BASE_URL 这一处端口字面量（其余端点由它派生，v1.7.0）
+{
+  const read = rel => fs.readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const baseOf = rel => (read(rel).match(/const SYNC_BASE_URL = '([^']+)';/) || [])[1];
+  const bases = ['src/background/background.js', 'src/popup/popup.js', 'src/settings/settings.js'].map(baseOf);
+  assert.ok(bases.every(base => base === 'http://127.0.0.1:31919'), `SYNC_BASE_URL 三端不一致：${JSON.stringify(bases)}`);
+  const bgLiterals = read('src/background/background.js').match(/127\.0\.0\.1:31919/g) || [];
+  assert.equal(bgLiterals.length, 1, '后台的同步服务端点应全部由 SYNC_BASE_URL 派生');
+  for (const rel of ['server/sync-server.js', 'server/tools/stop.js']) {
+    assert.ok(/const DEFAULT_PORT = 31919;/.test(read(rel)), `${rel} 的默认端口须为 31919`);
+  }
 }
 
 console.log('Audit regression scenarios passed');
