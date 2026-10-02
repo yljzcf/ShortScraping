@@ -261,6 +261,47 @@
   box-shadow: 0 0 0 2px var(--primary);
 }
 
+/* 封面菜单（v1.7.3）：已知平台的 IMDb 卡点封面弹出「IMDB 影片页 / 搜 X」。菜单挂在 body 下、
+   按点击处 fixed 定位（timeline-render.js openPosterMenu），层级压过弹窗顶栏（30）与 toast（50） */
+.poster-menu {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+  padding: 4px;
+  /* 卡片底色是 --bg-card（与 --bg-secondary 同色），菜单用更亮一档的 --border 才从卡片上浮出来 */
+  background: var(--border);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+
+.poster-menu-item {
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.poster-menu-item:hover:not(:disabled),
+.poster-menu-item:focus-visible {
+  background: var(--primary);
+  outline: none;
+}
+
+.poster-menu-item:disabled {
+  color: var(--text-secondary);
+  cursor: progress;
+}
+
 /* 横版封面：置于文字上方、整行铺开（上半部分改纵向堆叠；标签区本就整行） */
 .drama-card.card-landscape .card-top {
   flex-direction: column;

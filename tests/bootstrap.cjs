@@ -4,6 +4,7 @@ require('../src/shared/url-match.js'); // subscription-config 的依赖，须先
 require('../src/shared/subscription-config.js');
 require('../src/shared/scrape-rules.js'); // content.js 与后台共用的采集口径（ScrapeRules）
 require('../src/shared/fetch-util.js'); // translator.js / lark.js 的带期限 fetch（FetchUtil）
+require('../src/shared/platform-link.js'); // 后台「搜平台」的解析与判定（PlatformLink，v1.7.3）
 
 // Recursive cleanup must stay inside a directory created by this test process.
 const fs = require('node:fs');

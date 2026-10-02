@@ -518,6 +518,21 @@
     return text.length > limit ? `${text.slice(0, limit)}…` : text;
   }
 
+  // 卡片右下的一个按钮（占 column_set 里的一列）
+  function buttonColumn(content, url, type) {
+    return {
+      tag: 'column',
+      width: 'auto',
+      vertical_align: 'top',
+      elements: [{
+        tag: 'button',
+        text: { tag: 'plain_text', content },
+        behaviors: [{ type: 'open_url', default_url: url }],
+        type
+      }]
+    };
+  }
+
   function buildBotCard(drama, options) {
     const d = drama || {};
     const imgKey = asText(options && options.imgKey);
@@ -552,23 +567,17 @@
     // （`action components are not allowed in the column`）、v2 的 button 不认
     // `horizontal_align`（`unknown property`），只有 **v2 的 column_set 带
     // horizontal_align:'right'、里面直接放 button** 被接受。别再试别的。
-    if (/^https?:\/\//i.test(url)) {
-      elements.push({
-        tag: 'column_set',
-        horizontal_align: 'right',
-        flex_mode: 'none',
-        columns: [{
-          tag: 'column',
-          width: 'auto',
-          vertical_align: 'top',
-          elements: [{
-            tag: 'button',
-            text: { tag: 'plain_text', content: '去瞅瞅' },
-            behaviors: [{ type: 'open_url', default_url: url }],
-            type: 'primary'
-          }]
-        }]
-      });
+    // IMDb 平台卡在「去瞅瞅」左边多一个「搜 X」（v1.7.3，2026-09-28 用户定）：同一个 column_set 里
+    // 每个按钮各占一列，不加任何新属性；链接由后台推送前解析（background.js botPlatformLink），
+    // 唯一同名是平台播放页、否则是平台搜索结果页。次要按钮用 default，主按钮仍是「去瞅瞅」
+    const platformLink = options && options.platformLink;
+    const platformName = asText(platformLink && platformLink.name);
+    const platformUrl = asText(platformLink && platformLink.url);
+    const columns = [];
+    if (platformName && /^https?:\/\//i.test(platformUrl)) columns.push(buttonColumn(`搜 ${platformName}`, platformUrl, 'default'));
+    if (/^https?:\/\//i.test(url)) columns.push(buttonColumn('去瞅瞅', url, 'primary'));
+    if (columns.length) {
+      elements.push({ tag: 'column_set', horizontal_align: 'right', flex_mode: 'none', columns });
     }
 
     // 封面真图垫在整张卡最底下、按钮在它上方（2026-09-12 用户看过实卡后定；
@@ -745,7 +754,7 @@
    * notConfigured 标记。机器人响应形如 {"StatusCode":0,"code":0,"msg":"success"}，
    * 业务错误照 extractErrorDetail 透传（如 11310 图片无 img_key、9499 频率限流）。
    */
-  async function pushBotCard(rawConfig, drama) {
+  async function pushBotCard(rawConfig, drama, options = {}) {
     const config = normalizeConfig(rawConfig);
     if (!botReadiness(config).ok) {
       const error = new Error('群机器人未配置或未启用');
@@ -763,10 +772,25 @@
     let imgKey = await uploadCoverImage(config, sharpPoster);
     if (!imgKey && sharpPoster !== rawPoster) imgKey = await uploadCoverImage(config, rawPoster);
 
+    const platformLink = options && options.platformLink ? options.platformLink : null;
+    try {
+      return await postBotCard(config, buildBotCard(drama, { imgKey, platformLink }));
+    } catch (e) {
+      // 带「搜 X」按钮的卡被飞书以业务错误拒收时去掉按钮重发一次（v1.7.3）：按钮是锦上添花，不能因为它
+      // 整张卡推不出去、一路掉进重试队列。只认飞书明确回了拒收的情况——超时 / 网络错误时第一张可能
+      // 其实已送达，再发会重复；频率限流（9499）立刻重发也是白发
+      if (!platformLink || !e.botRejected) throw e;
+      console.warn('[ShortScraping] 带「搜平台」按钮的卡被群机器人拒收，去掉按钮重发:', e.message);
+      return postBotCard(config, buildBotCard(drama, { imgKey }));
+    }
+  }
+
+  // 发一张卡到群机器人；飞书回了业务错误（HTTP 400 或 code 非 0，限流除外）时错误带 botRejected
+  async function postBotCard(config, card) {
     const response = await fetchWithTimeout(config.botWebhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildBotCard(drama, { imgKey }))
+      body: JSON.stringify(card)
     }, config.requestTimeoutSec);
 
     const bodyText = await response.text().catch(() => '');
@@ -777,13 +801,20 @@
       // 非 JSON 响应按 HTTP 状态判定
     }
 
+    const code = body && typeof body === 'object' ? Number(body.code !== undefined ? body.code : body.errcode) : NaN;
     if (!response.ok) {
       const detail = extractErrorDetail(body) || asText(bodyText).slice(0, 120);
-      throw new Error(`群机器人推送失败（HTTP ${response.status}${detail ? `：${detail}` : ''}）`);
+      const error = new Error(`群机器人推送失败（HTTP ${response.status}${detail ? `：${detail}` : ''}）`);
+      if (response.status === 400 && code !== 9499) error.botRejected = true;
+      throw error;
     }
 
     const detail = extractErrorDetail(body);
-    if (detail) throw new Error(`群机器人返回错误：${detail}`);
+    if (detail) {
+      const error = new Error(`群机器人返回错误：${detail}`);
+      if (code !== 9499) error.botRejected = true;
+      throw error;
+    }
 
     return { success: true };
   }

@@ -1130,6 +1130,48 @@
   }
 
   /**
+   * IMDb 卡封面菜单「搜 X」（v1.7.3）：查找与开标签页都在后台（openPlatformPage）——弹窗一失焦就关，
+   * 自己开页或等结果都靠不住。菜单项的「⏳」与收起由渲染模块管（它等这里返回的 promise）。
+   * 没找到只会发生在网页端没有搜索页的 MyDrama / Shortical / NetShort：提示并复制片名，方便到 App
+   * 或站内手动搜。同一张卡查找期间再点，等同一次结果、不重复发消息。
+   */
+  const platformSearchInFlight = new Map();   // dramaId → promise
+
+  function searchOnPlatform(dramaId) {
+    if (platformSearchInFlight.has(dramaId)) return platformSearchInFlight.get(dramaId);
+    const run = (async () => {
+      try {
+        const response = await chrome.runtime.sendMessage({ action: 'openPlatformPage', dramaId });
+        if (response?.notFound) {
+          const name = response.name || '平台';
+          const what = response.reason === 'ambiguous' ? `${name} 上有多部同名剧`
+            : response.reason === 'error' ? `${name} 暂时查不了（网络或站点异常）`
+              : `${name} 上没找到同名剧`;
+          let copied = false;
+          if (response.title) {
+            try {
+              await copyTextToClipboard(response.title);
+              copied = true;
+            } catch (e) {
+              // 复制失败不影响提示：片名直接写进提示里
+            }
+          }
+          const tail = copied ? '，已复制片名' : (response.title ? `（片名：${response.title}）` : '');
+          showToast(`${what}${tail}`, { type: 'info', duration: 4000 });
+          return;
+        }
+        if (!response?.success) throw new Error(response?.error || '后台无响应');
+        // 成功：标签页已由后台打开（弹窗通常随之关闭）
+      } catch (e) {
+        console.error('[ShortScraping] 搜平台失败:', e);
+        showToast(`搜平台失败：${e.message}`, { type: 'error', duration: 5000 });
+      }
+    })().finally(() => platformSearchInFlight.delete(dramaId));
+    platformSearchInFlight.set(dramaId, run);
+    return run;
+  }
+
+  /**
    * 翻译单张卡片：只发 translateSingle 消息，翻译请求与落库都在后台完成——弹窗一关
    * 页面即销毁，页内发起的 fetch 会被掐断，与 Lark 推送走后台同理。防重与终态回写
    * 与 pushCardToLark 同款：translateInFlight 按 dramaId 兜底（瞬态重贴之外的第二道
@@ -1327,6 +1369,7 @@
       assetsBase: '../../assets/icons',
       onTranslate: translateSingleCard,
       onLarkPush: pushCardToLark,
+      onOpenPlatform: searchOnPlatform,
       onOpenUrl: (url) => chrome.tabs.create({ url })
     });
     // 整树重建把按钮全部重建成默认态，把进行中 / 终态的瞬态按 data-id 贴回去

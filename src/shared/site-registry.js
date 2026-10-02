@@ -135,6 +135,13 @@
     return CATEGORY_SOURCES.includes(source) ? source : 'imdb';
   }
 
+  // 点边界 host 匹配（suffix 条目＝裸域或其子域），注入闸门与平台链接校验共用
+  function hostMatches(entry, hostname) {
+    return entry.match === 'exact'
+      ? hostname === entry.host
+      : hostname === entry.host || hostname.endsWith(`.${entry.host}`);
+  }
+
   /**
    * 强制注入兜底的放行判定：与 manifest matches 同一口径的点边界匹配（suffix 条目＝裸域或其子域），
    * 不沿用 siteOfHostname 的裸 endsWith——那条怪癖只关乎站点归属显示，放到注入闸门上
@@ -149,9 +156,88 @@
     }
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
     const hostname = parsed.hostname;
-    return SITES.some(entry => entry.match === 'exact'
-      ? hostname === entry.host
-      : hostname === entry.host || hostname.endsWith(`.${entry.host}`));
+    return SITES.some(entry => hostMatches(entry, hostname));
+  }
+
+  /* ——— IMDb 条目「搜平台」（v1.7.3）————————————————————————————————————————
+   * IMDb 只是片目库、没有播放页；订阅的 IMDb「平台榜」是按出品公司筛选的搜索页
+   * （companies=co…），所以一部 IMDb 条目属于哪个短剧平台由它的 sourceListUrl 就能确定。
+   * 弹窗 / 共享页的封面菜单与飞书卡片的「搜 X」按钮按这里的表反查平台；在平台上怎么找、
+   * 怎么判定唯一同名见 src/shared/platform-link.js。 */
+
+  // IMDb 出品公司 → 站点键。DramaWave（co1124838）只有 App、网页端不能播放，刻意不收：
+  // 它的卡保持点封面直开 IMDb。新平台榜要支持「搜平台」时在这里加一行
+  const IMDB_COMPANY_SITES = Object.freeze({
+    co1116954: 'mydrama',
+    co1016895: 'reelshort',
+    co1116348: 'dramashorts',
+    co1104898: 'netshort',
+    co1149472: 'flickreels',
+    co1045147: 'goodshort',
+    co1167893: 'shortical',
+    co1065580: 'shortmax',
+    co1028734: 'dramabox'
+  });
+
+  // 平台站内搜索结果页（用户可见的落地页，后台也按同一地址取数判定）。2026-09-28 逐站实测；
+  // MyDrama / Shortical / NetShort 网页端没有按片名的搜索网址，不在表内。
+  // ShortMax 的关键词是路径段（/search/<词>），其余是查询参数
+  const PLATFORM_SEARCH_PAGES = Object.freeze({
+    reelshort: q => `https://www.reelshort.com/search?keywords=${encodeURIComponent(q)}`,
+    dramashorts: q => `https://dramashorts.io/search?q=${encodeURIComponent(q)}`,
+    flickreels: q => `https://www.flickreels.net/search?drama=${encodeURIComponent(q)}`,
+    goodshort: q => `https://www.goodshort.com/results?q=${encodeURIComponent(q)}`,
+    shortmax: q => `https://www.shorttv.live/search/${encodeURIComponent(q)}`,
+    dramabox: q => `https://www.dramabox.com/search?searchValue=${encodeURIComponent(q)}`
+  });
+
+  /** IMDb 条目属于哪个短剧平台（站点键）；不是 IMDb 条目、micro-drama 这类非平台榜、DramaWave 返回 null。 */
+  function imdbPlatformOf(drama) {
+    if (!drama || siteOfDrama(drama) !== 'imdb' || typeof drama.sourceListUrl !== 'string') return null;
+    let companies;
+    try {
+      companies = new URL(drama.sourceListUrl).searchParams.get('companies');
+    } catch (e) {
+      return null;
+    }
+    // companies 可以逗号多值，取第一个认得的；hasOwnProperty 挡住 constructor 这类原型链键
+    for (const id of String(companies || '').split(',')) {
+      const key = id.trim();
+      if (Object.prototype.hasOwnProperty.call(IMDB_COMPANY_SITES, key)) return IMDB_COMPANY_SITES[key];
+    }
+    return null;
+  }
+
+  /**
+   * 在平台上搜的关键词：去掉片名末尾的括号注释（IMDb 常把另一语种的片名括在后面，如
+   * 「A Marriage on Fire (Un Matrimonio al Rojo Vivo)」），去完为空就用原片名。
+   */
+  function platformSearchQuery(title) {
+    const raw = String(title || '').trim();
+    const stripped = raw.replace(/\s*[(（[【][^()（）[\]【】]*[)）\]】]\s*$/, '').trim();
+    return stripped || raw;
+  }
+
+  /** 平台站内搜索结果页地址；该平台网页端没有搜索页或片名为空时返回 null。 */
+  function platformSearchUrl(site, title) {
+    const query = platformSearchQuery(title);
+    const build = Object.prototype.hasOwnProperty.call(PLATFORM_SEARCH_PAGES, site) ? PLATFORM_SEARCH_PAGES[site] : null;
+    return build && query ? build(query) : null;
+  }
+
+  /**
+   * url 是否为该站点自己的 https 页面（点边界匹配，DramaBox 两个域名都算）。条目上记下的 playUrl
+   * 与从平台页面解析出的地址，打开 / 渲染前都过这一道，防串站与 javascript: 之类的异常值。
+   */
+  function isPlatformUrl(site, url) {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (e) {
+      return false;
+    }
+    if (parsed.protocol !== 'https:') return false;
+    return SITES.some(entry => entry.site === site && hostMatches(entry, parsed.hostname));
   }
 
   /**
@@ -168,7 +254,8 @@
 
   const api = {
     SITES, SITE_GROUPS, DEFAULT_GROUP, CATEGORY_SOURCES, SOURCE_NAMES,
-    groupOfSite, siteOfHostname, siteOfUrl, siteOfDrama, isInjectableUrl, contentScriptMatches
+    groupOfSite, siteOfHostname, siteOfUrl, siteOfDrama, isInjectableUrl, contentScriptMatches,
+    IMDB_COMPANY_SITES, PLATFORM_SEARCH_PAGES, imdbPlatformOf, platformSearchQuery, platformSearchUrl, isPlatformUrl
   };
 
   if (typeof module !== 'undefined' && module.exports) {

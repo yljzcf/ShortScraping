@@ -19,6 +19,8 @@
     onTranslate: null,
     onLarkPush: null,
     onOpenUrl: null,
+    // 封面菜单「搜 X」（v1.7.3）：(dramaId) => Promise，弹窗注入（交给后台查找并开页）；共享页不传
+    onOpenPlatform: null,
     assetsBase: '../../assets/icons'
   };
 
@@ -51,6 +53,139 @@
   function posterLinkUrl(drama) {
     const url = drama && drama.url;
     return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null;
+  }
+
+  /**
+   * 封面菜单的菜单项（v1.7.3）：只给已知平台的 IMDb 卡——IMDb 没有播放页，平台榜按出品公司能反查
+   * 平台（SiteRegistry.imdbPlatformOf）。返回 null＝不弹菜单，封面照旧直接打开原站。
+   * - 弹窗（传了 onOpenPlatform）：「搜 X」交给后台查，唯一同名直达播放页，多部 / 没搜到开搜索结果页；
+   * - 共享页（没有扩展后台，查不了）：「搜 X」打开条目上记下的播放页，没有就开平台搜索页，两者都没有不弹。
+   * 每项为 { label, url }（直接打开）或 { label, platform: true }（交给 onOpenPlatform）。
+   */
+  function posterMenuItems(drama, opts) {
+    const options = Object.assign({}, DEFAULT_OPTS, opts);
+    const registry = global.SiteRegistry;
+    const site = registry.imdbPlatformOf(drama);
+    const imdbUrl = posterLinkUrl(drama);
+    if (!site || !imdbUrl || typeof options.onOpenUrl !== 'function') return null;
+
+    const label = `搜 ${registry.SOURCE_NAMES[site] || site}`;
+    let platformItem = null;
+    if (typeof options.onOpenPlatform === 'function') {
+      platformItem = { label, platform: true };
+    } else {
+      const stored = typeof drama.playUrl === 'string' && registry.isPlatformUrl(site, drama.playUrl) ? drama.playUrl : null;
+      const url = stored || registry.platformSearchUrl(site, drama.title);
+      if (url) platformItem = { label, url };
+    }
+    if (!platformItem) return null;
+    return [{ label: `${registry.SOURCE_NAMES.imdb} 影片页`, url: imdbUrl }, platformItem];
+  }
+
+  // 同一时刻只开一个封面菜单。挂在 document.body 而不是卡片里：弹窗每次 storage.onChanged 都整树重建
+  // 卡片（抓取 / 翻译期间可能一秒一次），挂在卡里会被连带销毁。「搜 X」进行中的卡记在 platformBusy，
+  // 菜单关了再开、卡片重建后都保住「⏳」状态
+  let activePosterMenu = null;   // { menu, anchor, dramaId, cleanup }
+  const platformBusy = new Set();
+
+  const platformBusyLabel = label => `⏳ 正在${label}…`;
+
+  function closePosterMenu() {
+    if (!activePosterMenu) return;
+    const { menu, cleanup } = activePosterMenu;
+    activePosterMenu = null;
+    cleanup();
+    menu.remove();
+  }
+
+  function openPosterMenu(anchor, event, drama, items, options) {
+    const doc = anchor.ownerDocument;
+    const view = doc.defaultView || global;
+    const menu = doc.createElement('div');
+    menu.className = 'poster-menu';
+    menu.setAttribute('role', 'menu');
+
+    for (const item of items) {
+      const button = doc.createElement('button');
+      button.type = 'button';
+      button.className = 'poster-menu-item';
+      button.setAttribute('role', 'menuitem');
+      const busy = Boolean(item.platform) && platformBusy.has(drama.id);
+      button.textContent = busy ? platformBusyLabel(item.label) : item.label;
+      button.disabled = busy;
+      button.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!item.platform) {
+          closePosterMenu();
+          options.onOpenUrl(item.url, drama);
+          return;
+        }
+        if (platformBusy.has(drama.id)) return;
+        platformBusy.add(drama.id);
+        button.textContent = platformBusyLabel(item.label);
+        button.disabled = true;
+        // 查找要一两秒：菜单留着显示进度；结束后收起（找到时后台已开页，没找到时调用方已提示）
+        Promise.resolve()
+          .then(() => options.onOpenPlatform(drama.id))
+          .catch(() => {})
+          .finally(() => {
+            platformBusy.delete(drama.id);
+            if (activePosterMenu && activePosterMenu.dramaId === drama.id) closePosterMenu();
+          });
+      });
+      menu.appendChild(button);
+    }
+    doc.body.appendChild(menu);
+
+    // 贴着点击处展开，放不下就往左 / 往上翻，最后夹进视口（留 4px）；没有点击坐标时贴封面右上角
+    const rect = anchor.getBoundingClientRect();
+    const x = event && event.clientX > 0 ? event.clientX : rect.right;
+    const y = event && event.clientY > 0 ? event.clientY : rect.top;
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    let left = x + 4;
+    let top = y + 4;
+    if (left + width > view.innerWidth - 4) left = x - width - 4;
+    if (top + height > view.innerHeight - 4) top = y - height - 4;
+    menu.style.left = `${Math.max(4, Math.min(left, view.innerWidth - width - 4))}px`;
+    menu.style.top = `${Math.max(4, Math.min(top, view.innerHeight - height - 4))}px`;
+
+    // 点外面 / Esc / 滚轮 / 触摸滑动 / 窗口失焦或缩放即收起。刻意不听 scroll：弹窗重渲染后 restoreScroll
+    // 以程序方式设 scrollTop，同样派发 scroll，听了菜单会被每次重渲染关掉
+    const onPointerDown = (e) => {
+      if (menu.contains(e.target) || e.target === anchor) return;   // 点同一张封面交给它的 click 收起
+      closePosterMenu();
+    };
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') closePosterMenu();
+    };
+    const dismiss = () => closePosterMenu();
+    doc.addEventListener('pointerdown', onPointerDown, true);
+    doc.addEventListener('keydown', onKeyDown, true);
+    doc.addEventListener('wheel', dismiss, { capture: true, passive: true });
+    doc.addEventListener('touchmove', dismiss, { capture: true, passive: true });
+    view.addEventListener('blur', dismiss);
+    view.addEventListener('resize', dismiss);
+    activePosterMenu = {
+      menu,
+      anchor,
+      dramaId: drama.id,
+      cleanup() {
+        doc.removeEventListener('pointerdown', onPointerDown, true);
+        doc.removeEventListener('keydown', onKeyDown, true);
+        doc.removeEventListener('wheel', dismiss, { capture: true });
+        doc.removeEventListener('touchmove', dismiss, { capture: true });
+        view.removeEventListener('blur', dismiss);
+        view.removeEventListener('resize', dismiss);
+      }
+    };
+  }
+
+  // 再点同一张封面＝收起；点另一张＝换成那张的菜单
+  function togglePosterMenu(anchor, event, drama, items, options) {
+    const sameCard = Boolean(activePosterMenu) && activePosterMenu.anchor === anchor;
+    closePosterMenu();
+    if (!sameCard) openPosterMenu(anchor, event, drama, items, options);
   }
 
   /**
@@ -272,14 +407,17 @@
       else posterImg.addEventListener('load', applyOrientation);
 
       // 封面点击打开原站页面：打开动作由调用方注入（弹窗 chrome.tabs.create、
-      // 共享页 window.open），与 readOnly 无关——只读共享页同样可跳转
+      // 共享页 window.open），与 readOnly 无关——只读共享页同样可跳转。
+      // 已知平台的 IMDb 卡改为弹菜单「IMDB 影片页 / 搜 X」（v1.7.3，见 posterMenuItems）
       const linkUrl = posterLinkUrl(drama);
       if (linkUrl && typeof options.onOpenUrl === 'function') {
+        const menuItems = posterMenuItems(drama, options);
         posterImg.classList.add('poster-link');
-        posterImg.title = '点击打开原站页面';
+        posterImg.title = menuItems ? `点击选择：${menuItems.map(item => item.label).join(' / ')}` : '点击打开原站页面';
         posterImg.addEventListener('click', (e) => {
           e.stopPropagation();
-          options.onOpenUrl(linkUrl, drama);
+          if (menuItems) togglePosterMenu(posterImg, e, drama, menuItems, options);
+          else options.onOpenUrl(linkUrl, drama);
         });
       }
     }
@@ -453,6 +591,8 @@
     adjustCardDescription,
     getDisplayTags,
     getDisplayGenres,
+    posterMenuItems,
+    closePosterMenu,
     formatTime,
     formatRelativeTime,
     escapeHtml,

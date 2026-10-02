@@ -11,6 +11,7 @@ importScripts('../shared/timeline-csv.js');
 importScripts('../shared/schedule-config.js'); // cron 解析/校验/默认值单一真源
 importScripts('../shared/translate-config.js');
 importScripts('../shared/fetch-util.js'); // 带期限的 fetch（期限连正文），须先于 translator.js / lark.js
+importScripts('../shared/platform-link.js'); // IMDb 条目「搜平台」的解析与判定（v1.7.3），须在 site-registry / scrape-rules 之后
 importScripts('../shared/translator.js');
 importScripts('../shared/lark.js');
 
@@ -2552,9 +2553,11 @@ function saveDramaRecord(drama) {
     // savedAt＝入库时刻，只在这里（新卡首次入库）写，库里已有的卡不动、导入恢复也不写：
     // 多维表格增量导出按 savedAt || scrapedAt 比水位线（Lark.exportStamp）。scrapedAt 是内容
     // 脚本提取列表时定的，要等详情补抓完才入库，复制恰好落在这几秒里的卡会被水位线永久挡掉。
-    // 调用方传来的 savedAt 一律覆盖（内容脚本不写该字段，不信任外来值）
+    // 调用方传来的 savedAt 一律覆盖（内容脚本不写该字段，不信任外来值）。playUrl 同理丢弃：它只由后台
+    // 在平台上查到唯一同名剧后写（rememberPlayUrl），被攻破的页面不能借入库给卡片塞跳转地址
     const savedAt = new Date().toISOString();
-    await writeDramasInQueue([{ ...drama, savedAt }, ...existing], { lastScrape: savedAt });
+    const { playUrl: _untrustedPlayUrl, ...fields } = drama;
+    await writeDramasInQueue([{ ...fields, savedAt }, ...existing], { lastScrape: savedAt });
     return true;
   });
 }
@@ -3366,8 +3369,9 @@ async function processBotRetryQueueOnce() {
       let next = null;   // 卡已被「按条件清理」删掉 → 摘掉，不白发请求
       if (drama) {
         try {
+          const platformLink = await botPlatformLink(drama, dramas);
           await throttleBotPush();
-          await Lark.pushBotCard(config, drama);
+          await Lark.pushBotCard(config, drama, { platformLink });
           console.log(`[ShortScraping] 群机器人重试成功: ${drama.titleZh || drama.title}`);
         } catch (e) {
           const attempts = (Number(entry.attempts) || 1) + 1;
@@ -3409,8 +3413,10 @@ async function maybeBotPush(drama) {
     if (isBeforeUrlBaseline(drama, state)) return false;
 
     try {
+      // IMDb 平台卡在「去瞅瞅」左边加「搜 X」（v1.7.3）；解析不抛错，查不出就不带按钮照常推
+      const platformLink = await botPlatformLink(drama);
       await throttleBotPush();
-      await Lark.pushBotCard(config, drama);
+      await Lark.pushBotCard(config, drama, { platformLink });
     } catch (e) {
       console.warn('[ShortScraping] 群机器人推送失败（不影响入库）:', e.message);
       if (drama.id) await enqueueBotRetry(drama.id, 1);
@@ -3515,12 +3521,172 @@ async function handleLarkBotTestSend(draftConfig) {
   const drama = dramas[0] || SAMPLE_LARK_DRAMA;
 
   try {
-    await Lark.pushBotCard(config, drama);
+    // 与真实推送同口径：最新一条是已知平台的 IMDb 卡时带「搜 X」按钮，便于在群里核对双按钮排版
+    await Lark.pushBotCard(config, drama, { platformLink: await botPlatformLink(drama, dramas) });
     console.log(`[ShortScraping] 群机器人测试发送成功: ${drama.title}`);
     return { success: true, sampleTitle: drama.titleZh || drama.title };
   } catch (e) {
     console.warn('[ShortScraping] 群机器人测试发送失败:', e.message);
     return { success: false, error: e.message };
+  }
+}
+
+// —— IMDb 条目「搜平台」（v1.7.3）：弹窗封面菜单与飞书卡片「搜 X」按钮共用的查找 ——
+// IMDb 只是片目库、没有播放页；平台由 SiteRegistry.imdbPlatformOf 按出品公司反查，在平台上怎么找、
+// 怎么判定唯一同名见 src/shared/platform-link.js。这里只管取数（带期限、不带 cookie、固定英文）、
+// 结果缓存、唯一播放页回写 playUrl，以及弹窗点击后开标签页。
+// 联网范围（2026-09-28 用户定）：弹窗点击与推送都查；GoodShort / DramaBox 的 robots.txt 不允许程序访问
+// 搜索页，用户知情后选择推送时也自动查（量约每天几次到十几次，被拦时退回搜索页链接）。
+// ShortMax（搜一次约 15 秒且常搜不到）与 NetShort（网页端只有加密接口）从不联网，只查库内同名卡。
+
+// 单次取数期限（连正文）：弹窗里用户等着看结果，给 12 秒；推送链路在翻译线里是 await 的，
+// 查不出也要尽快把卡推出去，6 秒即退回搜索页链接
+const PLATFORM_LOOKUP_TIMEOUT_MS = Object.freeze({ click: 12000, push: 6000 });
+// 候选缓存：按请求地址存解析结果（失败不存）。站点地图是整站片单，30 分钟内复用；搜索页 10 分钟
+// （推送失败重试、弹窗连点不重复请求）。在飞的请求共享同一个 promise
+const PLATFORM_CACHE_TTL_MS = Object.freeze({ sitemap: 30 * 60 * 1000, search: 10 * 60 * 1000 });
+const PLATFORM_CACHE_LIMIT = 50;
+const platformCandidateCache = new Map();   // 请求地址 → { at, ttl, promise }
+const platformOpenInFlight = new Map();     // dramaId → 打开流程的 promise（弹窗连点单飞）
+
+/** 平台上的候选 [{ key, url }]；该平台不联网（ShortMax / NetShort）返回 null。失败抛错。 */
+function platformCandidates(site, title, mode) {
+  const spec = PlatformLink.lookupOf(site);
+  if (!spec) return Promise.resolve(null);
+  const url = spec.kind === 'sitemap' ? spec.url : SiteRegistry.platformSearchUrl(site, title);
+  if (!url) return Promise.resolve([]);
+  const cached = platformCandidateCache.get(url);
+  if (cached && Date.now() - cached.at < cached.ttl) return cached.promise;
+
+  const promise = (async () => {
+    const response = await FetchUtil.fetchWithDeadline(url, {
+      // 不带 cookie（SW fetch 本就不带，写明）；固定英文：浏览器的 zh-CN 可能换来本地化片名，与 IMDb 英文名对不上
+      credentials: 'omit',
+      headers: {
+        'Accept': spec.kind === 'sitemap' ? 'application/xml,text/xml;q=0.9,*/*;q=0.8' : 'text/html',
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    }, { timeoutMs: PLATFORM_LOOKUP_TIMEOUT_MS[mode] || PLATFORM_LOOKUP_TIMEOUT_MS.click });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const candidates = spec.parse(await response.text());
+    if (!candidates) throw new Error('页面不是预期的格式（可能被拦截或站点改版）');
+    if (spec.kind === 'sitemap' && !candidates.length) throw new Error('站点地图里没有剧集条目');
+    return candidates;
+  })();
+  platformCandidateCache.set(url, { at: Date.now(), ttl: PLATFORM_CACHE_TTL_MS[spec.kind], promise });
+  promise.catch(() => {
+    if (platformCandidateCache.get(url)?.promise === promise) platformCandidateCache.delete(url);
+  });
+  while (platformCandidateCache.size > PLATFORM_CACHE_LIMIT) {
+    platformCandidateCache.delete(platformCandidateCache.keys().next().value);
+  }
+  return promise;
+}
+
+/**
+ * 一部 IMDb 条目在其平台上的去处：{ site, name, kind: 'play' | 'search' | 'none', url, reason }。
+ * 平台未知（非 IMDb、micro-drama 这类非平台榜、DramaWave）返回 null。不抛错，按规则降级：
+ * 唯一同名 → play；多部同名 / 没搜到 / 查找失败 → 有搜索页给 search，没有给 none。
+ * reason：play 为 'stored'（条目上记下的）| 'found'（本次查到，调用方负责 rememberPlayUrl）；
+ * 其余为 'ambiguous' | 'none' | 'error'，弹窗据此给提示。
+ */
+async function resolvePlatformLink(drama, { mode = 'click' } = {}) {
+  const site = SiteRegistry.imdbPlatformOf(drama);
+  if (!site) return null;
+  const name = SiteRegistry.SOURCE_NAMES[site] || site;
+  const isValid = url => SiteRegistry.isPlatformUrl(site, url);
+  if (typeof drama.playUrl === 'string' && isValid(drama.playUrl)) {
+    return { site, name, kind: 'play', url: drama.playUrl, reason: 'stored' };
+  }
+
+  let verdict;
+  try {
+    const fetched = await platformCandidates(site, drama.title, mode);
+    const candidates = fetched || PlatformLink.localCandidates(site, await getDramasSnapshot(), isValid);
+    verdict = PlatformLink.decide(drama.title, candidates, isValid);
+  } catch (e) {
+    console.warn(`[ShortScraping] ${name} 上查找失败（按没找到处理）: ${drama.title} - ${e?.message || e}`);
+    verdict = { kind: 'error' };
+  }
+  if (verdict.kind === 'play') return { site, name, kind: 'play', url: verdict.url, reason: 'found' };
+
+  const searchUrl = SiteRegistry.platformSearchUrl(site, drama.title);
+  return searchUrl
+    ? { site, name, kind: 'search', url: searchUrl, reason: verdict.kind }
+    : { site, name, kind: 'none', url: null, reason: verdict.kind };
+}
+
+/**
+ * 唯一同名剧的播放页记到条目上（playUrl）：之后弹窗、共享页、推送重试直接用，不再搜。
+ * 只读护栏下（本地数据已被更新版本升级）静默跳过；卡已被删 / 值没变不写；任何失败只记日志。
+ */
+async function rememberPlayUrl(dramaId, url) {
+  if (!dramaId || typeof url !== 'string' || !url) return;
+  try {
+    await enqueueDramaWrite('记下平台播放页', async () => {
+      const current = await getDramasInQueue();
+      if (dramasLayoutAhead) return;
+      const index = current.findIndex(d => d.id === dramaId);
+      if (index === -1 || current[index].playUrl === url) return;
+      const next = current.slice();   // copy-on-write：队列缓存数组只读
+      next[index] = { ...current[index], playUrl: url };
+      await writeDramasInQueue(next);
+    });
+  } catch (e) {
+    console.warn('[ShortScraping] 平台播放页回写失败（不影响跳转）:', e?.message || e);
+  }
+}
+
+/**
+ * 弹窗封面菜单「搜 X」：解析去处并由后台开标签页——弹窗一失焦就关，靠它自己开会丢。
+ * 同一张卡连点单飞：第二次点击等第一次的结果，不重复搜、不重复开页。
+ */
+function handleOpenPlatformPage(dramaId) {
+  const pending = platformOpenInFlight.get(dramaId);
+  if (pending) return pending;
+  const run = openPlatformPageOnce(dramaId).finally(() => platformOpenInFlight.delete(dramaId));
+  platformOpenInFlight.set(dramaId, run);
+  return run;
+}
+
+async function openPlatformPageOnce(dramaId) {
+  const drama = (await getDramasSnapshot()).find(d => d.id === dramaId);
+  if (!drama) return { success: false, error: '未找到该卡片数据' };
+  // 最长等一次取数期限（12 秒），期间保活（同单卡翻译）
+  const stopKeepAlive = startSwKeepAlive();
+  try {
+    const link = await resolvePlatformLink(drama, { mode: 'click' });
+    if (!link) return { success: false, error: '这张卡片不属于已知的短剧平台' };
+    if (!link.url) {
+      return { success: false, notFound: true, name: link.name, title: drama.title, reason: link.reason };
+    }
+    await chrome.tabs.create({ url: link.url });
+    // 先开页再回写，用户不用等这一次整表写
+    if (link.reason === 'found') await rememberPlayUrl(drama.id, link.url);
+    return { success: true, kind: link.kind, url: link.url, name: link.name };
+  } finally {
+    stopKeepAlive();
+  }
+}
+
+/**
+ * 飞书卡片「搜 X」按钮（推送时定）：唯一同名 → 播放页，多部 / 没搜到 → 搜索结果页，网页端没有
+ * 搜索页的平台没找到时不加按钮。按库里那条的最新状态解析（入库消息带来的对象不可信，也可能缺刚
+ * 回写的 playUrl）。任何异常都吞掉返回 null——按钮是锦上添花，绝不能影响推送。
+ */
+async function botPlatformLink(drama, dramas = null) {
+  try {
+    if (!drama || !SiteRegistry.imdbPlatformOf(drama)) return null;
+    const table = Array.isArray(dramas) ? dramas : await getDramasSnapshot();
+    const stored = table.find(d => d.id === drama.id);
+    const target = stored || { ...drama, playUrl: undefined };
+    const link = await resolvePlatformLink(target, { mode: 'push' });
+    if (!link || !link.url) return null;
+    if (link.reason === 'found') await rememberPlayUrl(target.id, link.url);
+    return { name: link.name, url: link.url };
+  } catch (e) {
+    console.warn('[ShortScraping] 飞书「搜平台」按钮解析失败（照常推送）:', e?.message || e);
+    return null;
   }
 }
 
@@ -3791,6 +3957,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'larkPush') {
     handleLarkPush(request.dramaId).then(sendResponse).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'openPlatformPage') {
+    // 弹窗封面菜单「搜 X」（v1.7.3）：只接受扩展页面（不在 CONTENT_SCRIPT_ACTIONS 里，上面的闸门已拦）
+    handleOpenPlatformPage(request.dramaId).then(sendResponse).catch((error) => {
       sendResponse({ success: false, error: error.message });
     });
     return true;

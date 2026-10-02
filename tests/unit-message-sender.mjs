@@ -73,6 +73,8 @@ const PRIVILEGED = [
   { action: 'triggerScrape' },
   { action: 'triggerTranslate' },
   { action: 'translateSingle', dramaId: 'id_tt1' },
+  // v1.7.3 封面菜单「搜 X」：会让后台联网查平台并开标签页，只许弹窗发
+  { action: 'openPlatformPage', dramaId: 'id_tt1' },
   { action: 'updateAlarms', force: true },
   { action: 'warmupCsvSync' },
   { action: 'getTranslateState' },
