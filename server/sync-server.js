@@ -31,6 +31,18 @@ const ScheduleConfig = require('../src/shared/schedule-config.js');
 const TranslateConfig = require('../src/shared/translate-config.js');
 const SiteRegistry = require('../src/shared/site-registry.js');
 
+// 每行日志带本地时间（v1.7.4）：launchd 与 🔄 接替实例都把 stdout / stderr 追加进同一份 sync.log，
+// 以前没有时间戳，重启、骤降告警是什么时候发生的、谁先谁后都看不出来。只加前缀，原有文案不变
+function logTimestamp(date = new Date()) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+for (const level of ['log', 'info', 'warn', 'error']) {
+  const write = console[level].bind(console);
+  console[level] = (...args) => write(`[${logTimestamp()}]`, ...args);
+}
+
 const DEFAULT_PORT = 31919;
 // 专用变量名而不是通用的 PORT：开发者在 ~/.zshrc / direnv / Windows 用户变量里给别的项目设的 PORT
 // 会被静默继承，服务跑到扩展连不上的端口，stop / restart 也跟着去找错端口（与 stop.js 同一口径）

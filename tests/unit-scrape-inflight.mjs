@@ -202,12 +202,15 @@ const check = (name, pass, detail = '') => results.push({ name, pass, detail });
 }
 
 // ---------- T8 应答形态（v1.7.0 审查 M2）：只回条数与两个判定，不再跨进程克隆整批卡片 ----------
+// v1.7.4 起另带本页事实 pageUrl（实际地址）与 httpStatus（导航计时取得到时才有），都是标量
 {
   rawStore.dramas = [];
   const r = await sendScrape();
-  check('T8 应答只有 { success, newCount, subscribed, listCount }，不再带 data',
-    JSON.stringify(Object.keys(r || {}).sort()) === JSON.stringify(['listCount', 'newCount', 'subscribed', 'success'])
-      && r.subscribed === true && r.listCount === 4 && r.newCount === 4, JSON.stringify(r));
+  const keys = Object.keys(r || {}).sort();
+  const allowed = ['httpStatus', 'listCount', 'newCount', 'pageUrl', 'subscribed', 'success'];
+  check('T8 应答只有 { success, newCount, subscribed, listCount } 与本页事实 pageUrl / httpStatus，不再带 data',
+    keys.every(key => allowed.includes(key)) && ['listCount', 'newCount', 'subscribed', 'success'].every(key => keys.includes(key))
+      && r.subscribed === true && r.listCount === 4 && r.newCount === 4 && r.pageUrl === LIST_URL, JSON.stringify(r));
 }
 
 // ---------- T9 页面上一条列表都没找到（站点改版 / 没加载完整）：listCount=0，按钮明说 ----------

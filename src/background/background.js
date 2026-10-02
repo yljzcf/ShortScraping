@@ -328,6 +328,47 @@ function restrictStorageToTrustedContexts() {
 restrictStorageToTrustedContexts();
 
 /**
+ * 固定英文页（v1.7.4，用户 2026-10-02 定：要英文 / 美国页面，不要中文、日文）：SiteRegistry.FORCE_ENGLISH_DOMAINS
+ * （My Drama）的页面与接口请求一律带英文 accept-language。中文偏好的浏览器打开订阅页会被站点 307 到 /zh，
+ * 订阅匹配与适配器只认 /，整条订阅每轮抓 0 条。动态规则跨浏览器重启保留；每次 SW 启动按同一 id 先删后加
+ * （幂等，域名清单改了也随之更新）。权限是 declarativeNetRequestWithHostAccess：不弹安装提示，作用范围受
+ * host_permissions 约束。API 不可用（没重新加载扩展、manifest 缺权限）或调用失败只记日志，不挡初始化。
+ */
+const FORCE_ENGLISH_RULE_ID = 1;
+
+function forceEnglishRule() {
+  return {
+    id: FORCE_ENGLISH_RULE_ID,
+    priority: 1,
+    action: {
+      type: 'modifyHeaders',
+      requestHeaders: [{ header: 'accept-language', operation: 'set', value: SiteRegistry.FORCE_ENGLISH_ACCEPT_LANGUAGE }]
+    },
+    // requestDomains 连子域一起匹配；xmlhttprequest 同时覆盖 XHR 与 fetch
+    condition: {
+      requestDomains: [...SiteRegistry.FORCE_ENGLISH_DOMAINS],
+      resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest']
+    }
+  };
+}
+
+function installForceEnglishRule() {
+  const warn = e => console.warn('[ShortScraping] 固定英文页规则未生效（My Drama 可能被跳到 /zh 语言版）:', e?.message || e);
+  try {
+    const dnr = chrome.declarativeNetRequest;
+    if (!dnr || typeof dnr.updateDynamicRules !== 'function') {
+      warn(new Error('declarativeNetRequest 不可用（扩展未重新加载或 manifest 缺权限）'));
+      return;
+    }
+    const pending = dnr.updateDynamicRules({ removeRuleIds: [FORCE_ENGLISH_RULE_ID], addRules: [forceEnglishRule()] });
+    if (pending && typeof pending.catch === 'function') pending.catch(warn);
+  } catch (e) {
+    warn(e);
+  }
+}
+installForceEnglishRule();
+
+/**
  * 初始化：service worker 每次启动（含为分发 onInstalled / onStartup 而启动的那一次）在顶层
  * 恢复一次配置并装定时任务，确保 JSON 是配置源（configAheadOfFile 标记的项例外：本地领先于
  * 文件，改为推回文件，见 loadConfigFromJsonFiles）。两个监听器不再各跑一遍 load + setup：
@@ -878,13 +919,18 @@ async function performScrapeOnce({ site = null } = {}, progress = null) {
         if (response?.success) {
           const newCount = Number.isFinite(response.newCount) ? response.newCount : 0;
           const warning = scrapeWarningOf(response);
+          const detail = warning ? scrapeWarningDetail(warning, response, openUrl) : '';
           totalNewCount += newCount;
-          results.push(warning ? { url, success: true, newCount, warning } : { url, success: true, newCount });
+          if (!warning) results.push({ url, success: true, newCount });
+          else results.push(detail ? { url, success: true, newCount, warning, detail } : { url, success: true, newCount, warning });
           const opened = openUrl !== url ? `（打开 ${openUrl}）` : '';
-          if (warning) console.warn(`[ShortScraping] 抓取完成但一条都没拿到（${SCRAPE_WARNING_TEXT[warning]}）: ${url}${opened}`);
+          if (warning) console.warn(`[ShortScraping] 抓取完成但一条都没拿到（${SCRAPE_WARNING_TEXT[warning]}${detail ? `；${detail}` : ''}）: ${url}${opened}`);
           else console.log(`[ShortScraping] 抓取完成: ${url}${opened}，新增 ${newCount} 部`);
         } else {
-          results.push({ url, success: false, error: response?.error || '未知错误' });
+          // 单条订阅抓失败（标签页超时、消息发不出去等）：以前定时轮里只进 results、日志也不打，事后无从查起（v1.7.4）
+          const error = response?.error || '未知错误';
+          results.push({ url, success: false, error });
+          console.warn(`[ShortScraping] 抓取 URL 失败: ${url} - ${error}`);
         }
       } catch (e) {
         results.push({ url, success: false, error: e.message });
@@ -946,18 +992,35 @@ async function performScrapeOnce({ site = null } = {}, progress = null) {
  * 「抓到 0 条」告警（v1.7.0 审查 M2）：scrape 应答成功，却是打开的页面不在订阅里（跳转了）或页面上一条列表项
  * 都没找到（站点改版 / 页面没加载完整）。以前都记成「成功、新增 0」，某条订阅可能就此静默停摆，弹窗还一直显示
  * 「抓取于几分钟前 / 本次刷新无新增内容」。这里不算失败（lastScrape 照常刷新），另记 storage.lastScrapeWarnings
- * = { at, items: [{ url, kind }] }（没有告警为 null），与 lastScrape 同一次 set，弹窗底栏据此提示。
+ * = { at, items: [{ url, kind, detail? }] }（没有告警为 null），与 lastScrape 同一次 set，弹窗底栏据此提示。
  * 应答缺这两个字段（旧桩 / 其它来源）不告警。
+ *
+ * v1.7.4 细分两种（2026-10-02 体检：DramaBox 被 CloudFront 403 拦了两周，告警却一直说「可能站点改版」）：
+ *   - blocked：本来就要告警（不在订阅里 / 没找到列表），且内容脚本报的文档 HTTP 状态是 4xx / 5xx——拦截页
+ *     照样注入内容脚本、页面上自然没有列表，多半是网络或地区被拦。页面回了 4xx 却照样找到了列表（SPA 软路由）
+ *     不算异常；
+ *   - failed：这条订阅本轮抓失败（标签页超时、消息发不出去等），见 nextScrapeWarnings。
+ * detail：blocked 带「HTTP 状态码」，unsubscribed 带实际打开的地址（与打开的地址不同时，即跳转去了哪），failed 带错误原因。
  */
 const SCRAPE_WARNING_TEXT = {
   unsubscribed: '打开后的页面不在订阅里，可能跳转了',
-  empty: '页面上没找到列表项，可能站点改版或页面未加载完整'
+  empty: '页面上没找到列表项，可能站点改版或页面未加载完整',
+  blocked: '站点拒绝访问，多为网络或地区拦截'
 };
 
 function scrapeWarningOf(response) {
-  if (response?.subscribed === false) return 'unsubscribed';
-  if (response?.listCount === 0) return 'empty';
-  return null;
+  let kind = null;
+  if (response?.subscribed === false) kind = 'unsubscribed';
+  else if (response?.listCount === 0) kind = 'empty';
+  if (kind && Number(response?.httpStatus) >= 400) kind = 'blocked';
+  return kind;
+}
+
+function scrapeWarningDetail(kind, response, openUrl) {
+  if (kind === 'blocked') return `HTTP ${Number(response.httpStatus)}`;
+  const pageUrl = response?.pageUrl;
+  if (kind === 'unsubscribed' && typeof pageUrl === 'string' && pageUrl && pageUrl !== openUrl) return `实际打开 ${pageUrl}`;
+  return '';
 }
 
 /**
@@ -970,22 +1033,24 @@ function isRealScrape(result) {
 
 /**
  * 本轮收尾后的告警清单（按尾斜杠归一的订阅 URL 对齐）：
- *   - 本轮抓成的 URL 以本轮结果为准（有告警记上、没有就摘掉）；
- *   - 本轮抓失败的 URL 保留旧告警（失败没证明它恢复了）；
+ *   - 本轮有结果的 URL 以本轮为准：抓成的有告警记上、没有就摘掉；抓失败的记 failed（带错误原因）、取代旧告警
+ *     ——v1.7.4 前抓失败保留旧告警，定时轮里单条订阅的失败就此无处可查；
  *   - 不在本轮清单里的：单站刷新（partial）保留别站的，全量轮丢掉（已退订或不再抓）。
+ * 整轮全失败不走这里（另记 lastScrapeFailure，告警原样）。
  */
 async function nextScrapeWarnings(results, scrapeUrls, { partial, at }) {
   const { lastScrapeWarnings: previous } = await chrome.storage.local.get('lastScrapeWarnings');
   const key = url => UrlMatch.normalizeListUrl(url);
   const roundKeys = new Set(scrapeUrls.map(key));
-  const succeeded = new Set(results.filter(r => r.success).map(r => key(r.url)));
+  const reported = new Set(results.map(r => key(r.url)));
   const items = [];
   for (const item of Array.isArray(previous?.items) ? previous.items : []) {
-    if (!item || !item.url || succeeded.has(key(item.url))) continue;
+    if (!item || !item.url || reported.has(key(item.url))) continue;
     if (roundKeys.has(key(item.url)) || partial) items.push(item);
   }
   for (const r of results) {
-    if (r.success && r.warning) items.push({ url: r.url, kind: r.warning });
+    if (!r.success) items.push({ url: r.url, kind: 'failed', detail: String(r.error || '未知错误') });
+    else if (r.warning) items.push(r.detail ? { url: r.url, kind: r.warning, detail: r.detail } : { url: r.url, kind: r.warning });
   }
   return items.length ? { at, items } : null;
 }
@@ -3707,8 +3772,9 @@ async function botPlatformLink(drama, dramas = null) {
  */
 const DETAIL_HTML_PROXY_RULES = [
   {
+    // 固定英文（v1.7.4）：中文偏好下播放页的 og:description 是空的，见 SiteRegistry.FORCE_ENGLISH_DOMAINS
     pattern: /^https:\/\/my-drama\.com\/video\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-    headers: { 'Accept': 'text/html' }
+    headers: { 'Accept': 'text/html', 'Accept-Language': SiteRegistry.FORCE_ENGLISH_ACCEPT_LANGUAGE }
   },
   {
     pattern: /^https:\/\/www\.netflix\.com\/title\/\d{5,}$/,

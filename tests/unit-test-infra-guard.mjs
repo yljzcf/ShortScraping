@@ -7,7 +7,7 @@
 //     白名单只能是最初名单的子集：往里加新名字须同时改两处，一眼就能看出是在放宽棘轮。
 //   I 组：storage-stub 的 Chromium 口径（get 各形态、克隆、onChanged 只派发真正变化的键、钩子、计数）。
 //   F 组：background-fixture 的新选项（manual 计时器、translator 注入、send、scripting 桩、
-//        resetDramasCache）与缺省行为。
+//        resetDramasCache、dnr 桩）与缺省行为。
 // 用法：node tests/unit-test-infra-guard.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -256,6 +256,15 @@ const outside = (list, allow) => list.filter(name => !allow.includes(name));
   const reseeded = await queueRead();
   check('F5a 只改 storage 时队列读仍命中缓存；resetDramasCache 后重读 storage', stale === 0 && fresh === 1, JSON.stringify({ stale, fresh }));
   check('F5b bg.seedDramas 改表并连带让缓存失效', reseeded === 3 && bg.dramas().length === 3, JSON.stringify({ reseeded }));
+}
+{
+  const plain = await background();
+  const stubbed = await background({ dnr: true });
+  let duplicate = null;
+  await stubbed.run('chrome.declarativeNetRequest.updateDynamicRules({ addRules: [{ id: 1 }] })').catch(e => { duplicate = e.message; });
+  check('F6a 缺省不提供 chrome.declarativeNetRequest（历来如此）', plain.run('typeof chrome.declarativeNetRequest') === 'undefined');
+  check('F6b dnr:true 的桩与 Chrome 同口径：规则存进 bg.dnr.rules，加重复 id 会 reject',
+    stubbed.dnr.rules.size === 1 && typeof duplicate === 'string' && duplicate.includes('unique'), JSON.stringify({ size: stubbed.dnr.rules.size, duplicate }));
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

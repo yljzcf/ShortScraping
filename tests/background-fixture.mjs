@@ -93,15 +93,33 @@ export function createManualTimers(clock, { limit = 10000 } = {}) {
 //            后台调用时解析到它。事后也可直接改 bg.context.Translator。
 //   storage  透传给 createChromeStorage 的选项（如 { tick: 1 }、{ dispatchChanges: true }）；
 //            log 固定是 bg.log，onChanged 缺省不派发（历来如此，测试自己调 bg.listeners.changed）。
+//   dnr      chrome.declarativeNetRequest 桩（v1.7.4 固定英文页规则）：true 时动态规则存进 bg.dnr.rules（id → 规则），
+//            每次 updateDynamicRules 的参数记进 bg.dnr.calls；与 Chrome 一样，加一条 id 已存在的规则会 reject。
+//            'reject' 时 updateDynamicRules 一律 reject。缺省不提供这个 API（历来如此，后台按「不可用」处理）。
 // log 按发生顺序记 fetch / storage.set（落盘时）/ storage.remove / alarms.create / tabs.create，供断言先后与次数。
 export async function background({
   data: seed = {}, dramas = [], settle = true, fetch: fetchOverride = null,
-  timers = 'noop', translator = null, storage: storageOpts = {}
+  timers = 'noop', translator = null, storage: storageOpts = {}, dnr: dnrMode = false
 } = {}) {
   const alarms = new Map();
   const listeners = {};
   const log = [];
   const injected = [];
+  const dnr = { rules: new Map(), calls: [] };
+  const declarativeNetRequest = {
+    async updateDynamicRules(options = {}) {
+      dnr.calls.push(structuredClone(options));
+      if (dnrMode === 'reject') throw new Error('fixture: updateDynamicRules rejected');
+      const next = new Map(dnr.rules);
+      for (const id of options.removeRuleIds || []) next.delete(id);
+      for (const rule of options.addRules || []) {
+        if (next.has(rule.id)) throw new Error(`Rule with id ${rule.id} does not have a unique ID.`);
+        next.set(rule.id, structuredClone(rule));
+      }
+      dnr.rules = next;
+    },
+    async getDynamicRules() { return [...dnr.rules.values()].map(rule => structuredClone(rule)); }
+  };
   const store = createChromeStorage({}, { dispatchChanges: false, ...storageOpts, log });
   store.seedDramas(dramas);
   store.seed({ urlTags: [{ urlPattern: SUB, tags: ['IMDB'] }], rsEpisodeUrlMigrated: true, legacyDramaMigrated: true, ...seed });
@@ -141,7 +159,8 @@ export async function background({
       },
       tabs: { create(info) { log.push(`tab:${info?.url}`); }, onUpdated: { addListener() {}, removeListener() {} } }, notifications: { create() {} },
       // 兜底注入的替身：记下每次调用的参数（bg.injected），不真注入；要模拟注入效果的套件自己整个替换
-      scripting: { async executeScript(options) { injected.push(options); return []; } }
+      scripting: { async executeScript(options) { injected.push(options); return []; } },
+      ...(dnrMode ? { declarativeNetRequest } : {})
     },
     fetch: async (url, options) => {
       log.push(`fetch:${url}`);
@@ -159,7 +178,7 @@ export async function background({
   vm.runInContext(fs.readFileSync(path.join(root, 'src/background/background.js'), 'utf8'), context);
   const run = code => vm.runInContext(code, context);
   const bg = {
-    context, data, alarms, listeners, log, storage: store, injected, timers: manual,
+    context, data, alarms, listeners, log, storage: store, injected, timers: manual, dnr,
     setTime: value => { now = value; }, run, flush,
     /** 当前 dramas 表（storage 里的活引用，只读约定）。 */
     dramas: () => store.dramas(),

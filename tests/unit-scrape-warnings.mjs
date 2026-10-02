@@ -8,12 +8,15 @@ import './bootstrap.cjs';
 //
 //   W1-W2 全量轮：告警随 lastScrape 同一次 set 落库；干净的一轮写回 null
 //   W3    单站刷新只换该站的告警，别站的保留
-//   W4    抓失败的 URL 保留旧告警（失败没证明它恢复了）
+//   W4    抓失败的 URL 记成 failed（带错误原因）、取代旧告警，并打一行日志（v1.7.4；以前保留旧告警，失败无处可查）
 //   W5    整轮全失败不动告警
 //   W6    只有告警的一轮仍算成功：刷新 lastScrape、清掉 lastScrapeFailure
 //   W7    应答缺这两个字段（旧桩 / 其它来源）不告警
 //   W8    全量轮丢掉已不在订阅里的旧告警
 //   W9    新增条数取 newCount
+//   W10   文档 4xx / 5xx 且一条都没拿到 → blocked（带 HTTP 状态码），v1.7.4：DramaBox 的 CloudFront 403 拦截页
+//   W11   文档回了 4xx 却照样找到列表（SPA 软路由）→ 不告警
+//   W12   不在订阅里且实际打开的地址变了 → detail 写跳到了哪（My Drama 被 307 到 /zh）；地址没变不带 detail
 // 用法：node tests/unit-scrape-warnings.mjs
 import { background } from './background-fixture.mjs';
 
@@ -35,6 +38,8 @@ let replies = {};
 bg.context.scrapeUrlInTab = async (url) => replies[url] || ok();
 const round = (site = null) => bg.run(site ? `performScrapeOnce({ site: '${site}' })` : 'performScrapeOnce()');
 const warned = () => (bg.data.lastScrapeWarnings?.items || []).map(i => `${i.url === IMDB ? 'imdb' : i.url === NETFLIX ? 'netflix' : i.url === REEL ? 'reel' : i.url}:${i.kind}`).sort().join(',');
+const itemOf = url => (bg.data.lastScrapeWarnings?.items || []).find(i => i.url === url);
+const detailOf = url => itemOf(url)?.detail;
 
 // W1 全量轮：IMDB 列表为空、Netflix 页面跳走了、ReelShort 正常
 replies = { [IMDB]: empty, [NETFLIX]: redirected, [REEL]: ok(3) };
@@ -59,10 +64,15 @@ replies = { [NETFLIX]: ok(1) };
 await round('netflix');
 check('W3 单站刷新（netflix 恢复）只摘该站告警，imdb 的保留', warned() === 'imdb:empty', warned());
 
-// W4 抓失败的 URL 保留旧告警
+// W4 抓失败的 URL 记 failed、取代旧告警，并打日志
+const warnLines = [];
+bg.context.console.warn = (...args) => warnLines.push(args.map(String).join(' '));
 replies = { [IMDB]: failed };
 await round();
-check('W4 本轮抓失败的 imdb 保留旧告警（失败没证明它恢复了）', warned() === 'imdb:empty', warned());
+check('W4a 本轮抓失败的 imdb 记成 failed、取代旧的 empty（v1.7.4）', warned() === 'imdb:failed', warned());
+check('W4b failed 带错误原因', detailOf(IMDB) === '整页抓取超时', show(bg.data.lastScrapeWarnings));
+check('W4c 定时轮里单条失败也打一行日志（订阅 URL + 原因）',
+  warnLines.some(line => line.includes('抓取 URL 失败') && line.includes(IMDB) && line.includes('整页抓取超时')), show(warnLines));
 
 // W5 整轮全失败：不动告警、也不刷新 lastScrape
 const before = { warnings: bg.data.lastScrapeWarnings, lastScrape: bg.data.lastScrape };
@@ -97,6 +107,36 @@ check('W8 全量轮丢掉已不在订阅里的 reel 告警', bg.data.lastScrapeW
 replies = { [IMDB]: ok(4), [NETFLIX]: ok(2) };
 const r9 = await round();
 check('W9 totalNewCount 按应答的 newCount 累加', r9.totalNewCount === 6, show(r9.totalNewCount));
+
+// W10 文档 4xx / 5xx 且一条都没拿到 → blocked（W8 退订了 reel，这里订回来）
+bg.data.urlTags = [IMDB, NETFLIX, REEL].map(urlPattern => ({ urlPattern, tags: ['T'] }));
+replies = {
+  [IMDB]: { ...empty, httpStatus: 403, pageUrl: 'https://www.imdb.com/search/title/' },
+  [NETFLIX]: { ...redirected, httpStatus: 503, pageUrl: 'https://www.netflix.com/blocked' },
+  [REEL]: { ...empty, httpStatus: 200 }
+};
+const r10 = await round();
+check('W10a 没找到列表 + 403 → blocked；不在订阅里 + 503 → 同样 blocked；200 的照旧 empty',
+  warned() === 'imdb:blocked,netflix:blocked,reel:empty', warned());
+check('W10b blocked 的 detail 是 HTTP 状态码', detailOf(IMDB) === 'HTTP 403' && detailOf(NETFLIX) === 'HTTP 503' && itemOf(REEL)?.detail === undefined,
+  show(bg.data.lastScrapeWarnings));
+check('W10c 本轮结果同样带 warning / detail（弹窗手动刷新的提示用它）',
+  r10.results.find(r => r.url === IMDB)?.warning === 'blocked' && r10.results.find(r => r.url === IMDB)?.detail === 'HTTP 403', show(r10.results));
+
+// W11 4xx 但找到了列表：不告警
+replies = { [IMDB]: { ...ok(2, 5), httpStatus: 404 }, [NETFLIX]: ok(), [REEL]: ok() };
+await round();
+check('W11 文档回 404 却照样找到列表（SPA 软路由）→ 不告警', bg.data.lastScrapeWarnings === null, show(bg.data.lastScrapeWarnings));
+
+// W12 不在订阅里：实际地址变了才带 detail
+replies = {
+  [NETFLIX]: { ...redirected, httpStatus: 200, pageUrl: 'https://www.netflix.com/jp/tudum/top10' },
+  [REEL]: { ...redirected, pageUrl: REEL }
+};
+await round();
+check('W12a 跳转了（实际地址与打开的不同）→ detail 写实际打开的地址', detailOf(NETFLIX) === '实际打开 https://www.netflix.com/jp/tudum/top10',
+  show(bg.data.lastScrapeWarnings));
+check('W12b 地址没变 → 不带 detail', itemOf(REEL)?.kind === 'unsubscribed' && !('detail' in (itemOf(REEL) || {})), show(itemOf(REEL)));
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failedCount = results.filter(r => !r.pass).length;

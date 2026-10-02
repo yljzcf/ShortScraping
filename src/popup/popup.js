@@ -836,7 +836,10 @@
     }
 
     if (warnedCount > 0) {
-      const warned = `${warnedCount} 个订阅抓到 0 条（可能站点改版或页面未加载完整）`;
+      // 全是被拦截（v1.7.4）就直说，免得用户去查站点是不是改版了
+      const allBlocked = results.every(r => !r.success || !r.warning || r.warning === 'blocked');
+      const reason = allBlocked ? '站点拒绝访问，多为网络 / 地区拦截' : '可能站点改版或页面未加载完整';
+      const warned = `${warnedCount} 个订阅抓到 0 条（${reason}）`;
       showToast(newCount > 0 ? `本次刷新新增 ${newCount} 条；${warned}` : warned, { type: 'warning', duration: 5000 });
       return;
     }
@@ -1427,9 +1430,12 @@
     elements.stats.status.classList.toggle('is-warning', ahead);
   }
 
+  // blocked / failed 是 v1.7.4 细分出来的（见后台 scrapeWarningOf / nextScrapeWarnings），detail 附在原因后面
   const SCRAPE_WARNING_REASONS = {
     unsubscribed: '打开后的页面不在订阅里（可能跳转了）',
-    empty: '页面上没找到列表项（可能站点改版或页面未加载完整）'
+    empty: '页面上没找到列表项（可能站点改版或页面未加载完整）',
+    blocked: '站点拒绝访问（多为网络 / 地区拦截，检查代理节点）',
+    failed: '打开或抓取失败'
   };
 
   /** 后台记下的「抓到 0 条」告警里仍在订阅中的那些（退订了的不再提示）；归属与卡片同一口径（按 sourceListUrl）。 */
@@ -1444,7 +1450,8 @@
     const lines = warnings.map(item => {
       const site = siteOfUrl(item.url);
       const name = (site && SiteRegistry.SOURCE_NAMES[site]) || '';
-      return `· ${name ? `${name} ` : ''}${item.url}：${SCRAPE_WARNING_REASONS[item.kind] || '一条都没拿到'}`;
+      const detail = typeof item.detail === 'string' && item.detail ? `，${item.detail}` : '';
+      return `· ${name ? `${name} ` : ''}${item.url}：${SCRAPE_WARNING_REASONS[item.kind] || '一条都没拿到'}${detail}`;
     });
     return `最近一次抓取这些订阅一条都没拿到：\n${lines.join('\n')}`;
   }

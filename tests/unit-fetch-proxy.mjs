@@ -118,12 +118,16 @@ const NF_GOOD = 'https://www.netflix.com/title/81278442';
   check('P8b Netflix 拒绝路径零网络请求', fetchCalls.length === 0, `fetchCalls=${fetchCalls.length}`);
 }
 
-// P9 my-drama 规则不带 Accept-Language（MyDrama 详情的本地化标题/简介语义依赖浏览器语言，勿动）
+// P9 my-drama 规则固定英文 Accept-Language（v1.7.4 用户 2026-10-02 定：要英文页面、不要中文 / 日文）。
+// v1.7.3 及以前刻意不带，好让中文浏览器拿到平台自带的中文名与简介；可现在中文偏好下首页被 307 到 /zh、
+// 订阅整条抓 0 条，播放页的 og:description 也是空的（2026-10-02 实测），改由 AI 翻译补中文
 {
   fetchCalls.length = 0;
   await ask(GOOD);
-  check('P9 my-drama 代理请求不带 Accept-Language',
-    fetchCalls.length === 1 && !('Accept-Language' in (fetchCalls[0].options?.headers || {})),
+  const headers = fetchCalls[0]?.options?.headers || {};
+  check('P9 my-drama 代理请求带 Accept: text/html 与英文 Accept-Language（与 SiteRegistry 同一个值）',
+    fetchCalls.length === 1 && headers.Accept === 'text/html'
+      && headers['Accept-Language'] === bg.context.SiteRegistry.FORCE_ENGLISH_ACCEPT_LANGUAGE && /^en-US/.test(headers['Accept-Language']),
     JSON.stringify(fetchCalls[0]?.options));
 }
 

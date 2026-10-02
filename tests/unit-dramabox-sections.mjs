@@ -100,7 +100,7 @@ const SUBS = [
 ];
 const loc = href => { const u = new URL(href); return { href, hostname: u.hostname, pathname: u.pathname, search: u.search, origin: u.origin }; };
 
-async function runScenario({ href = MS, subscriptions = SUBS, nextData, document, dramas = [] } = {}) {
+async function runScenario({ href = MS, subscriptions = SUBS, nextData, document, dramas = [], navigationStatus } = {}) {
   const store = { dramas: structuredClone(dramas) };
   const saveCalls = [];
   const proxyCalls = [];
@@ -130,11 +130,20 @@ async function runScenario({ href = MS, subscriptions = SUBS, nextData, document
   globalThis.DOMParser = class { parseFromString() { return documentWithNextData(null); } };
   globalThis.fetch = async (url) => { fetchCalls.push(url); return { ok: true, status: 200, url, text: async () => '' }; };
 
+  // 文档的 HTTP 状态（v1.7.4）：内容脚本读导航计时 responseStatus，给了就换掉 Node 的 performance、用完还原
+  const realPerformance = globalThis.performance;
+  if (navigationStatus !== undefined) {
+    globalThis.performance = { now: () => realPerformance.now(), getEntriesByType: type => (type === 'navigation' ? [{ responseStatus: navigationStatus }] : []) };
+  }
   (0, eval)(contentSrc);
-  const response = await new Promise(resolve => {
-    for (const fn of listeners) fn({ action: 'scrape' }, { tab: { id: 1 } }, resolve);
-  });
-  return { saved: store.dramas, saveCalls, proxyCalls, fetchCalls, response };
+  try {
+    const response = await new Promise(resolve => {
+      for (const fn of listeners) fn({ action: 'scrape' }, { tab: { id: 1 } }, resolve);
+    });
+    return { saved: store.dramas, saveCalls, proxyCalls, fetchCalls, response };
+  } finally {
+    globalThis.performance = realPerformance;
+  }
 }
 
 // ---------- N 取数点：DOM 里的 __NEXT_DATA__，全程零网络 ----------
@@ -173,6 +182,23 @@ for (const [name, nextData] of [
   });
   check('N8 items 里的非对象元素被过滤，正常条目照常入库',
     eq(saved.map(d => d.itemId), ['db42000024547']), show(saved.map(d => d.itemId)));
+}
+
+// ---------- H 拦截页（v1.7.4）：两个域名对部分网络回 CloudFront「403 Request blocked」，拦截页照样注入内容脚本 ----------
+{
+  const { saved, response } = await runScenario({ nextData: null, navigationStatus: 403 });
+  check('H1 403 拦截页：零入库，应答带 httpStatus 403 与 listCount 0（后台据此记 blocked，不再说「可能站点改版」）',
+    response?.success === true && saved.length === 0 && response.httpStatus === 403 && response.listCount === 0, show(response));
+  check('H2 应答带本页实际地址 pageUrl', response?.pageUrl === MS, show(response));
+}
+{
+  const { response } = await runScenario({ navigationStatus: 200 });
+  check('H3 正常页带 httpStatus 200、照常入库', response?.success === true && response.httpStatus === 200 && response.newCount === 1, show(response));
+}
+{
+  const { response } = await runScenario({});
+  check('H4 取不到导航计时（Node 的 performance 没有 navigation 条目）就不带 httpStatus', response?.success === true && !('httpStatus' in response),
+    show(response));
 }
 
 // ---------- F 字段映射 ----------

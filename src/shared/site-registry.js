@@ -240,6 +240,26 @@
     return SITES.some(entry => entry.site === site && hostMatches(entry, parsed.hostname));
   }
 
+  /* ——— 固定英文页（v1.7.4）————————————————————————————————————————————————
+   * My Drama 按浏览器的 Accept-Language 分语言版本：中文偏好的浏览器打开 https://my-drama.com/
+   * 会被 307 到 /zh（2026-10-02 实测；en-US 偏好即使带 content-lang=zh cookie 也停在 / 的英文页），
+   * 而订阅与适配器只认 /，跳过去整条订阅每轮抓 0 条。用户要英文（美国）页面：后台用一条
+   * declarativeNetRequest 动态规则把这些域名（含子域）的 accept-language 固定成英文，详情页取数
+   * 也显式带同一个值。地区（country）由出口 IP 决定，代码改不了，要美国区内容得走美国节点。 */
+  const FORCE_ENGLISH_DOMAINS = Object.freeze(['my-drama.com']);
+  const FORCE_ENGLISH_ACCEPT_LANGUAGE = 'en-US,en;q=0.9';
+
+  /** url 的主机是否属于要固定英文的域名（裸域或其子域，点边界匹配）。 */
+  function isForceEnglishUrl(url) {
+    let hostname;
+    try {
+      hostname = new URL(url).hostname;
+    } catch (e) {
+      return false;
+    }
+    return FORCE_ENGLISH_DOMAINS.some(domain => hostname === domain || hostname.endsWith(`.${domain}`));
+  }
+
   /**
    * manifest content_scripts.matches 的推导式。注册表是站点归属的单一真源，
    * 生成脚本（scripts/update-site-matches.mjs）与回归断言都从这里取，
@@ -255,7 +275,8 @@
   const api = {
     SITES, SITE_GROUPS, DEFAULT_GROUP, CATEGORY_SOURCES, SOURCE_NAMES,
     groupOfSite, siteOfHostname, siteOfUrl, siteOfDrama, isInjectableUrl, contentScriptMatches,
-    IMDB_COMPANY_SITES, PLATFORM_SEARCH_PAGES, imdbPlatformOf, platformSearchQuery, platformSearchUrl, isPlatformUrl
+    IMDB_COMPANY_SITES, PLATFORM_SEARCH_PAGES, imdbPlatformOf, platformSearchQuery, platformSearchUrl, isPlatformUrl,
+    FORCE_ENGLISH_DOMAINS, FORCE_ENGLISH_ACCEPT_LANGUAGE, isForceEnglishUrl
   };
 
   if (typeof module !== 'undefined' && module.exports) {

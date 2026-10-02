@@ -37,6 +37,24 @@
   }
 
   /**
+   * scrape 应答附带的本页事实（v1.7.4）：实际地址与文档的 HTTP 状态。后台据此把「被拦截」（DramaBox 的 CloudFront
+   * 403 拦截页照样注入内容脚本、页面上没有列表）与站点改版分开，「打开后的页面不在订阅里」时也能说出跳到了哪。
+   * responseStatus 是 Chrome 109+ 的导航计时字段，取不到就不带。
+   */
+  function pageFacts() {
+    const facts = {};
+    const href = window.location && window.location.href;
+    if (typeof href === 'string' && href) facts.pageUrl = href;
+    try {
+      const status = Number(performance.getEntriesByType('navigation')[0]?.responseStatus);
+      if (Number.isInteger(status) && status > 0) facts.httpStatus = status;
+    } catch (e) {
+      // 没有导航计时（非浏览器环境 / 旧版本）：不带状态码
+    }
+    return facts;
+  }
+
+  /**
    * 初始化
    */
   function init() {
@@ -47,7 +65,10 @@
         // 只回条数与判定（v1.7.0）：以前回整批新卡对象，后台只用它的长度，却要跨进程结构化克隆一遍；
         // 也丢了「当前页不在订阅里 / 页面上没找到列表」这两个信号，后台只能当成「没有新增」（审查 M2）
         runScrape().then(result => {
-          sendResponse({ success: true, newCount: result.dramas.length, subscribed: result.subscribed, listCount: result.listCount });
+          sendResponse({
+            success: true, newCount: result.dramas.length, subscribed: result.subscribed, listCount: result.listCount,
+            ...pageFacts()
+          });
         }).catch(e => {
           console.error('[ShortScraping] 抓取出错:', e);
           sendResponse({ success: false, error: e.message });
@@ -192,8 +213,14 @@
    * 两处拿不到它，仍直接用 fetchWithTimeout。
    */
   async function fetchServerHtml(url = window.location.href) {
+    // 固定英文的站点（My Drama，v1.7.4）同源取数也显式带英文 Accept-Language：后台的 declarativeNetRequest
+    // 规则已改写这些请求头，这里再写一遍，规则没装上（扩展未重新加载）时详情页也不会拿到中文版
     try {
-      const response = await fetchWithTimeout(url, { headers: { 'Accept': 'text/html' } });
+      const headers = { 'Accept': 'text/html' };
+      if (SiteRegistry.isForceEnglishUrl?.(new URL(url, window.location.href).href)) {
+        headers['Accept-Language'] = SiteRegistry.FORCE_ENGLISH_ACCEPT_LANGUAGE;
+      }
+      const response = await fetchWithTimeout(url, { headers });
       if (!response.ok) {
         console.warn(`[ShortScraping] 取服务端 HTML 失败 HTTP ${response.status}: ${url}`);
         return null;
@@ -1551,6 +1578,8 @@
    * genres 取 JSON-LD @graph 内 VideoObject.genre（英文原值、与浏览器语言无关，
    * 页面上渲染的中文标签是前端 i18n 译文）。平台自带中英文齐全时直接标记已翻译
    * （对齐 Steam 官方中文范式）；任何失败都保留列表页数据。
+   * v1.7.4 起 My Drama 的请求固定英文（SiteRegistry.FORCE_ENGLISH_DOMAINS）：英文页的 og:description
+   * 是不带模板前缀的纯正文，中文名与简介改由 AI 翻译补；上面按语言分流的写法保留，遇到中文页照样能用。
    */
   async function fetchMyDramaDetail(drama) {
     if (!drama.url) return drama;

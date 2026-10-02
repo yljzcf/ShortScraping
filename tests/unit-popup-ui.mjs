@@ -15,7 +15,7 @@ import './bootstrap.cjs';
 //   G 组：「前往榜单页面」按域名归类挑当前站点的订阅页，挑不到去设置页（不再按 host 子串、不回退 urls[0]）
 //   W 组：订阅归属判定委托 SubscriptionConfig.dramasUnderUrls，popup.html 按依赖顺序加载它
 //   V 组：「抓到 0 条」告警（lastScrapeWarnings，v1.7.0 审查 M2）——底栏后缀、悬停明细、只算仍订阅的 URL、
-//         整轮全失败优先；onChanged 只刷底栏；手动刷新的三种提示
+//         整轮全失败优先；onChanged 只刷底栏；手动刷新的三种提示；v1.7.4 的 blocked / failed 文案与 detail（V9-V12）
 // 用法：node tests/unit-popup-ui.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -284,6 +284,26 @@ const baseStore = (extra = {}) => ({
   const withFail = await refresh({ totalNewCount: 0, results: [{ success: false, error: 'x' }, { success: true, newCount: 0, warning: 'empty' }] });
   check('V8 有失败也有告警：失败文案后补上告警条数', withFail?.message === '本次刷新新增 0 条，1 个来源失败，1 个订阅抓到 0 条'
     && withFail?.type === 'error', JSON.stringify(withFail));
+  // v1.7.4：全是被拦截就直说，不再让人去查站点是不是改版了；混着别的告警仍是原文案
+  const allBlocked = await refresh({ totalNewCount: 0, results: [{ success: true, newCount: 0, warning: 'blocked', detail: 'HTTP 403' }] });
+  check('V9 手动刷新只有「被拦截」：提示站点拒绝访问', allBlocked?.message === '1 个订阅抓到 0 条（站点拒绝访问，多为网络 / 地区拦截）'
+    && allBlocked?.type === 'warning', JSON.stringify(allBlocked));
+  const mixed = await refresh({ totalNewCount: 0, results: [{ success: true, newCount: 0, warning: 'blocked' }, { success: true, newCount: 0, warning: 'empty' }] });
+  check('V10 被拦截混着别的告警：仍是原来的通用文案', mixed?.message === '2 个订阅抓到 0 条（可能站点改版或页面未加载完整）', JSON.stringify(mixed));
+}
+{
+  // v1.7.4 新增的两种告警：悬停明细给出原因与 detail（HTTP 状态码 / 错误原因）
+  const warnings = { at: T1, items: [
+    { url: IMDB, kind: 'blocked', detail: 'HTTP 403' },
+    { url: REELSHORT, kind: 'failed', detail: '整页抓取超时' }
+  ] };
+  const h = await popupFixture({ stored: baseStore({ lastScrape: T1, lastScrapeWarnings: warnings }) });
+  const title = h.lastUpdate().title;
+  check('V11 底栏照样计数（被拦截 / 失败都算「抓到 0 条」）', h.lastUpdate().textContent === `抓取于 REL(${T1}) · 2 个订阅抓到 0 条`,
+    h.lastUpdate().textContent);
+  check('V12 悬停：blocked 说站点拒绝访问并附 HTTP 403，failed 说打开或抓取失败并附原因',
+    title.includes(`${IMDB}：站点拒绝访问（多为网络 / 地区拦截，检查代理节点），HTTP 403`)
+      && title.includes(`${REELSHORT}：打开或抓取失败，整页抓取超时`), title);
 }
 
 // ============ T 组：siteTabPrefs 回声 ============

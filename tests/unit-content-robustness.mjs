@@ -236,6 +236,21 @@ const mdDocument = baseDocument({
   check('L1d My Drama 数字开头的锚点 id 经 CSS.escape（修复前 querySelectorAll 抛 SyntaxError、整页失败）',
     response?.success === true && queried.includes('#\\37 days [data-testid="series-section-item"]'), show({ response, queried }));
 }
+{
+  // v1.7.4 固定英文页：同源取 My Drama 播放页显式带英文 Accept-Language（后台 declarativeNetRequest 规则之外再保险一层）
+  const calls = [];
+  const { saved, response } = await runScenario({
+    href: 'https://my-drama.com/', document: mdDocument,
+    fetch: async (url, options) => {
+      calls.push({ url: String(url), headers: { ...(options?.headers || {}) } });
+      return new Response('<html></html>', { status: 200 });
+    }
+  });
+  const detail = calls.find(call => call.url.includes('/video/'));
+  check('L1e My Drama 同源取播放页带 Accept: text/html 与英文 Accept-Language（v1.7.4）',
+    saved.length === 1 && detail?.headers.Accept === 'text/html' && detail?.headers['Accept-Language'] === 'en-US,en;q=0.9', show(calls));
+  check('L1f scrape 应答带本页实际地址 pageUrl（v1.7.4，后台据此说出跳到了哪）', response?.pageUrl === 'https://my-drama.com/', show(response));
+}
 
 // ---------- L2：My Drama fandom 子域 ----------
 const FANDOM = 'https://fandom.my-drama.com/';

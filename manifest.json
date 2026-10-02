@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "ShortScraping - 短剧监控助手",
-  "version": "1.7.3",
+  "version": "1.7.4",
   "description": "监控IMDB等平台的爆款短剧榜单，支持时间线展示和自动翻译",
   "permissions": [
     "storage",
     "alarms",
     "notifications",
     "scripting",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
     "https://*/*",
