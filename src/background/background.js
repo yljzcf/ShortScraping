@@ -1000,7 +1000,9 @@ async function performScrapeOnce({ site = null } = {}, progress = null) {
  *     照样注入内容脚本、页面上自然没有列表，多半是网络或地区被拦。页面回了 4xx 却照样找到了列表（SPA 软路由）
  *     不算异常；
  *   - failed：这条订阅本轮抓失败（标签页超时、消息发不出去等），见 nextScrapeWarnings。
- * detail：blocked 带「HTTP 状态码」，unsubscribed 带实际打开的地址（与打开的地址不同时，即跳转去了哪），failed 带错误原因。
+ *   - blocked 还包括等了重载仍是人机验证插页的（v1.7.5，response.challenge，见 scrapeLoadedTab）。
+ * detail：blocked 带「HTTP 状态码」或「人机验证页未通过（awswaf / cloudflare）」，unsubscribed 带实际打开的地址
+ * （与打开的地址不同时，即跳转去了哪），failed 带错误原因。
  */
 const SCRAPE_WARNING_TEXT = {
   unsubscribed: '打开后的页面不在订阅里，可能跳转了',
@@ -1012,12 +1014,18 @@ function scrapeWarningOf(response) {
   let kind = null;
   if (response?.subscribed === false) kind = 'unsubscribed';
   else if (response?.listCount === 0) kind = 'empty';
-  if (kind && Number(response?.httpStatus) >= 400) kind = 'blocked';
+  // 验证页等了重载也没过（v1.7.5）：页面本身是人机验证插页，不是站点改版
+  if (kind && (Number(response?.httpStatus) >= 400 || response?.challenge)) kind = 'blocked';
   return kind;
 }
 
 function scrapeWarningDetail(kind, response, openUrl) {
-  if (kind === 'blocked') return `HTTP ${Number(response.httpStatus)}`;
+  if (kind === 'blocked') {
+    const status = Number(response.httpStatus);
+    const http = Number.isInteger(status) && status > 0 ? `HTTP ${status}` : '';
+    if (response.challenge) return `人机验证页未通过（${response.challenge}${http ? `，${http}` : ''}）`;
+    return http;
+  }
   const pageUrl = response?.pageUrl;
   if (kind === 'unsubscribed' && typeof pageUrl === 'string' && pageUrl && pageUrl !== openUrl) return `实际打开 ${pageUrl}`;
   return '';
@@ -1850,8 +1858,52 @@ async function scrapeUrlInTab(url, message = { action: 'scrape' }) {
   }
 }
 
+// 人机验证插页（v1.7.5）：内容脚本在应答里带 challenge（'awswaf' | 'cloudflare'，见 content.js detectChallengePage）时，
+// 页面还是验证页、列表要等它自动通过后重载才有。最多等这么久看它重载，然后再要一次结果；仍是验证页就按
+// 「被拦截」记告警（scrapeWarningOf）。IMDb 的 AWS WAF 验证几秒内自动通过；要人工点选的验证等到期也过不了，
+// 那种只白等这一次。
+const CHALLENGE_PASS_TIMEOUT_MS = 20000;
+
 // message：发给内容脚本的指令，缺省抓取入库；IMDb 切换基线用 { action: 'collectListIds' } 只读列表条目 ID
 async function scrapeLoadedTab(tabId, url, page, message = { action: 'scrape' }) {
+  const response = await requestScrapeFromTab(tabId, url, page, message);
+  if (!response?.challenge || page.closed) return response;
+  // 2026-10-12 体检：IMDb 11 页里排在最前的两页十多天零产出、后面九页正常——每轮第一个打开的 IMDb 标签页
+  // 先碰到 WAF 验证页，内容脚本回「0 条」后标签页就被关了，token 要到后面的页才拿到。等重载的监听先挂上
+  // 再等：重载可能在第一次应答与这里之间就已经完成，所以到期没等到也照样再要一次（那时页面多半已是真列表）
+  console.warn(`[ShortScraping] 打开的是人机验证页（${response.challenge}），等它自动通过后再要一次结果: ${url}`);
+  await waitForTabReload(tabId, CHALLENGE_PASS_TIMEOUT_MS);
+  if (page.closed) return response;
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  try {
+    const retried = await sendScrapeWhenReady(tabId, 5, 1000, page, message);
+    return retried || response;
+  } catch (e) {
+    console.warn(`[ShortScraping] 人机验证页重载后再要结果失败，按验证未通过记: ${url} - ${e?.message || e}`);
+    return response;
+  }
+}
+
+/** 等标签页下一次加载完成（验证通过后的自动重载）；到期没等到回 false，不抛错。 */
+function waitForTabReload(tabId, timeoutMs) {
+  return new Promise(resolve => {
+    const listener = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+        clearTimeout(timeout);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(true);
+      }
+    };
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(false);
+    }, timeoutMs);
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+// 向已打开的标签页要一次抓取结果：快路径（等加载完 → 1.5 秒 → 发消息），失败走「强制注入 + 轮询」兜底
+async function requestScrapeFromTab(tabId, url, page, message) {
   try {
     await waitForTabComplete(tabId);
     // 给内容脚本一点注入和页面渲染时间

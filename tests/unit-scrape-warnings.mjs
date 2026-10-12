@@ -138,6 +138,20 @@ check('W12a 跳转了（实际地址与打开的不同）→ detail 写实际打
   show(bg.data.lastScrapeWarnings));
 check('W12b 地址没变 → 不带 detail', itemOf(REEL)?.kind === 'unsubscribed' && !('detail' in (itemOf(REEL) || {})), show(itemOf(REEL)));
 
+// W13 人机验证页没通过（v1.7.5）：应答带 challenge → blocked，detail 说明是验证页（HTTP 202 不到 400 也算）
+replies = {
+  [IMDB]: { ...empty, httpStatus: 202, challenge: 'awswaf' },
+  [NETFLIX]: { ...redirected, challenge: 'cloudflare' },
+  [REEL]: ok()
+};
+await round();
+check('W13a challenge + 一条都没拿到 → blocked（不论 HTTP 状态）', warned() === 'imdb:blocked,netflix:blocked', warned());
+check('W13b detail：有状态码带状态码，没有就只说验证类型', detailOf(IMDB) === '人机验证页未通过（awswaf，HTTP 202）' && detailOf(NETFLIX) === '人机验证页未通过（cloudflare）',
+  show(bg.data.lastScrapeWarnings));
+replies = { [IMDB]: { ...ok(1, 50), httpStatus: 200 } };
+await round();
+check('W13c 下一轮拿到真列表就摘掉告警', bg.data.lastScrapeWarnings === null, show(bg.data.lastScrapeWarnings));
+
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failedCount = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failedCount}/${results.length} 通过`);

@@ -51,7 +51,41 @@
     } catch (e) {
       // 没有导航计时（非浏览器环境 / 旧版本）：不带状态码
     }
+    const challenge = detectChallengePage();
+    if (challenge) facts.challenge = challenge;
     return facts;
+  }
+
+  /**
+   * 当前文档是不是站点前面的「人机验证」插页（v1.7.5）：
+   *   - AWS WAF 静默验证（IMDb，2026-10-12 实测：对新会话回 HTTP 202 + x-amzn-waf-action: challenge，页面只有
+   *     一段加载 *.token.awswaf.com/…/challenge.js 的脚本与 window.awsWafCookieDomainList / AwsWafIntegration，
+   *     脚本几秒内拿到 token 后自动重载原页，token cookie 对整个域名生效）；
+   *   - Cloudflare 验证页（/cdn-cgi/challenge-platform/ 脚本、#challenge-running / #challenge-form）。
+   * 验证页的 URL 与订阅页相同、内容脚本照常注入，而列表要等自动重载后才有：以前这里直接回「0 条」，后台随即
+   * 关掉标签页，一轮里排在前面、还没拿到 token 的那一两页永远抓不到。后台拿到 challenge 标记后会等重载再要一次。
+   * 内容脚本在隔离环境里看不到页面的 window 变量，只认 DOM 里的脚本地址与内联脚本文本。
+   * 只读 document.scripts 与 getElementById，不走 querySelector*：Higgsfield 这类纯接口适配器的测试把
+   * querySelector* 当「适配器读 DOM」记账（unit-higgsfield-originals G3），这项通用检查不该算在适配器头上。
+   */
+  function detectChallengePage() {
+    let scripts;
+    try {
+      scripts = Array.from(document.scripts || []);
+    } catch (e) {
+      return null;
+    }
+    const src = s => String((s && s.src) || (s && typeof s.getAttribute === 'function' && s.getAttribute('src')) || '');
+    const text = s => String((s && s.textContent) || '');
+    if (scripts.some(s => /\.awswaf\.com\//.test(src(s)) || /awsWafCookieDomainList|AwsWafIntegration/.test(text(s)))) return 'awswaf';
+    let cfNode = null;
+    try {
+      cfNode = document.getElementById('challenge-running') || document.getElementById('challenge-form');
+    } catch (e) {
+      cfNode = null;
+    }
+    if (cfNode || scripts.some(s => /\/cdn-cgi\/challenge-platform\//.test(src(s)))) return 'cloudflare';
+    return null;
   }
 
   /**

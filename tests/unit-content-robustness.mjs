@@ -252,6 +252,23 @@ const mdDocument = baseDocument({
   check('L1f scrape 应答带本页实际地址 pageUrl（v1.7.4，后台据此说出跳到了哪）', response?.pageUrl === 'https://my-drama.com/', show(response));
 }
 
+// ---------- L1g-L1i 人机验证插页识别（v1.7.5）：按 DOM 里的脚本认，不碰页面 window ----------
+{
+  const script = (src, textContent = '') => ({ src, textContent, getAttribute: n => (n === 'src' ? src : null) });
+  const withScripts = (scripts, extra = {}) => baseDocument({ scripts, querySelectorAll: () => [], ...extra });
+  const IMDB = 'https://www.imdb.com/search/title/?interests=in0000310';
+  const aws = await runScenario({ href: IMDB, document: withScripts([
+    script('', "window.awsWafCookieDomainList = ['imdb.com'];"),
+    script('https://fb423e1ef94f.6277d64d.us-east-1.token.awswaf.com/fb423e1ef94f/c3382d439950/916d943f6a58/challenge.js')
+  ]) });
+  check('L1g AWS WAF 验证页（token.awswaf.com 的 challenge.js / awsWafCookieDomainList）→ challenge=awswaf，列表 0 条',
+    aws.response?.challenge === 'awswaf' && aws.response.listCount === 0 && aws.saved.length === 0, show(aws.response));
+  const cf = await runScenario({ href: IMDB, document: withScripts([script('https://www.imdb.com/cdn-cgi/challenge-platform/h/b/orchestrate/jsch/v1')]) });
+  check('L1h Cloudflare 验证页（/cdn-cgi/challenge-platform/）→ challenge=cloudflare', cf.response?.challenge === 'cloudflare', show(cf.response));
+  const plain = await runScenario({ href: IMDB, document: withScripts([script('https://m.media-amazon.com/images/S/sash/x.js', 'var a = 1;')]) });
+  check('L1i 普通页面不带 challenge 字段', plain.response?.success === true && !('challenge' in plain.response), show(plain.response));
+}
+
 // ---------- L2：My Drama fandom 子域 ----------
 const FANDOM = 'https://fandom.my-drama.com/';
 const ARTICLES = 'li.wp-block-post';
