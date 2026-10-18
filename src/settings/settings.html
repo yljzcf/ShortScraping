@@ -5,27 +5,49 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ShortScraping - 设置</title>
   <style>
+    /* 设计变量与弹窗 / 共享页同一套（单一真源在 src/shared/timeline-cards.css :root，v1.8.0）：
+       设置页不属于任何站点，--accent 用默认的靛紫；页面不引共享样式表，免得它的重置与
+       .status / .stats 等通用类名和这里的同名规则打架，所以变量在这里抄一份 */
     :root {
-      --primary: #6366f1;
-      --primary-hover: #4f46e5;
-      --bg: #0f172a;
-      --bg-secondary: #1e293b;
-      --bg-card: #111827;
-      --text: #f8fafc;
-      --text-secondary: #94a3b8;
-      --border: #334155;
-      --success: #10b981;
-      --warning: #f59e0b;
-      --danger: #ef4444;
+      --accent: #818CF8;
+      --ink: #090b10;
+      --bg: color-mix(in oklab, var(--accent) 6%, var(--ink));
+      --bg-secondary: color-mix(in oklab, var(--accent) 9%, #10131a);
+      --bg-card: color-mix(in oklab, var(--accent) 7%, #131720);
+      --bg-raised: color-mix(in oklab, var(--accent) 12%, #1b202b);
+      --text: #eef1f6;
+      --text-secondary: color-mix(in oklab, var(--accent) 12%, #9aa3b4);
+      --text-muted: color-mix(in oklab, var(--accent) 10%, #6c7487);
+      --border: color-mix(in oklab, var(--accent) 16%, #262c38);
+      --border-soft: color-mix(in srgb, var(--border) 65%, transparent);
+      --accent-text: color-mix(in oklab, var(--accent) 72%, white);
+      --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+      --accent-line: color-mix(in srgb, var(--accent) 55%, transparent);
+      --primary: var(--accent);
+      --primary-hover: color-mix(in oklab, var(--accent) 80%, white);
+      --success: #34d399;
+      --warning: #fbbf24;
+      --danger: #f87171;
       --radius: 14px;
+    }
+
+    /* 线条图标（shared/icons.js）：尺寸跟随字号、颜色跟随文字色 */
+    .icon {
+      display: block;
+      flex-shrink: 0;
+    }
+
+    [data-icon] {
+      display: inline-flex;
+      align-items: center;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
       min-height: 100vh;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: radial-gradient(circle at top left, rgba(99, 102, 241, 0.22), transparent 34%), var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", Roboto, sans-serif;
+      background: radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 20%, transparent), transparent 34%), var(--bg);
       color: var(--text);
     }
 
@@ -57,6 +79,11 @@
       margin-bottom: 8px;
     }
 
+    .settings-title [data-icon] {
+      color: var(--accent-text);
+      font-size: 26px;
+    }
+
     .settings-title h1 {
       font-size: 26px;
       line-height: 1.2;
@@ -73,7 +100,7 @@
       gap: 8px;
       padding: 8px;
       margin-bottom: 18px;
-      background: rgba(30, 41, 59, 0.78);
+      background: color-mix(in srgb, var(--bg-secondary) 78%, transparent);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       position: sticky;
@@ -83,6 +110,9 @@
     }
 
     .tab-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
       border: none;
       border-radius: 10px;
       padding: 10px 14px;
@@ -95,13 +125,13 @@
 
     .tab-btn:hover {
       color: var(--text);
-      background: rgba(15, 23, 42, 0.72);
+      background: color-mix(in srgb, var(--bg) 72%, transparent);
     }
 
     .tab-btn.active {
-      color: white;
-      background: linear-gradient(135deg, var(--primary), #8b5cf6);
-      box-shadow: 0 10px 24px rgba(99, 102, 241, 0.22);
+      color: var(--accent-text);
+      background: var(--accent-soft);
+      box-shadow: inset 0 0 0 1px var(--accent-line);
     }
 
     .tab-panel {
@@ -113,7 +143,7 @@
     }
 
     .section {
-      background: rgba(30, 41, 59, 0.82);
+      background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 18px;
@@ -130,13 +160,17 @@
     }
 
     .section-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       font-size: 15px;
       font-weight: 700;
       color: var(--text);
     }
 
-    .section-title span {
-      color: var(--primary);
+    .section-title [data-icon] {
+      color: var(--accent-text);
+      font-size: 17px;
     }
 
     .help-text {
@@ -161,7 +195,7 @@
       padding: 14px;
       border: 1px solid var(--border);
       border-radius: 12px;
-      background: rgba(15, 23, 42, 0.62);
+      background: color-mix(in srgb, var(--bg) 62%, transparent);
     }
 
     .summary-label {
@@ -191,7 +225,7 @@
     code {
       padding: 2px 5px;
       border-radius: 5px;
-      background: rgba(15, 23, 42, 0.92);
+      background: color-mix(in srgb, var(--bg) 92%, transparent);
       color: var(--text);
     }
 
@@ -212,17 +246,20 @@
       white-space: nowrap;
     }
 
+    /* 主按钮：主题色淡底 + 调亮的主题色字（v1.8.0）。靛紫调亮后实底配白字对比度只有约 3:1 */
     .btn-primary {
-      background: var(--primary);
-      color: white;
+      background: var(--accent-soft);
+      color: var(--accent-text);
+      box-shadow: inset 0 0 0 1px var(--accent-line);
+      font-weight: 600;
     }
 
     .btn-primary:hover {
-      background: var(--primary-hover);
+      background: color-mix(in srgb, var(--accent) 26%, transparent);
     }
 
     .btn-secondary {
-      background: rgba(15, 23, 42, 0.86);
+      background: color-mix(in srgb, var(--bg) 86%, transparent);
       color: var(--text);
       border: 1px solid var(--border);
     }
@@ -232,9 +269,9 @@
     }
 
     .btn-danger {
-      background: rgba(239, 68, 68, 0.14);
+      background: color-mix(in srgb, var(--danger) 14%, transparent);
       color: #fecaca;
-      border: 1px solid rgba(239, 68, 68, 0.45);
+      border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
     }
 
     .subscription-list {
@@ -334,6 +371,14 @@
       border-radius: 4px;
     }
 
+    /* 站点主题色小点（v1.8.0，settings.js appendSubscriptionGroup）：与弹窗切到该站时的配色一致 */
+    .site-accent-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
     .subscription-select-all {
       display: inline-flex;
       align-items: center;
@@ -365,7 +410,7 @@
       padding: 12px 14px;
       border: 1px solid var(--border);
       border-radius: 12px;
-      background: rgba(15, 23, 42, 0.58);
+      background: color-mix(in srgb, var(--bg) 58%, transparent);
       cursor: pointer;
       transition: border-color 0.2s;
     }
@@ -392,7 +437,7 @@
       padding: 2px 9px;
       border: 1px solid var(--border);
       border-radius: 999px;
-      background: rgba(15, 23, 42, 0.92);
+      background: color-mix(in srgb, var(--bg) 92%, transparent);
       color: var(--text);
       font-size: 12px;
       white-space: nowrap;
@@ -415,7 +460,7 @@
       border: 1px solid var(--border);
       border-radius: 9px;
       padding: 9px 10px;
-      background: rgba(15, 23, 42, 0.95);
+      background: color-mix(in srgb, var(--bg) 95%, transparent);
       color: var(--text);
       outline: none;
       transition: border-color 0.2s;
@@ -434,7 +479,7 @@
       border-radius: 12px;
       color: var(--text-secondary);
       text-align: center;
-      background: rgba(15, 23, 42, 0.4);
+      background: color-mix(in srgb, var(--bg) 40%, transparent);
     }
 
     .service-status {
@@ -444,7 +489,7 @@
       padding: 12px;
       border: 1px solid var(--border);
       border-radius: 12px;
-      background: rgba(15, 23, 42, 0.62);
+      background: color-mix(in srgb, var(--bg) 62%, transparent);
       color: var(--text-secondary);
       font-size: 13px;
     }
@@ -462,7 +507,7 @@
 
     .service-status.is-on .service-dot {
       background: var(--success);
-      box-shadow: 0 0 8px rgba(16, 185, 129, 0.55);
+      box-shadow: 0 0 8px color-mix(in srgb, var(--success) 55%, transparent);
     }
 
     .service-status.is-off {
@@ -471,7 +516,7 @@
 
     .service-status.is-off .service-dot {
       background: var(--danger);
-      box-shadow: 0 0 8px rgba(239, 68, 68, 0.45);
+      box-shadow: 0 0 8px color-mix(in srgb, var(--danger) 45%, transparent);
     }
 
     .status {
@@ -483,7 +528,7 @@
       padding: 11px 14px;
       border-radius: 10px;
       border: 1px solid var(--border);
-      background: rgba(15, 23, 42, 0.96);
+      background: color-mix(in srgb, var(--bg) 96%, transparent);
       color: var(--text-secondary);
       font-size: 13px;
       box-shadow: 0 16px 38px rgba(0, 0, 0, 0.34);
@@ -492,8 +537,8 @@
     }
 
     .status.show { display: block; }
-    .status.success { color: var(--success); border-color: rgba(16, 185, 129, 0.45); }
-    .status.error { color: #fecaca; border-color: rgba(239, 68, 68, 0.45); }
+    .status.success { color: var(--success); border-color: color-mix(in srgb, var(--success) 45%, transparent); }
+    .status.error { color: #fecaca; border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
 
     @media (max-width: 820px) {
       .settings-shell { width: calc(100vw - 24px); padding-top: 18px; }
@@ -508,7 +553,7 @@
     <header class="settings-header">
       <div>
         <div class="settings-title">
-          <span>⚙️</span>
+          <span data-icon="settings" aria-hidden="true"></span>
           <h1>ShortScraping 设置中心</h1>
         </div>
         <p class="settings-subtitle">这里用于维护网页订阅、定时任务、翻译接口和数据存档配置。配置文件按职责拆分，避免互相混用。</p>
@@ -518,19 +563,19 @@
 
     <!-- 选中态由 settings.js 的 switchTab 同步 class 与 aria-selected -->
     <nav class="tabs" role="tablist" aria-label="设置分类">
-      <button class="tab-btn active" data-tab="config" id="tabBtn-config" role="tab" aria-controls="tab-config" aria-selected="true">📄 配置文件</button>
-      <button class="tab-btn" data-tab="subscriptions" id="tabBtn-subscriptions" role="tab" aria-controls="tab-subscriptions" aria-selected="false">🌐 网页订阅</button>
-      <button class="tab-btn" data-tab="schedule" id="tabBtn-schedule" role="tab" aria-controls="tab-schedule" aria-selected="false">⏰ 定时任务</button>
-      <button class="tab-btn" data-tab="translate" id="tabBtn-translate" role="tab" aria-controls="tab-translate" aria-selected="false">🌍 翻译接口</button>
-      <button class="tab-btn" data-tab="lark" id="tabBtn-lark" role="tab" aria-controls="tab-lark" aria-selected="false">🕊️ Lark 推送</button>
-      <button class="tab-btn" data-tab="archive" id="tabBtn-archive" role="tab" aria-controls="tab-archive" aria-selected="false">💾 数据存档</button>
+      <button class="tab-btn active" data-tab="config" id="tabBtn-config" role="tab" aria-controls="tab-config" aria-selected="true"><span data-icon="file-text" aria-hidden="true"></span>配置文件</button>
+      <button class="tab-btn" data-tab="subscriptions" id="tabBtn-subscriptions" role="tab" aria-controls="tab-subscriptions" aria-selected="false"><span data-icon="world" aria-hidden="true"></span>网页订阅</button>
+      <button class="tab-btn" data-tab="schedule" id="tabBtn-schedule" role="tab" aria-controls="tab-schedule" aria-selected="false"><span data-icon="clock" aria-hidden="true"></span>定时任务</button>
+      <button class="tab-btn" data-tab="translate" id="tabBtn-translate" role="tab" aria-controls="tab-translate" aria-selected="false"><span data-icon="language" aria-hidden="true"></span>翻译接口</button>
+      <button class="tab-btn" data-tab="lark" id="tabBtn-lark" role="tab" aria-controls="tab-lark" aria-selected="false"><span data-icon="send" aria-hidden="true"></span>Lark 推送</button>
+      <button class="tab-btn" data-tab="archive" id="tabBtn-archive" role="tab" aria-controls="tab-archive" aria-selected="false"><span data-icon="database" aria-hidden="true"></span>数据存档</button>
     </nav>
 
     <main>
       <section class="tab-panel active" id="tab-config" role="tabpanel" aria-labelledby="tabBtn-config">
         <div class="section">
           <div class="section-header">
-            <div class="section-title"><span>📄</span> 配置文件</div>
+            <div class="section-title"><span data-icon="file-text" aria-hidden="true"></span>配置文件</div>
           </div>
           <p class="help-text">网页订阅、定时任务和翻译接口分别来自项目 <code>config/</code> 目录下的独立 JSON 文件。扩展启动或刷新扩展时，会从这些文件恢复配置（设置页保存时写回失败的配置例外：保留在扩展里，待同步服务启动后自动写回文件）；点击“重新读取配置”则一律以文件为准。文件读取或解析失败时沿用上一次的配置。</p>
           <ul class="config-list">
@@ -549,7 +594,7 @@
         </div>
 
         <div class="section">
-          <div class="section-title"><span>📌</span> 当前配置概览</div>
+          <div class="section-title"><span data-icon="dashboard" aria-hidden="true"></span>当前配置概览</div>
           <div class="grid" id="configSummary"></div>
         </div>
       </section>
@@ -558,7 +603,7 @@
         <div class="section">
           <div class="section-header">
             <div>
-              <div class="section-title"><span>🗂️</span> 分组图标</div>
+              <div class="section-title"><span data-icon="apps" aria-hidden="true"></span>分组图标</div>
               <p class="help-text">弹窗头部的站点图标按分组折叠，同一时间只展开一组；收起的分组压成一枚「‹ 图标 ›」胶囊。这里指定每组收起时显示哪个站点的图标——选「自动」则显示该组内最近有更新的站点。选中即保存，仅本机生效，不写入配置文件。</p>
             </div>
           </div>
@@ -568,7 +613,7 @@
         <div class="section">
           <div class="section-header">
             <div>
-              <div class="section-title"><span>🌐</span> 网页订阅</div>
+              <div class="section-title"><span data-icon="world" aria-hidden="true"></span>网页订阅</div>
               <p class="help-text">订阅规则来自规则目录 <code>config/tag.example.json</code>，标签随规则固定；勾选需要的订阅并保存，结果写入 <code>config/tag.json</code>。暂不支持自由添加 URL，新增规则请编辑目录文件后重载扩展。</p>
             </div>
             <div class="actions">
@@ -592,7 +637,7 @@
         <div class="section">
           <div class="section-header">
             <div>
-              <div class="section-title"><span>⏰</span> 定时任务</div>
+              <div class="section-title"><span data-icon="clock" aria-hidden="true"></span>定时任务</div>
               <p class="help-text">对应 <code>config/cron.json</code>。Cron 为 5 段格式：分钟 小时 日期 月份 星期，例如 <code>45 * * * *</code>（支持 <code>*</code>、<code>a-b</code>、<code>a,b,c</code>、<code>*/n</code>）。</p>
             </div>
             <div class="actions">
@@ -654,7 +699,7 @@
         <div class="section">
           <div class="section-header">
             <div>
-              <div class="section-title"><span>🌍</span> 翻译接口</div>
+              <div class="section-title"><span data-icon="language" aria-hidden="true"></span>翻译接口</div>
               <p class="help-text">对应 <code>config/trans.json</code>。这里只维护翻译接口、模型、提示词、批量大小、延迟和超时；定时任务请在 <code>config/cron.json</code> 中配置。</p>
             </div>
             <div class="actions">
@@ -682,7 +727,7 @@
           </div>
 
           <div class="section" id="apiModeSection" style="margin-top: 14px; margin-bottom: 0;">
-            <div class="section-title"><span>🔌</span> API 模式</div>
+            <div class="section-title"><span data-icon="plug" aria-hidden="true"></span>API 模式</div>
             <p class="help-text">免费 API 或兼容翻译接口。</p>
             <div class="form-field">
               <label for="apiEndpoint">API Endpoint</label>
@@ -691,7 +736,7 @@
           </div>
 
           <div class="section" id="aiModeSection" style="margin-top: 14px; margin-bottom: 0;">
-            <div class="section-title"><span>🤖</span> AI 模式</div>
+            <div class="section-title"><span data-icon="robot" aria-hidden="true"></span>AI 模式</div>
             <p class="help-text">AI 接口按 OpenAI 兼容 Chat Completions 格式调用，请妥善保管 API Key，避免提交真实密钥。</p>
             <div class="grid">
               <div class="form-field">
@@ -715,7 +760,7 @@
           </div>
 
           <div class="section" style="margin-top: 14px; margin-bottom: 0;">
-            <div class="section-title"><span>⚙️</span> 执行参数</div>
+            <div class="section-title"><span data-icon="settings" aria-hidden="true"></span>执行参数</div>
             <div class="form-field">
               <label for="delayMs">单条延迟（毫秒）</label>
               <input type="number" id="delayMs" min="0" step="50" placeholder="200">
@@ -733,7 +778,7 @@
         <div class="section">
           <div class="section-header">
             <div>
-              <div class="section-title"><span>🕊️</span> Lark 推送</div>
+              <div class="section-title"><span data-icon="send" aria-hidden="true"></span>Lark 推送</div>
               <p class="help-text">对应 <code>config/lark.json</code>。时间线卡片上的 Lark 按钮会把卡片数据（条目 ID、中英文标题、简介、来源+标签、内容类型标签、原站链接、封面链接）POST 到下方 Webhook 地址，「新增记录到多维表格」与「发送消息到话题群」由你的飞书工作流完成，消息模板随时可在飞书侧调整。</p>
             </div>
             <div class="actions">
@@ -754,7 +799,7 @@
           </div>
 
           <div class="section" style="margin-top: 14px; margin-bottom: 0;">
-            <div class="section-title"><span>🛠️</span> 飞书侧配置指引</div>
+            <div class="section-title"><span data-icon="tool" aria-hidden="true"></span>飞书侧配置指引</div>
             <ul class="config-list" style="margin-top: 10px;">
               <li><strong>① 建工作流：</strong>打开目标多维表格 → 左下角「工作流」→ 新建 → 触发器选「接收到 webhook 时」（增值功能，可用性与额度以界面提示为准；工作流与自动化共用每月运行次数），复制它提供的 Webhook 地址填到上方。</li>
               <li><strong>② 捕获参数：</strong>点击下方「发送测试」发一条样例数据，让触发器识别参数结构。参数键固定为 <code>item_id</code>（全站点统一条目 ID，供核查对账：IMDB=tt…、Steam=appId、RoyalRoad=rr…、MyDrama=md…、ReelShort=rs…、DramaShorts=ds…、NetShort=ns…、Netflix=nf…、AppleTV=at…、FlickReels=fr…、GoodShort=gs…、Shortical=sc…、ShortMax=sm…、DramaBox=db…、PinesDramas=pdd…/pdn…、Higgsfield=hf…，值与本地 CSV 的 itemId 列一致） / <code>title</code> / <code>title_zh</code> / <code>title_display</code> / <code>description</code> / <code>description_zh</code> / <code>summary</code> / <code>source</code> / <code>source_name</code> / <code>tags</code> / <code>genres</code> / <code>url</code> / <code>poster</code> / <code>scraped_at</code> / <code>pushed_at</code>，全部为字符串，空值为空字符串；<code>tags</code> 与 <code>genres</code> 为英文逗号分隔（genres＝站点原生内容类型标签，英文原值，v1.5.3 新增），站点显示名（source_name）不含空格。<strong>此前已配好的工作流</strong>要引用新增的 genres 参数，需重新点一次「发送测试」让触发器重新捕获参数结构（不重捕获也不影响原有运行，只是引用不到新参数）。</li>
@@ -773,7 +818,7 @@
         <div class="section">
           <div class="section-header">
             <div>
-              <div class="section-title"><span>🤖</span> 群机器人实时推送</div>
+              <div class="section-title"><span data-icon="robot" aria-hidden="true"></span>群机器人实时推送</div>
               <p class="help-text">另一条<strong>独立且免费</strong>的通道：新内容翻译完成后自动推一张卡片到群，<strong>不消耗多维表格工作流的每月运行次数</strong>（只有频率限流：单机器人 100 次/分钟、5 次/秒，扩展已按 250ms 间隔自动节流）。在目标群「设置 → 群机器人 → 添加自定义机器人」拿到 Webhook 地址填入即可，安全设置留空或按需配置。<br>推的是群消息不是表格记录，两条通道各管各的：表格数据仍走卡片右上角的 Lark 按钮与「数据存档」里的批量导出。<strong>推送失败会自动重试</strong>：先推完同批次其他卡，之后最多重试 3 次、每次间隔 1 分钟，仍失败则丢弃并记日志，全程不影响抓取与翻译落库。</p>
             </div>
           </div>
@@ -789,7 +834,7 @@
           <p class="help-text" id="larkBotHint" style="margin-top: 10px;"></p>
 
           <div class="section" style="margin-top: 14px; margin-bottom: 0;">
-            <div class="section-title"><span>🖼️</span> 封面图上传（飞书开放平台凭据）</div>
+            <div class="section-title"><span data-icon="photo" aria-hidden="true"></span>封面图上传（飞书开放平台凭据）</div>
             <p class="help-text">卡片里的图必须是 <code>img_key</code>，外链 URL 塞不进去（会被整条拒收，<code>ErrCode 11310</code>）。填入<strong>飞书自建应用</strong>的凭据后，扩展会在推送前把封面上传到飞书换取 <code>img_key</code>，卡片即可带真封面图（满宽原样，不裁不缩）。<br><strong>这不是第二条推送通道</strong>——推送目标仍由上面的 Webhook 地址决定；<strong>img_key 跨云可用</strong>，在飞书租户上传的图推到 Lark 国际版群里也能正常显示（2026-09-12 实测）。<br>两个字段都填才带图，留空就发无图卡。应用需在<a href="https://open.feishu.cn/app" target="_blank" rel="noopener">开放平台</a>创建并开通 <code>im:resource</code>（上传图片）权限后发布版本。上传失败会自动降级发无图卡，不会因此丢掉推送。</p>
             <div class="grid" style="margin-top: 10px;">
               <div class="form-field">
@@ -814,7 +859,7 @@
         <div class="section">
           <div class="section-header">
             <div>
-              <div class="section-title"><span>💾</span> 数据存档</div>
+              <div class="section-title"><span data-icon="database" aria-hidden="true"></span>数据存档</div>
               <p class="help-text">时间线数据保存在扩展本地存储中，同步服务运行时自动写入 <code>db/timeline.csv</code>；下方提供导出备份、导入恢复与按条件清理。</p>
             </div>
             <button class="btn btn-secondary" id="btnCheckSync">检测同步服务</button>
@@ -829,7 +874,7 @@
         <div class="section">
           <div class="section-header">
             <div>
-              <div class="section-title"><span>📦</span> 导出与恢复</div>
+              <div class="section-title"><span data-icon="package" aria-hidden="true"></span>导出与恢复</div>
               <p class="help-text">JSON 备份包含全部条目、可导入恢复；CSV 仅供表格软件查看，不支持回导。导入按条目 ID 去重——已存在的条目跳过不覆盖，订阅范围之外的条目不会导入。<br>扩展按订阅范围自动清理历史（取消订阅、按 <code>config/tag.json</code> 回读订阅等）前，会把被删条目存进「自动清理回收站」（只保留最近 3 批）；回收站有内容时才显示导出按钮，导出的文件同样用「导入 JSON 恢复」写回，恢复前要先把对应订阅加回来。</p>
             </div>
           </div>
@@ -845,7 +890,7 @@
         <div class="section">
           <div class="section-header">
             <div>
-              <div class="section-title"><span>📤</span> 导出到多维表格</div>
+              <div class="section-title"><span data-icon="table-export" aria-hidden="true"></span>导出到多维表格</div>
               <p class="help-text">把增量复制成表格格式，切到多维表格里选中表末第一个空行的首个单元格，按 <code>Ctrl+V</code> 直接追加。复制的是<strong>纯数据行、不含表头</strong>，列序与 <code>npm run export-lark</code> 导入建表时完全一致，封面链接已改写成官方「链接转附件」捷径能解析的形态。<br>增量按<strong>入库时间</strong>计（「导入恢复」补回的条目按原抓取时间，不当新条目重导）：只勾部分站点复制时，各站分别记住自己的上次复制时间，没勾的站点不受影响；复制时还没翻译完的条目照常导出（中文列为空或不全），译文完成后<strong>不会</strong>自动补发。<br>存量首次灌表走 <code>npm run export-lark</code> 导出文件再导入——条数太多不适合走剪贴板。</p>
             </div>
           </div>
@@ -864,7 +909,7 @@
         <div class="section">
           <div class="section-header">
             <div>
-              <div class="section-title"><span>🧹</span> 按条件清理</div>
+              <div class="section-title"><span data-icon="eraser" aria-hidden="true"></span>按条件清理</div>
               <p class="help-text">勾选站点后先「预览命中数」，确认无误再删除；删除会同步反映到时间线与 CSV，<strong>不可撤销</strong>——建议清理前先导出 JSON 备份（误删可导回）。</p>
             </div>
           </div>
@@ -885,6 +930,8 @@
     <div class="status" id="statusMsg" role="status" aria-live="polite"></div>
   </div>
 
+  <!-- 线条图标：载入即在 DOMContentLoaded 时填好 data-icon 占位 -->
+  <script src="../shared/icons.js"></script>
   <script src="../shared/site-registry.js"></script>
   <script src="../shared/url-match.js"></script>
   <script src="../shared/subscription-config.js"></script>

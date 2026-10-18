@@ -808,7 +808,8 @@
       if (sections.length === 0) return;
       appendSubscriptionDivider(groupEntry.name);
       sections.forEach(({ group, entries }) => {
-        appendSubscriptionGroup(group.label, group.icon, entries, 'catalog', checkedUrlSet, group.tag);
+        appendSubscriptionGroup(group.label, group.icon, entries, 'catalog', checkedUrlSet, group.tag,
+          SiteRegistry.accentOf(group.site));
       });
     });
 
@@ -834,7 +835,8 @@
     elements.subscriptionList.appendChild(divider);
   }
 
-  function appendSubscriptionGroup(label, icon, entries, kind, checkedUrlSet, hiddenTag) {
+  // accent（v1.8.0）：站点主题色，标题旁一个小色点，和弹窗切到该站时的配色对得上；「其他」「自定义」两组不传
+  function appendSubscriptionGroup(label, icon, entries, kind, checkedUrlSet, hiddenTag, accent) {
     if (entries.length === 0) return;
 
     const group = document.createElement('div');
@@ -851,6 +853,13 @@
     const title = document.createElement('span');
     title.textContent = label;
     header.appendChild(title);
+    if (accent) {
+      const dot = document.createElement('span');
+      dot.className = 'site-accent-dot';
+      dot.style.background = accent;
+      dot.title = `${label} 的主题色`;
+      header.appendChild(dot);
+    }
 
     const selectAll = document.createElement('label');
     selectAll.className = 'subscription-select-all';

@@ -39,37 +39,40 @@
   // IMDB / Steam / RoyalRoad 三站的订阅页路径固定，path 收窄到 adapter.matches 认的入口
   // （2026-09-25 审查 manifest-overbroad-injection：整站 /* 让用户在这三站浏览的每个页面
   // 都被注入三个脚本和 CSS，却只有订阅页用得上）
+  // accent（v1.8.0）：站点主题色，弹窗 / 共享页切到该站时整个面板按它染色（site-tabs.js applySiteTheme，
+  // 派生规则在 timeline-cards.css :root）。取自各站 logo 的主色；Steam 的 logo 是深海军蓝、AppleTV 是灰，
+  // 在深底上没有强调效果，分别改用 Steam 商店的亮蓝与银白。同键多条（DramaBox）色值必须一致
   const SITES = [
-    { site: 'imdb', name: 'IMDB', host: 'imdb.com', match: 'suffix', path: ['/search/title*', '/find*'] },
-    { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*' },
-    { site: 'appletv', name: 'AppleTV', host: 'tv.apple.com', match: 'exact', path: '/us/collection/most-popular-now/*' },
+    { site: 'imdb', name: 'IMDB', host: 'imdb.com', match: 'suffix', path: ['/search/title*', '/find*'], accent: '#F5C518' },
+    { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*', accent: '#E50914' },
+    { site: 'appletv', name: 'AppleTV', host: 'tv.apple.com', match: 'exact', path: '/us/collection/most-popular-now/*', accent: '#D4D4D8' },
     // Higgsfield（v1.7.2）：整站是用户可能天天在用的 AI 生成工具，只注入订阅页 /community/originals
     // （理由同上面的 manifest-overbroad-injection）；末尾的 * 连查询串一起匹配，?list=<板块> 照样命中。
     // exact：www 会 301 到裸域，订阅页只在裸域上
-    { site: 'higgsfield', name: 'Higgsfield', host: 'higgsfield.ai', match: 'exact', path: '/community/originals*' },
-    { site: 'steam', name: 'Steam', host: 'store.steampowered.com', match: 'exact', path: ['/category/*', '/tags/*'] },
-    { site: 'mydrama', name: 'MyDrama', host: 'my-drama.com', match: 'suffix' },
-    { site: 'reelshort', name: 'ReelShort', host: 'reelshort.com', match: 'suffix' },
-    { site: 'dramashorts', name: 'DramaShorts', host: 'dramashorts.io', match: 'suffix' },
-    { site: 'netshort', name: 'NetShort', host: 'netshort.com', match: 'suffix' },
+    { site: 'higgsfield', name: 'Higgsfield', host: 'higgsfield.ai', match: 'exact', path: '/community/originals*', accent: '#D1FE17' },
+    { site: 'steam', name: 'Steam', host: 'store.steampowered.com', match: 'exact', path: ['/category/*', '/tags/*'], accent: '#66C0F4' },
+    { site: 'mydrama', name: 'MyDrama', host: 'my-drama.com', match: 'suffix', accent: '#6678FF' },
+    { site: 'reelshort', name: 'ReelShort', host: 'reelshort.com', match: 'suffix', accent: '#FC2849' },
+    { site: 'dramashorts', name: 'DramaShorts', host: 'dramashorts.io', match: 'suffix', accent: '#EC13AB' },
+    { site: 'netshort', name: 'NetShort', host: 'netshort.com', match: 'suffix', accent: '#EA276D' },
     // 不加 path：Chrome 匹配模式的路径段连查询串一起匹配，'/' 匹配不到首页订阅 '/?list=…'，
     // 留默认 /* 与其余短剧站一致（非首页路径由 adapter.matches 闸住，只是不挂浮动按钮）
-    { site: 'flickreels', name: 'FlickReels', host: 'flickreels.net', match: 'suffix' },
+    { site: 'flickreels', name: 'FlickReels', host: 'flickreels.net', match: 'suffix', accent: '#FFE200' },
     // 三站同上：首页/榜单页订阅都可能带查询串，path 一律留默认 /*
     // shortmax 的站点键取品牌名（站点 og:site_name 与用户标签都是 ShortMax），host 才是 shorttv.live
-    { site: 'goodshort', name: 'GoodShort', host: 'goodshort.com', match: 'suffix' },
-    { site: 'shortical', name: 'Shortical', host: 'shortical.com', match: 'suffix' },
-    { site: 'shortmax', name: 'ShortMax', host: 'shorttv.live', match: 'suffix' },
+    { site: 'goodshort', name: 'GoodShort', host: 'goodshort.com', match: 'suffix', accent: '#F42D3B' },
+    { site: 'shortical', name: 'Shortical', host: 'shortical.com', match: 'suffix', accent: '#952CD5' },
+    { site: 'shortmax', name: 'ShortMax', host: 'shorttv.live', match: 'suffix', accent: '#F66210' },
     // DramaBox 一个站点键挂两个域名（v1.6.11）：同一套 Next.js 代码的两次构建、共用
     // 封面 CDN 与同一套 bookId，但两站的板块内容各自独立编排（四个目标板块 72 个位置
     // 实测只 62 部不重复），故两站都抓、合并成一个来源。两个 host 互不为后缀
     // （'www.dramaboxdb.com'.endsWith('dramabox.com') 为 false），条目顺序不影响匹配。
-    { site: 'dramabox', name: 'DramaBox', host: 'dramabox.com', match: 'suffix' },
-    { site: 'dramabox', name: 'DramaBox', host: 'dramaboxdb.com', match: 'suffix' },
-    { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix', path: '/fictions/*' },
+    { site: 'dramabox', name: 'DramaBox', host: 'dramabox.com', match: 'suffix', accent: '#FC0150' },
+    { site: 'dramabox', name: 'DramaBox', host: 'dramaboxdb.com', match: 'suffix', accent: '#FC0150' },
+    { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix', path: '/fictions/*', accent: '#FECA4F' },
     // 同 FlickReels：首页订阅带 ?list=，Chrome 匹配模式的路径段连查询串一起匹配，
     // '/' 匹配不到 '/?list=…'，故 path 留默认 /*（非订阅页由 adapter.matches 闸住）
-    { site: 'pinedrama', name: 'PinesDramas', host: 'pinedrama.com', match: 'suffix' }
+    { site: 'pinedrama', name: 'PinesDramas', host: 'pinedrama.com', match: 'suffix', accent: '#14B8A6' }
   ];
 
   // 弹窗/共享页头部的折叠分组（2026-09-12 用户定）。数组顺序即展示顺序：
@@ -104,6 +107,17 @@
   const SOURCE_NAMES = {};
   for (const entry of SITES) {
     SOURCE_NAMES[entry.site] = entry.name;
+  }
+
+  // 未知站点与设置页（不属于任何站点）用的主题色：v1.8.0 之前全局主色 #6366f1 调亮一档，深底上读得清
+  const DEFAULT_ACCENT = '#818CF8';
+  const SITE_ACCENTS = {};
+  for (const entry of SITES) {
+    SITE_ACCENTS[entry.site] = entry.accent;
+  }
+
+  function accentOf(site) {
+    return Object.prototype.hasOwnProperty.call(SITE_ACCENTS, site) ? SITE_ACCENTS[site] : DEFAULT_ACCENT;
   }
 
   function siteOfHostname(hostname) {
@@ -273,7 +287,7 @@
   }
 
   const api = {
-    SITES, SITE_GROUPS, DEFAULT_GROUP, CATEGORY_SOURCES, SOURCE_NAMES,
+    SITES, SITE_GROUPS, DEFAULT_GROUP, CATEGORY_SOURCES, SOURCE_NAMES, DEFAULT_ACCENT, accentOf,
     groupOfSite, siteOfHostname, siteOfUrl, siteOfDrama, isInjectableUrl, contentScriptMatches,
     IMDB_COMPANY_SITES, PLATFORM_SEARCH_PAGES, imdbPlatformOf, platformSearchQuery, platformSearchUrl, isPlatformUrl,
     FORCE_ENGLISH_DOMAINS, FORCE_ENGLISH_ACCEPT_LANGUAGE, isForceEnglishUrl

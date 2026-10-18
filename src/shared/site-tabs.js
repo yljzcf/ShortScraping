@@ -302,6 +302,19 @@
       restoreScroll(openGroupEl, previous, layout.activeSource);
     }
     restoreFocus(container, focused);
+    applySiteTheme(container.ownerDocument, layout.activeSource);
+  }
+
+  /**
+   * 站点主题色（v1.8.0）：把活动站点的品牌色写到 <html> 的 --accent 上，整页配色由
+   * timeline-cards.css :root 从它派生（深色为主、浅色为辅、站点色只作强调）。两页切站都要
+   * 经过 render，所以在这里接一次就够；拿不到文档（单测的假 DOM）时什么也不做。
+   */
+  function applySiteTheme(doc, site) {
+    const root = doc && doc.documentElement;
+    if (!root || !root.style || typeof root.style.setProperty !== 'function') return;
+    root.style.setProperty('--accent', Registry.accentOf(site));
+    if (root.dataset) root.dataset.site = site || '';
   }
 
   function captureFocus(container) {
@@ -420,6 +433,7 @@
     resolveActiveSource,
     resolveLayout,
     render,
+    applySiteTheme,
     DRAG_THRESHOLD_PX,
     beginDrag,
     moveDrag,

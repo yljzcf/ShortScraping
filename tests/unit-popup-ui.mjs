@@ -135,15 +135,17 @@ async function popupFixture({ stored = {} } = {}) {
     clearTimeout(id) { timers.delete(id); }
   });
 
+  // popup.html 先载 shared/icons.js（按钮瞬态图标在 popup.js 求值时就取，v1.8.0），夹具照同一顺序
+  vm.runInContext(fs.readFileSync(path.join(root, 'src/shared/icons.js'), 'utf8'), context);
   let script = fs.readFileSync(path.join(root, 'src/popup/popup.js'), 'utf8');
   const marker = "document.addEventListener('DOMContentLoaded', init);";
   if (!script.includes(marker)) throw new Error('popup.js 的 DOMContentLoaded 注册行已变，夹具需同步');
   script = script.replace(marker, 'globalThis.fixture = { elements, state, init, refreshActiveSource, '
-    + 'filterDramasByConfiguredUrls, setToast: fn => { showToast = fn; } };');
+    + 'filterDramasByConfiguredUrls, lastUpdateSummary, setToast: fn => { showToast = fn; } };');
   vm.runInContext(script, context);
   const fx = context.fixture;
   const toasts = [];
-  fx.setToast((message, opts = {}) => toasts.push({ message, type: opts.type || 'info' }));
+  fx.setToast((message, opts = {}) => toasts.push({ message, type: opts.type || 'info', duration: opts.duration }));
 
   const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
   /** 触发全部到期计时器（去抖渲染等），不推进真实时间。 */
@@ -156,7 +158,9 @@ async function popupFixture({ stored = {} } = {}) {
     fx, byId, store, messages, pendingScrapes, tabsCreated, storageGets, tabRenders, toasts, settle, flushTimers,
     timelineRenders: () => timelineRenders,
     fireChange: changes => onChanged(changes, 'local'),
-    lastUpdate: () => byId.statsLastUpdate
+    // v1.8.0 起「抓取于 …」不常驻底栏：打开时弹提示，异常时底栏留警告图标。文案 / 明细 / 级别由 lastUpdateSummary 给出
+    summary: () => fx.lastUpdateSummary(),
+    alert: () => byId.scrapeAlert
   };
 }
 
@@ -170,47 +174,99 @@ const baseStore = (extra = {}) => ({
   ...extra
 });
 
-// ============ L 组：底栏 lastScrape / lastScrapeFailure ============
+// ============ L 组：「抓取于 …」文案（lastScrape / lastScrapeFailure） ============
 {
   const h = await popupFixture({ stored: baseStore({ lastScrape: T0 }) });
   check('L0 前提：打开时显示「抓取于 …」、无失败后缀',
-    h.lastUpdate().textContent === `抓取于 REL(${T0})` && h.lastUpdate().title === '', h.lastUpdate().textContent);
+    h.summary().text === `抓取于 REL(${T0})` && h.summary().title === '', h.summary().text);
 
   const before = h.timelineRenders();
   h.fireChange({ lastScrape: { oldValue: T0, newValue: T1 } });
   check('L1 弹窗开着时后台收轮只写 lastScrape：底栏立即跟上（修复前停在旧时间）',
-    h.lastUpdate().textContent === `抓取于 REL(${T1})`, h.lastUpdate().textContent);
+    h.summary().text === `抓取于 REL(${T1})`, h.summary().text);
   check('L1b 只有 lastScrape 变化不重建时间线', h.timelineRenders() === before && h.flushTimers() === 0,
     `renders ${before}→${h.timelineRenders()}`);
 
   h.fireChange({ lastScrapeFailure: { newValue: { at: T2, failed: 3, total: 3, error: 'net::ERR_INTERNET_DISCONNECTED' } } });
   check('L2 最近一轮全部失败（比 lastScrape 新）：「抓取于」后接「· 最近一轮全部失败」',
-    h.lastUpdate().textContent === `抓取于 REL(${T1}) · 最近一轮全部失败`, h.lastUpdate().textContent);
-  check('L2b 失败原因与条数进 title，并标红', h.lastUpdate().title.includes('net::ERR_INTERNET_DISCONNECTED')
-    && h.lastUpdate().title.includes('3/3') && h.lastUpdate().classes.has('is-failed'), h.lastUpdate().title);
+    h.summary().text === `抓取于 REL(${T1}) · 最近一轮全部失败`, h.summary().text);
+  check('L2b 失败原因与条数进 title，并标红', h.summary().title.includes('net::ERR_INTERNET_DISCONNECTED')
+    && h.summary().title.includes('3/3') && (h.summary().level === 'error'), h.summary().title);
 
   const T3 = '2026-09-25T13:00:00.000Z';
   h.fireChange({ lastScrape: { newValue: T3 }, lastScrapeFailure: { newValue: null } });
   check('L3 下一轮有成功（同一次写清掉失败记录）：后缀、title、标红一并撤掉',
-    h.lastUpdate().textContent === `抓取于 REL(${T3})` && h.lastUpdate().title === '' && !h.lastUpdate().classes.has('is-failed'),
-    `${h.lastUpdate().textContent} | ${h.lastUpdate().title}`);
+    h.summary().text === `抓取于 REL(${T3})` && h.summary().title === '' && !(h.summary().level === 'error'),
+    `${h.summary().text} | ${h.summary().title}`);
 
   h.fireChange({ dramas: { newValue: [] }, lastScrape: { newValue: null } });
   h.flushTimers();
   check('L4 清空数据（dramas 与 lastScrape:null 同一次写）：去抖渲染后显示「未抓取」',
-    h.lastUpdate().textContent === '未抓取', h.lastUpdate().textContent);
+    h.summary().text === '未抓取', h.summary().text);
 }
 {
   const h = await popupFixture({ stored: baseStore({ lastScrape: T2, lastScrapeFailure: { at: T1, failed: 2, total: 2, error: 'x' } }) });
-  check('L5 失败记录比最近一次成功旧：不提示', h.lastUpdate().textContent === `抓取于 REL(${T2})` && h.lastUpdate().title === '',
-    h.lastUpdate().textContent);
+  check('L5 失败记录比最近一次成功旧：不提示', h.summary().text === `抓取于 REL(${T2})` && h.summary().title === '',
+    h.summary().text);
 }
 {
   const h = await popupFixture({ stored: baseStore({ lastScrapeFailure: { at: T1, failed: 2, total: 2, error: 'timeout' } }) });
   check('L6 从未成功过、只有失败记录：「未抓取 · 最近一轮全部失败」',
-    h.lastUpdate().textContent === '未抓取 · 最近一轮全部失败' && h.lastUpdate().title.includes('timeout'), h.lastUpdate().textContent);
+    h.summary().text === '未抓取 · 最近一轮全部失败' && h.summary().title.includes('timeout'), h.summary().text);
   check('L7 打开弹窗时一并读取 lastScrapeFailure', h.storageGets.some(keys => keys.includes('lastScrapeFailure')),
     JSON.stringify(h.storageGets));
+}
+
+// ============ O 组：打开弹窗时弹一次「抓取于 …」，异常时底栏留警告图标（v1.8.0） ============
+{
+  const h = await popupFixture({ stored: baseStore({ lastScrape: T0 }) });
+  const opened = h.toasts.filter(t => t.message.startsWith('抓取于') || t.message.startsWith('未抓取'));
+  check('O1 打开弹窗：顶部弹一次「抓取于 …」，正常 3 秒、info 样式',
+    opened.length === 1 && opened[0].message === `抓取于 REL(${T0})` && opened[0].type === 'info' && opened[0].duration === 3000,
+    JSON.stringify(h.toasts));
+  check('O1b 正常时底栏不显示警告图标', h.alert().classes.has('hidden'), JSON.stringify([...h.alert().classes]));
+  h.fireChange({ lastScrape: { oldValue: T0, newValue: T1 } });
+  h.fireChange({ urlTags: { newValue: baseStore().urlTags } });   // 订阅变化会重读数据（loadData），也不再弹
+  await h.settle();
+  h.flushTimers();
+  check('O2 之后的 storage 变化（含订阅变化重读数据）不再弹「抓取于」',
+    h.toasts.filter(t => t.message.startsWith('抓取于')).length === 1, JSON.stringify(h.toasts));
+
+  h.fireChange({ lastScrapeFailure: { newValue: { at: T2, failed: 3, total: 3, error: 'net::ERR_INTERNET_DISCONNECTED' } } });
+  check('O3 弹窗开着时出现整轮全失败：底栏亮红色警告图标，悬停带失败原因',
+    !h.alert().classes.has('hidden') && h.alert().classes.has('is-error') && !h.alert().classes.has('is-warning')
+      && h.alert().title.includes('最近一轮全部失败') && h.alert().title.includes('net::ERR_INTERNET_DISCONNECTED'),
+    JSON.stringify({ classes: [...h.alert().classes], title: h.alert().title }));
+  const before = h.toasts.length;
+  h.alert().click();
+  check('O4 点警告图标再弹一次提示（error 样式、停 6 秒）',
+    h.toasts.length === before + 1 && h.toasts.at(-1).type === 'error' && h.toasts.at(-1).duration === 6000
+      && h.toasts.at(-1).message.endsWith('· 最近一轮全部失败'), JSON.stringify(h.toasts.at(-1)));
+  h.fireChange({ lastScrape: { newValue: T2 }, lastScrapeFailure: { newValue: null } });
+  check('O5 异常清掉：警告图标随之隐藏', h.alert().classes.has('hidden') && h.alert().title === '', JSON.stringify([...h.alert().classes]));
+}
+{
+  const warnings = { at: T1, items: [{ url: IMDB, kind: 'empty' }] };
+  const h = await popupFixture({ stored: baseStore({ lastScrape: T1, lastScrapeWarnings: warnings }) });
+  const opened = h.toasts.find(t => t.message.startsWith('抓取于'));
+  check('O6 打开时就有「抓到 0 条」告警：提示是 warning 样式、停 6 秒，底栏亮黄色警告图标并列出订阅',
+    opened?.type === 'warning' && opened?.duration === 6000 && opened?.message === `抓取于 REL(${T1}) · 1 个订阅抓到 0 条`
+      && h.alert().classes.has('is-warning') && !h.alert().classes.has('hidden') && h.alert().title.includes(IMDB),
+    JSON.stringify({ opened, classes: [...h.alert().classes] }));
+}
+{
+  // 底栏左侧按全库统计（已按订阅过滤），不再只算当前站点
+  const h = await popupFixture({ stored: baseStore({
+    lastScrape: T0,
+    dramas: [
+      { id: 'a', source: 'imdb', sourceListUrl: IMDB, status: 'new' },
+      { id: 'b', source: 'reelshort', sourceListUrl: REELSHORT, status: 'trans' },
+      { id: 'c', source: 'reelshort', sourceListUrl: REELSHORT, status: 'trans' }
+    ]
+  }) });
+  check('O7 底栏左侧是全库条数与全库翻译状态（当前站点是 IMDB，只有 1 部）',
+    h.byId.statsTotal.textContent === '共 3 部' && h.byId.statusText.textContent === '1 部待翻译',
+    JSON.stringify({ total: h.byId.statsTotal.textContent, status: h.byId.statusText.textContent }));
 }
 
 // ============ M 组：单站刷新 ============
@@ -253,20 +309,20 @@ const baseStore = (extra = {}) => ({
   const warnings = { at: T1, items: [{ url: IMDB, kind: 'empty' }, { url: 'https://gone.example/list', kind: 'unsubscribed' }] };
   const h = await popupFixture({ stored: baseStore({ lastScrape: T1, lastScrapeWarnings: warnings }) });
   check('V1 底栏后缀「· 1 个订阅抓到 0 条」（已退订的 URL 不算）、标黄 is-warning',
-    h.lastUpdate().textContent === `抓取于 REL(${T1}) · 1 个订阅抓到 0 条` && h.lastUpdate().classes.has('is-warning'),
-    h.lastUpdate().textContent);
-  check('V2 悬停列出站名、URL 与原因', h.lastUpdate().title.includes('IMDB') && h.lastUpdate().title.includes(IMDB)
-    && h.lastUpdate().title.includes('站点改版') && !h.lastUpdate().title.includes('gone.example'), h.lastUpdate().title);
+    h.summary().text === `抓取于 REL(${T1}) · 1 个订阅抓到 0 条` && (h.summary().level === 'warning'),
+    h.summary().text);
+  check('V2 悬停列出站名、URL 与原因', h.summary().title.includes('IMDB') && h.summary().title.includes(IMDB)
+    && h.summary().title.includes('站点改版') && !h.summary().title.includes('gone.example'), h.summary().title);
   check('V3 loadData 连同 lastScrapeWarnings 一起读', h.storageGets.some(keys => keys.includes('lastScrapeWarnings')), JSON.stringify(h.storageGets));
   h.fireChange({ lastScrapeFailure: { newValue: { at: T2, failed: 2, total: 2, error: 'x' } } });
-  check('V4 整轮全失败的提示优先，不再叠加 0 条告警', h.lastUpdate().textContent === `抓取于 REL(${T1}) · 最近一轮全部失败`
-    && !h.lastUpdate().classes.has('is-warning') && h.lastUpdate().classes.has('is-failed'), h.lastUpdate().textContent);
+  check('V4 整轮全失败的提示优先，不再叠加 0 条告警', h.summary().text === `抓取于 REL(${T1}) · 最近一轮全部失败`
+    && !(h.summary().level === 'warning') && (h.summary().level === 'error'), h.summary().text);
   const rendersBefore = h.timelineRenders();
   h.fireChange({ lastScrape: { newValue: T2 }, lastScrapeFailure: { newValue: null }, lastScrapeWarnings: { newValue: null } });
   h.flushTimers();
-  check('V5 告警随 onChanged 清掉；只刷底栏、不重建时间线', h.lastUpdate().textContent === `抓取于 REL(${T2})`
-    && !h.lastUpdate().classes.has('is-warning') && h.timelineRenders() === rendersBefore,
-    `${h.lastUpdate().textContent} renders=${h.timelineRenders() - rendersBefore}`);
+  check('V5 告警随 onChanged 清掉；只刷底栏、不重建时间线', h.summary().text === `抓取于 REL(${T2})`
+    && !(h.summary().level === 'warning') && h.timelineRenders() === rendersBefore,
+    `${h.summary().text} renders=${h.timelineRenders() - rendersBefore}`);
 
   const refresh = async (summary) => {
     const run = h.fx.refreshActiveSource('imdb');
@@ -298,9 +354,9 @@ const baseStore = (extra = {}) => ({
     { url: REELSHORT, kind: 'failed', detail: '整页抓取超时' }
   ] };
   const h = await popupFixture({ stored: baseStore({ lastScrape: T1, lastScrapeWarnings: warnings }) });
-  const title = h.lastUpdate().title;
-  check('V11 底栏照样计数（被拦截 / 失败都算「抓到 0 条」）', h.lastUpdate().textContent === `抓取于 REL(${T1}) · 2 个订阅抓到 0 条`,
-    h.lastUpdate().textContent);
+  const title = h.summary().title;
+  check('V11 底栏照样计数（被拦截 / 失败都算「抓到 0 条」）', h.summary().text === `抓取于 REL(${T1}) · 2 个订阅抓到 0 条`,
+    h.summary().text);
   check('V12 悬停：blocked 说站点拒绝访问并附 HTTP 403，failed 说打开或抓取失败并附原因',
     title.includes(`${IMDB}：站点拒绝访问（多为网络 / 地区拦截，检查代理节点），HTTP 403`)
       && title.includes(`${REELSHORT}：打开或抓取失败，整页抓取超时`), title);

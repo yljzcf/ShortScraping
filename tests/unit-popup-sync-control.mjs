@@ -106,10 +106,12 @@ function popupFixture() {
   node('btnSyncStart', 'button', sync, ['hidden']);
   const version = node('versionStatus', 'div', doc);
   node('versionStatusText', 'span', version);
+  // v1.8.0：底栏「局域网」区块本身开合二维码浮层（不再有单独的二维码按钮），浮层里点地址复制
   const lan = node('lanShare', 'div', doc);
   node('lanShareText', 'span', lan);
-  node('btnLanQr', 'button', lan, ['hidden']);
-  node('lanQrPopover', 'div', doc, ['hidden']);
+  const popover = node('lanQrPopover', 'div', doc, ['hidden']);
+  node('lanQrCanvas', 'canvas', popover);
+  node('lanQrUrl', 'button', popover);
   doc.getElementById = id => byId[id] || (byId[id] = new FakeEl(id, 'div', doc));
   const misc = {};
   doc.querySelector = sel => misc[sel] || (misc[sel] = new FakeEl(sel, 'div', doc));
@@ -182,11 +184,13 @@ function popupFixture() {
     clearTimeout(id) { timers.delete(id); }
   });
 
+  // popup.html 先载 shared/icons.js（按钮瞬态图标在 popup.js 求值时就取，v1.8.0），夹具照同一顺序
+  vm.runInContext(fs.readFileSync(path.join(root, 'src/shared/icons.js'), 'utf8'), context);
   let script = fs.readFileSync(path.join(root, 'src/popup/popup.js'), 'utf8');
   const marker = "document.addEventListener('DOMContentLoaded', init);";
   if (!script.includes(marker)) throw new Error('popup.js 的 DOMContentLoaded 注册行已变，夹具需同步');
   script = script.replace(marker, 'globalThis.fixture = { elements, state, cacheElements, bindEvents, '
-    + 'checkSyncServiceStatus, runSyncControl, postSyncControl, onSyncRestartClick, onSyncStopClick, onLanShareClick, onSyncFolderClick, '
+    + 'checkSyncServiceStatus, runSyncControl, postSyncControl, onSyncRestartClick, onSyncStopClick, onLanShareClick, onLanUrlClick, onSyncFolderClick, '
     + 'setToast: fn => { showToast = fn; } };');
   vm.runInContext(script, context);
   const fx = context.fixture;
@@ -251,9 +255,10 @@ const LOG = '/Users/alice/Library/Logs/ShortScraping/sync.log';
 // ============ K 组：键盘 ============
 {
   const h = await onlineFixture();
-  check('K0 前提：检测到服务后状态栏为「已开启」、⏹/🔄 可见、▦ 可见',
-    h.statusText() === '同步服务：已开启' && !h.hidden('btnSyncStop') && !h.hidden('btnSyncRestart') && !h.hidden('btnLanQr'),
-    JSON.stringify({ text: h.statusText() }));
+  check('K0 前提：检测到服务后状态栏为「已开启」、⏹/🔄 可见、底栏「局域网」可用',
+    h.statusText() === '同步服务：已开启' && !h.hidden('btnSyncStop') && !h.hidden('btnSyncRestart')
+      && h.byId.lanShare.classes.has('is-on') && h.byId.lanShareText.textContent === '局域网',
+    JSON.stringify({ text: h.statusText(), lan: h.byId.lanShareText.textContent }));
 
   h.server.posts['/shutdown'] = () => { h.server.health = () => null; return { body: { ok: true, message: 'shutting down' } }; };
   const ev = pressKey(h.byId.btnSyncStop, 'Enter');
@@ -282,11 +287,15 @@ const LOG = '/Users/alice/Library/Logs/ShortScraping/sync.log';
 }
 {
   const h = await onlineFixture();
-  const ev = pressKey(h.byId.btnLanQr, 'Enter');
+  const ev = pressKey(h.byId.lanShare, 'Enter');
   await h.idle();
-  check('K4 ▦ 上按 Enter：弹出二维码，不把链接复制走（修复前执行的是 onLanShareClick）',
-    ev.defaultPrevented === false && h.qrDraws.length === 1 && !h.hidden('lanQrPopover') && h.clipboard.length === 0,
-    JSON.stringify({ qr: h.qrDraws, clipboard: h.clipboard }));
+  check('K4 底栏「局域网」上按 Enter：弹出二维码浮层（地址在浮层里），不把链接复制走',
+    ev.defaultPrevented === true && h.qrDraws.length === 1 && !h.hidden('lanQrPopover') && h.clipboard.length === 0
+      && h.byId.lanQrUrl.textContent === 'http://192.168.1.8:31919',
+    JSON.stringify({ qr: h.qrDraws, clipboard: h.clipboard, url: h.byId.lanQrUrl.textContent }));
+  pressKey(h.byId.lanShare, ' ');
+  await h.idle();
+  check('K4b 再按一次（空格）收起浮层', h.hidden('lanQrPopover') && h.qrDraws.length === 1, JSON.stringify(h.qrDraws));
 }
 {
   const h = popupFixture();
@@ -311,10 +320,12 @@ const LOG = '/Users/alice/Library/Logs/ShortScraping/sync.log';
   const other = pressKey(h.byId.syncServiceStatus, 'a');
   check('K6b 其他按键不触发、不 preventDefault', !other.defaultPrevented && h.healthCalls().length === 2, '');
 
-  const lanEnter = pressKey(h.byId.lanShare, 'Enter');
+  pressKey(h.byId.lanShare, 'Enter');
   await h.idle();
-  check('K7 焦点在局域网区块本身时 Enter 仍复制链接', lanEnter.defaultPrevented
-    && h.clipboard.includes('http://192.168.1.8:31919'), JSON.stringify(h.clipboard));
+  const urlEnter = pressKey(h.byId.lanQrUrl, 'Enter');
+  await h.idle();
+  check('K7 浮层里的地址是原生按钮：Enter 复制链接，不连带收起浮层', urlEnter.defaultPrevented === false
+    && h.clipboard.includes('http://192.168.1.8:31919') && !h.hidden('lanQrPopover'), JSON.stringify(h.clipboard));
 }
 
 // ============ C 组：runSyncControl ============
@@ -448,7 +459,8 @@ function scheduleRestart(h, { body, oldMs = 1500, downMs = 1000, newPid = 200 })
     JSON.stringify(polls.map(c => c.at)));
   check('R6c 失败后状态栏刷新为「已关闭」：⏹/🔄 隐藏、▶ 出现、局域网显示未启动',
     h.statusText() === '同步服务：已关闭' && h.hidden('btnSyncStop') && h.hidden('btnSyncRestart')
-    && !h.hidden('btnSyncStart') && h.byId.lanShareText.textContent === '未启动' && h.hidden('btnLanQr'),
+    && !h.hidden('btnSyncStart') && h.byId.lanShareText.textContent === '局域网未启动'
+    && h.byId.lanShare.classes.has('is-off') && h.hidden('lanQrPopover'),
     JSON.stringify({ text: h.statusText(), lan: h.byId.lanShareText.textContent }));
   check('R6d 失败提示指向日志文件', h.toasts.at(-1)?.type === 'error'
     && h.toasts.at(-1)?.message === '重启后未检测到服务，请查看日志：~/Library/Logs/ShortScraping/sync.log',
@@ -526,18 +538,19 @@ function scheduleRestart(h, { body, oldMs = 1500, downMs = 1000, newPid = 200 })
 // ============ Y 组：复制失败如实提示 ============
 {
   const h = await onlineFixture();
-  const lanText = () => h.byId.lanShareText.textContent;
+  // v1.8.0：复制挪到浮层里的地址上（onLanUrlClick），反馈也写在地址本身
+  const lanText = () => h.byId.lanQrUrl.textContent;
   h.setClipboard('fail');
-  await h.drive(h.fx.onLanShareClick());
-  check('Y1 局域网链接复制失败：区块显示「复制失败」、错误提示里给出链接（不再说「已复制 ✓」）',
+  await h.drive(h.fx.onLanUrlClick());
+  check('Y1 局域网链接复制失败：地址处显示「复制失败」、错误提示里给出链接（不再说「已复制 ✓」）',
     lanText() === '复制失败' && h.toasts.some(t => t.type === 'error' && t.message.includes('http://192.168.1.8:31919')),
     JSON.stringify({ text: lanText(), toasts: h.toasts }));
   await h.idle();
-  check('Y1b 1.2 秒后区块恢复显示地址', lanText() === '192.168.1.8:31919', lanText());
+  check('Y1b 1.2 秒后恢复显示地址', lanText() === 'http://192.168.1.8:31919', lanText());
 
   h.setClipboard('fallback');
   h.toasts.length = 0;
-  await h.drive(h.fx.onLanShareClick());
+  await h.drive(h.fx.onLanUrlClick());
   check('Y2 writeText 被拒、execCommand 兜底成功：照常「已复制 ✓」，剪贴板拿到链接',
     lanText() === '已复制 ✓' && h.clipboard.at(-1) === 'http://192.168.1.8:31919' && !h.toasts.some(t => t.type === 'error'),
     JSON.stringify({ text: lanText(), clipboard: h.clipboard, toasts: h.toasts }));

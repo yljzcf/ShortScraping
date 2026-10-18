@@ -3,7 +3,7 @@
  * 弹窗与局域网共享页共用。
  *
  * 除配置默认值/归一化外，还放两件「译名怎么算、怎么显示」的纯判据
- * （hasChineseChars / titleDisplay）——它们的调用方横跨 content.js、
+ * （hasChineseChars / titleDisplay / titleParts）——它们的调用方横跨 content.js、
  * timeline-render.js 与 lark.js 三个互不相见的模块，只有放这里才是一份。
  */
 (function (global) {
@@ -69,15 +69,24 @@
    * title_display、群机器人卡片标题（lark）。
    */
   function titleDisplay(drama) {
-    const titleZh = String((drama && drama.titleZh) || '').trim(); // trim 防止仅含空白的字段渲染出空行
-    const title = String((drama && drama.title) || '').trim();
-    if (!titleZh) return title;
-    if (!title) return titleZh;
-    if (normalizeTitleForCompare(titleZh) === normalizeTitleForCompare(title)) return titleZh;
-    return `${titleZh}（${title}）`;
+    const { main, sub } = titleParts(drama);
+    return sub ? `${main}（${sub}）` : main;
   }
 
-  const api = { DEFAULT_CONFIG, normalizeConfig, hasChineseChars, titleDisplay };
+  /**
+   * 标题拆成主副两行（v1.8.0 卡片版式：中文主标题 + 英文副标题），判据与 titleDisplay 同一份：
+   * 只有中英文名都有且确实不同时才有 sub，否则 main 就是唯一的那个名字、sub 为空串。
+   */
+  function titleParts(drama) {
+    const titleZh = String((drama && drama.titleZh) || '').trim(); // trim 防止仅含空白的字段渲染出空行
+    const title = String((drama && drama.title) || '').trim();
+    if (!titleZh) return { main: title, sub: '' };
+    if (!title) return { main: titleZh, sub: '' };
+    if (normalizeTitleForCompare(titleZh) === normalizeTitleForCompare(title)) return { main: titleZh, sub: '' };
+    return { main: titleZh, sub: title };
+  }
+
+  const api = { DEFAULT_CONFIG, normalizeConfig, hasChineseChars, titleDisplay, titleParts };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   global.TranslateConfig = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

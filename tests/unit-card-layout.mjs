@@ -8,10 +8,13 @@ import './bootstrap.cjs';
 //
 // 两道防线，分别由 O 组与 C 组守着：
 //   O：orientationFromPoster 不拿占位图改判（根因，修完标题 12px → 196px）
-//   C：「占位图不铺满整行」在两页共用的 timeline-cards.css 里；「窄卡标题让行」底线（Steam 真发
-//      竖版封面时兜底，12px → 92px）属于 Steam 双列网格，两页各有一份（共享页包在 @media 里）
+//   C：「占位图不铺满整行」在两页共用的 timeline-cards.css 里。卡片操作按钮浮在右上角（弹窗才有）：
+//      v1.8.0 起只剩两枚、角标改成标题行里的小标签，留白从整个标题区 80px 收成只给标题第一行留 ≤60px；
+//      「窄卡标题让行」底线（Steam 真发竖版封面时兜底）仍在 popup.css——不让行标题就只剩一两个字
 //   D：2026-09-25 审计 E 把两页逐字相同的规则收进 src/shared/timeline-cards.css——三份文件之间
 //      不许再出现重复规则（重复就又回到「改一处漏一处」），两页都要先引入共享文件再引入自己的 css
+//   G：v1.8.0 时间线只按入库日期分组（去掉卡片上方的抓取时刻）；日期标题带今天 / 昨天与星期
+//   T：v1.8.0 标题分主副两行，titleParts 与 titleDisplay 判据同一份
 //
 // 用法：node tests/unit-card-layout.mjs
 import fs from 'node:fs';
@@ -57,23 +60,90 @@ const ruleBody = (src, selector) => {
 const fallbackPoster = ruleBody(sharedCss, '.drama-card.poster-fallback.card-landscape .card-poster');
 check(`C1 ${SHARED_CSS_REL} 横版下的占位图不显示`, Boolean(fallbackPoster) && /display:\s*none/.test(fallbackPoster),
   fallbackPoster || '(未匹配到规则)');
-// 占位图一藏，标题成了最上面的元素，必须让到右上按钮带下方，否则被压住
-const fallbackTitle = ruleBody(sharedCss, '.drama-card.poster-fallback.card-landscape .card-title');
-check(`C1b ${SHARED_CSS_REL} 藏了占位图后标题让到按钮下方`, Boolean(fallbackTitle) && /margin-top:\s*[1-9]/.test(fallbackTitle),
-  fallbackTitle || '(未匹配到规则)');
-for (const [rel, src] of Object.entries(CSS)) {
-  check(`C2 ${rel} 有「窄卡标题让行」底线规则`,
-    squash(src).includes('.drama-card:not(.card-full):not(.card-landscape) .card-title'), '');
+// 共享的 .card-title 不留白：共享页没有按钮，留白只在弹窗自己的 css 里给
+const titleRule = ruleBody(sharedCss, '.card-title');
+check(`C1b ${SHARED_CSS_REL} 的 .card-title 不为右上按钮留白`,
+  Boolean(titleRule) && !/padding-right/.test(titleRule) && !/margin-top/.test(titleRule), titleRule || '(未匹配到规则)');
+// 留白只给标题第一行（副标题在按钮底边之下、占满整宽），且不超过 60px（v1.8.0 前整个标题区 80px）
+{
+  const popupCss = squash(CSS['src/popup/popup.css']);
+  // 首个 `.card-title-row {` 就是不带前缀的那条（横版 / 窄卡的覆盖规则都排在它后面）
+  const rowReserve = ((ruleBody(CSS['src/popup/popup.css'], '.card-title-row') || '').match(/padding-right:\s*(\d+)px/) || [])[1];
+  check('C2 popup.css 只给 .card-title-row 留白，且不超过 60px', Number(rowReserve) > 0 && Number(rowReserve) <= 60, String(rowReserve));
+  const wholeTitle = popupCss.match(/[^{}]*\.card-title \{[^}]*padding-right:\s*[1-9][^}]*\}/);
+  check('C2a popup.css 不再给整个标题区（含副标题）留白', !wholeTitle, wholeTitle ? wholeTitle[0].trim() : '');
+  check('C2c share.css 不给标题留白（共享页没有操作按钮）',
+    !/\.card-title[^{]*\{[^}]*padding-right:\s*[1-9]/.test(squash(CSS['server/public/share.css'])), '');
+  // 窄卡让行：清掉留白并下移到按钮带下方
+  const m = popupCss.match(/\.drama-card:not\(\.card-full\):not\(\.card-landscape\) \.card-title-row \{([^}]*)\}/);
+  check('C2b popup.css 有「Steam 窄卡竖版标题让行」底线规则（padding-right:0 + margin-top）',
+    Boolean(m) && /padding-right:\s*0/.test(m[1]) && /margin-top:\s*[1-9]/.test(m[1]), m ? m[1].trim() : '(未匹配到规则)');
+  // 横版卡封面失效：占位图藏起后标题行成了最上面一行，要重新给按钮让位
+  const fallback = popupCss.match(/\.drama-card\.card-landscape\.poster-fallback \.card-title-row \{([^}]*)\}/);
+  check('C2d popup.css 横版卡封面失效时标题行重新留白', Boolean(fallback) && /padding-right:\s*[1-9]/.test(fallback[1]),
+    fallback ? fallback[1].trim() : '(未匹配到规则)');
+  const actions = ruleBody(CSS['src/popup/popup.css'], '.card-actions');
+  check('C3b popup.css 把 .card-actions 绝对定位到卡片右上角',
+    Boolean(actions) && /position:\s*absolute/.test(actions) && /top:/.test(actions) && /right:/.test(actions), actions || '(未匹配到规则)');
 }
-// 让行规则必须真的把 padding-right 归零，否则 80px 预留还在、标题照样只剩 10px
-for (const [rel, src] of Object.entries(CSS)) {
-  const m = squash(src).match(/\.drama-card:not\(\.card-full\):not\(\.card-landscape\) \.card-title \{([^}]*)\}/);
-  check(`C3 ${rel} 的让行规则清掉了 padding-right`,
-    Boolean(m) && /padding-right:\s*0/.test(m[1]), m ? m[1].trim() : '(未匹配到规则)');
+// 按钮由共享渲染模块画在卡片顶层（.card-content 之前），飞书是纸飞机线条图标；「待翻译」是标题行里的小标签
+{
+  const renderSrc = read('../src/shared/timeline-render.js');
+  const contentAt = renderSrc.indexOf('<div class="card-content">');
+  const actionsAt = renderSrc.indexOf('<div class="card-actions">');
+  check('C3 timeline-render 把卡片操作按钮画在卡片顶层、.card-content 之前',
+    actionsAt >= 0 && contentAt > actionsAt && !renderSrc.includes('status-badge') && renderSrc.includes('class="status-chip"'),
+    `actions=${actionsAt} content=${contentAt}`);
+  check('C3c 飞书按钮用纸飞机线条图标（不再是 lark.png）',
+    renderSrc.includes("global.Icons.svg('send')") && !renderSrc.includes('lark.png'), '');
 }
 // 加 poster-fallback 类的是共享渲染模块，两页共用——类名拼错就全盘失效
 check('C4 timeline-render 在封面失败时加 poster-fallback 类',
   read('../src/shared/timeline-render.js').includes("classList.add('poster-fallback')"), '');
+
+// ---------- G 组：时间线只按入库日期分组（v1.8.0） ----------
+{
+  const { groupByDate } = globalThis.TimelineRender;
+  const now = new Date(2026, 9, 18, 20, 0);   // 2026-10-18 周日（本地时间）
+  const at = (d, h, m) => new Date(2026, 9, d, h, m).toISOString();
+  const list = [
+    { id: 'a', scrapedAt: at(18, 14, 56) },
+    { id: 'b', scrapedAt: at(18, 9, 3) },     // 同一天、相隔五个多小时：v1.8.0 前会拆成两个时间组
+    { id: 'c', scrapedAt: at(17, 23, 59) },
+    { id: 'd', scrapedAt: at(16, 8, 0) },
+    { id: 'e', scrapedAt: new Date(2025, 11, 3, 10, 0).toISOString() },
+    { id: 'f' },
+    { id: 'g', scrapedAt: 'not a date' }
+  ];
+  const groups = groupByDate(list, now);
+  const view = groups.map(g => `${g.label}:${g.dramas.map(d => d.id).join('')}`);
+  check('G1 同一天的卡片都在一个日期组里，组内保持调用方给的顺序', view[0] === '今天 · 10月18日 周日:ab', JSON.stringify(view));
+  check('G2 昨天加前缀、其余写月日与星期、跨年才写年份',
+    view[1] === '昨天 · 10月17日 周六:c' && view[2] === '10月16日 周五:d' && view[3] === '2025年12月3日 周三:e', JSON.stringify(view));
+  check('G3 缺 scrapedAt 或时间戳非法的条目归入「未知日期」一组', view[4] === '未知日期:fg' && groups.length === 5, JSON.stringify(view));
+  const renderSrc = read('../src/shared/timeline-render.js');
+  check('G4 renderTimeline 不再输出抓取时刻（.timeline-time），formatTime 已删',
+    !renderSrc.includes('timeline-time') && !/\bformatTime\b/.test(renderSrc), '');
+  check('G5 日期标题末尾是当天条数', renderSrc.includes("count.textContent = `+${dateGroup.dramas.length}`"), '');
+}
+
+// ---------- T 组：标题主副两行（v1.8.0） ----------
+{
+  const { titleParts, titleDisplay } = globalThis.TranslateConfig;
+  const cases = [
+    [{ titleZh: '亿万总裁的二婚娇妻', title: "The Billionaire's Second Wife" }, { main: '亿万总裁的二婚娇妻', sub: "The Billionaire's Second Wife" }],
+    [{ titleZh: '骷髅传奇', title: '骷髅传奇' }, { main: '骷髅传奇', sub: '' }],
+    [{ titleZh: '《NBA 2K27》', title: 'NBA 2K27' }, { main: '《NBA 2K27》', sub: '' }],
+    [{ title: 'Untranslated Drama' }, { main: 'Untranslated Drama', sub: '' }],
+    [{ titleZh: '只有中文', title: '  ' }, { main: '只有中文', sub: '' }]
+  ];
+  for (const [drama, expected] of cases) {
+    const parts = titleParts(drama);
+    const joined = parts.sub ? `${parts.main}（${parts.sub}）` : parts.main;
+    check(`T1 titleParts ${JSON.stringify(drama)}`,
+      parts.main === expected.main && parts.sub === expected.sub && joined === titleDisplay(drama), JSON.stringify(parts));
+  }
+}
 
 // ---------- D 组：三份 CSS 之间零重复、两页先引共享样式 ----------
 /** 顶层切块（去注释、压空白）：@media / @keyframes 整块算一条，块内规则随所在上下文比较。 */

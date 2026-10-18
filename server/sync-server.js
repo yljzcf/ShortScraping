@@ -639,7 +639,9 @@ const STATIC_ROUTES = {
   // 弹窗与共享页共用的卡片/标签条样式（share.html 须在 share.css 之前引入）
   '/shared/timeline-cards.css': { file: path.join(SHARED_DIR, 'timeline-cards.css'), type: 'text/css; charset=utf-8' },
   // timeline-render 的标题文案单一真源（v1.6.2）；漏了这条共享页直接白屏
-  '/shared/translate-config.js': { file: path.join(SHARED_DIR, 'translate-config.js'), type: 'text/javascript; charset=utf-8' }
+  '/shared/translate-config.js': { file: path.join(SHARED_DIR, 'translate-config.js'), type: 'text/javascript; charset=utf-8' },
+  // 线条图标（v1.8.0）：空状态占位与卡片按钮都从这里取
+  '/shared/icons.js': { file: path.join(SHARED_DIR, 'icons.js'), type: 'text/javascript; charset=utf-8' }
 };
 
 const ICON_TYPES = {

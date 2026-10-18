@@ -24,6 +24,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { background } from './background-fixture.mjs';
 
 const worktreeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -352,6 +353,12 @@ await seed(mk('apply'));
 }
 
 // ============ 弹窗夹具：vm 跑真实 popup.js，只替换 DOMContentLoaded 注册行导出内部函数 ============
+// 按钮瞬态（v1.8.0 起是 shared/icons.js 的线条图标，取代 ⏳ / ✅ / ❌ / 🌍）：期望值与 popup.js 取自同一份图标表
+const Icons = createRequire(import.meta.url)(path.join(worktreeRoot, 'src/shared/icons.js'));
+const BUSY = Icons.svg('loader');
+const DONE = Icons.svg('check');
+const FAILED = Icons.svg('x');
+const TRANSLATE_ICON = Icons.svg('language');
 function popupFixture() {
   const messages = [];
   const pending = [];
@@ -375,6 +382,8 @@ function popupFixture() {
     setTimeout(fn, ms) { timers.push({ fn, ms }); return timers.length; },
     clearTimeout() {}
   });
+  // popup.html 先载 shared/icons.js（按钮瞬态图标在 popup.js 求值时就取，v1.8.0），夹具照同一顺序
+  vm.runInContext(fs.readFileSync(path.join(worktreeRoot, 'src/shared/icons.js'), 'utf8'), context);
   let script = fs.readFileSync(path.join(worktreeRoot, 'src/popup/popup.js'), 'utf8');
   const marker = "document.addEventListener('DOMContentLoaded', init);";
   if (!script.includes(marker)) throw new Error('popup.js 的 DOMContentLoaded 注册行已变，夹具需同步');
@@ -391,13 +400,13 @@ function popupFixture() {
   const nodesBySelector = { '.btn-translate': [], '.btn-lark': [] };
   fx.elements.containers = { timeline: { querySelectorAll: sel => nodesBySelector[sel] || [] } };
   fx.elements.toastBar = { classList: { add() {}, remove() {} } };
-  const LARK_ICON = '<img src="../../assets/icons/lark.png" alt="Lark">';
-  const makeBtn = (id, html = '🌍') => ({ dataset: { id }, innerHTML: html, disabled: false });
+  const LARK_ICON = Icons.svg('send');   // v1.8.0 起是纸飞机线条图标（此前是 lark.png）
+  const makeBtn = (id, html = TRANSLATE_ICON) => ({ dataset: { id }, innerHTML: html, disabled: false });
   const setNodes = (list, selector = '.btn-translate') => { nodesBySelector[selector] = list; };
   // 模拟一次全量重渲染：所有按钮节点换成默认态的新节点，再走产品的重贴钩子
   const rerender = () => {
     for (const sel of Object.keys(nodesBySelector)) {
-      nodesBySelector[sel] = nodesBySelector[sel].map(n => makeBtn(n.dataset.id, sel === '.btn-lark' ? LARK_ICON : '🌍'));
+      nodesBySelector[sel] = nodesBySelector[sel].map(n => makeBtn(n.dataset.id, sel === '.btn-lark' ? LARK_ICON : TRANSLATE_ICON));
     }
     if (typeof fx.reapply === 'function') fx.reapply();
     return nodesBySelector;
@@ -416,7 +425,7 @@ function popupFixture() {
   h.setNodes([btn]);
   const run = h.fx.translateSingleCard('d1', btn);
   await sleep(0);
-  check('U1 点击即置 ⏳ 并禁用', btn.innerHTML === '⏳' && btn.disabled === true, JSON.stringify(btn));
+  check('U1 点击即置 ⏳ 并禁用', btn.innerHTML === BUSY && btn.disabled === true, JSON.stringify(btn));
   check('U1b 只发一条 translateSingle 消息且只带 dramaId',
     h.messages.length === 1 && h.messages[0].action === 'translateSingle' && h.messages[0].dramaId === 'd1'
     && !('result' in h.messages[0]) && !('title' in h.messages[0]),
@@ -424,9 +433,9 @@ function popupFixture() {
   h.respond({ success: true, complete: true });
   await run;
   check('U1c 成功后回写 ✅（禁用），无成功 toast（卡片经 onChanged 自会刷新）',
-    btn.innerHTML === '✅' && btn.disabled === true && h.toasts.length === 0, JSON.stringify({ btn, toasts: h.toasts }));
+    btn.innerHTML === DONE && btn.disabled === true && h.toasts.length === 0, JSON.stringify({ btn, toasts: h.toasts }));
   const due = h.flushTimers();
-  check('U1d 2 秒后复原 🌍 并启用', due.some(t => t.ms === 2000) && btn.innerHTML === '🌍' && btn.disabled === false, JSON.stringify(btn));
+  check('U1d 2 秒后复原 🌍 并启用', due.some(t => t.ms === 2000) && btn.innerHTML === TRANSLATE_ICON && btn.disabled === false, JSON.stringify(btn));
 }
 
 // ---------- U2 进行中同卡再点：不发第二条消息 ----------
@@ -462,11 +471,11 @@ function popupFixture() {
   h.setNodes([otherBtn, newBtn]);          // storage.onChanged 全量重渲染：节点全部换新
   h.respond({ success: true, complete: true });
   await run;
-  check('U3 终态写到重渲染后同 data-id 的新节点', newBtn.innerHTML === '✅' && newBtn.disabled === true, JSON.stringify(newBtn));
-  check('U3b 已脱离 DOM 的旧节点停在 ⏳ 不再被写', oldBtn.innerHTML === '⏳', JSON.stringify(oldBtn));
-  check('U3c 其它卡片节点不受影响', otherBtn.innerHTML === '🌍' && otherBtn.disabled === false, JSON.stringify(otherBtn));
+  check('U3 终态写到重渲染后同 data-id 的新节点', newBtn.innerHTML === DONE && newBtn.disabled === true, JSON.stringify(newBtn));
+  check('U3b 已脱离 DOM 的旧节点停在 ⏳ 不再被写', oldBtn.innerHTML === BUSY, JSON.stringify(oldBtn));
+  check('U3c 其它卡片节点不受影响', otherBtn.innerHTML === TRANSLATE_ICON && otherBtn.disabled === false, JSON.stringify(otherBtn));
   h.flushTimers();
-  check('U3d 复原也落在新节点', newBtn.innerHTML === '🌍' && newBtn.disabled === false && oldBtn.innerHTML === '⏳', JSON.stringify({ newBtn, oldBtn }));
+  check('U3d 复原也落在新节点', newBtn.innerHTML === TRANSLATE_ICON && newBtn.disabled === false && oldBtn.innerHTML === BUSY, JSON.stringify({ newBtn, oldBtn }));
 }
 
 // ---------- U4 后台报错：❌ + 错误 toast ----------
@@ -479,10 +488,10 @@ function popupFixture() {
   h.respond({ success: false, error: '翻译结果为空，请检查翻译接口配置' });
   await run;
   check('U4 success=false → ❌ 且错误 toast 含后台 error 文案',
-    btn.innerHTML === '❌' && h.toasts.some(t => t.type === 'error' && t.message.includes('翻译结果为空')),
+    btn.innerHTML === FAILED && h.toasts.some(t => t.type === 'error' && t.message.includes('翻译结果为空')),
     JSON.stringify({ btn, toasts: h.toasts }));
   h.flushTimers();
-  check('U4b 失败 2 秒后同样复原 🌍', btn.innerHTML === '🌍' && btn.disabled === false, JSON.stringify(btn));
+  check('U4b 失败 2 秒后同样复原 🌍', btn.innerHTML === TRANSLATE_ICON && btn.disabled === false, JSON.stringify(btn));
 }
 
 // ---------- U5 半成品：✅ + 提示留待补齐 ----------
@@ -495,7 +504,7 @@ function popupFixture() {
   h.respond({ success: true, complete: false });
   await run;
   check('U5 complete=false → ✅ 且 info toast 说明只翻出一部分',
-    btn.innerHTML === '✅' && h.toasts.some(t => t.type === 'info' && t.message.includes('一部分')),
+    btn.innerHTML === DONE && h.toasts.some(t => t.type === 'info' && t.message.includes('一部分')),
     JSON.stringify({ btn, toasts: h.toasts }));
 }
 
@@ -510,7 +519,7 @@ function popupFixture() {
   let threw = false;
   await run.catch(() => { threw = true; });
   check('U6 sendMessage reject → 不外抛、❌、错误 toast',
-    !threw && btn.innerHTML === '❌' && h.toasts.some(t => t.type === 'error' && t.message.includes('port closed')),
+    !threw && btn.innerHTML === FAILED && h.toasts.some(t => t.type === 'error' && t.message.includes('port closed')),
     JSON.stringify({ threw, btn, toasts: h.toasts }));
 }
 
@@ -522,7 +531,7 @@ function popupFixture() {
   const run = h.fx.translateSingleCard('d7', btn);
   await sleep(0);
   const mid = h.rerender()['.btn-translate'][0];
-  check('U7 进行中被重渲染 → 新节点重贴 ⏳ 并禁用（不再重建成可点的 🌍）', mid.innerHTML === '⏳' && mid.disabled === true, JSON.stringify(mid));
+  check('U7 进行中被重渲染 → 新节点重贴 ⏳ 并禁用（不再重建成可点的 🌍）', mid.innerHTML === BUSY && mid.disabled === true, JSON.stringify(mid));
   h.respond({ success: true, complete: true });
   await run;
   h.flushTimers();
@@ -536,10 +545,10 @@ function popupFixture() {
   h.respond({ success: true, complete: true });
   await run;
   const rebuilt = h.rerender()['.btn-translate'][0];   // 落库 → onChanged → 全量重渲染
-  check('U8 终态 ✅ 在重渲染后仍在新节点上', rebuilt.innerHTML === '✅' && rebuilt.disabled === true, JSON.stringify(rebuilt));
+  check('U8 终态 ✅ 在重渲染后仍在新节点上', rebuilt.innerHTML === DONE && rebuilt.disabled === true, JSON.stringify(rebuilt));
   h.flushTimers();                                      // 2 秒复原
   const reset = h.rerender()['.btn-translate'][0];
-  check('U8b 复原后再重渲染不再重贴（瞬态已忘掉）', reset.innerHTML === '🌍' && reset.disabled === false, JSON.stringify(reset));
+  check('U8b 复原后再重渲染不再重贴（瞬态已忘掉）', reset.innerHTML === TRANSLATE_ICON && reset.disabled === false, JSON.stringify(reset));
 }
 {
   const h = popupFixture();
@@ -550,7 +559,7 @@ function popupFixture() {
   h.respond({ success: false, error: 'x' });
   await run;
   const rebuilt = h.rerender()['.btn-translate'][0];
-  check('U9 ❌ 终态同样熬过重渲染', rebuilt.innerHTML === '❌' && rebuilt.disabled === true, JSON.stringify(rebuilt));
+  check('U9 ❌ 终态同样熬过重渲染', rebuilt.innerHTML === FAILED && rebuilt.disabled === true, JSON.stringify(rebuilt));
   h.flushTimers();
 }
 
@@ -562,12 +571,13 @@ function popupFixture() {
   const run = h.fx.pushCardToLark('L1', btn);
   await sleep(0);
   const mid = h.rerender()['.btn-lark'][0];
-  check('U10 Lark 进行中被重渲染 → 新节点重贴 ⏳', mid.innerHTML === '⏳' && mid.disabled === true, JSON.stringify(mid));
+  check('U10 Lark 进行中被重渲染 → 新节点重贴 ⏳', mid.innerHTML === BUSY && mid.disabled === true, JSON.stringify(mid));
   h.respond({ success: true });
   await run;
   const done = h.rerender()['.btn-lark'][0];
-  check('U10b Lark ✅ 终态熬过重渲染', done.innerHTML === '✅' && done.disabled === true, JSON.stringify(done));
+  check('U10b Lark ✅ 终态熬过重渲染', done.innerHTML === DONE && done.disabled === true, JSON.stringify(done));
   h.flushTimers();
+  check('U10d Lark 2 秒后复原成纸飞机图标（写在当前节点上）', done.innerHTML === h.LARK_ICON && done.disabled === false, JSON.stringify(done));
   const reset = h.rerender()['.btn-lark'][0];
   check('U10c Lark 复原后重渲染回默认图标且可点', reset.innerHTML === h.LARK_ICON && reset.disabled === false, JSON.stringify(reset));
 }

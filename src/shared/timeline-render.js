@@ -30,6 +30,8 @@
   // 标题文案单一真源在 translate-config.js（弹窗/共享页卡片、多维表格 payload、
   // 群机器人卡片三处共用，见那边 titleDisplay 的注释）。须先加载该模块
   const titleDisplayOf = global.TranslateConfig.titleDisplay;
+  // 卡片标题分主副两行（v1.8.0），判据与 titleDisplay 同一份
+  const titlePartsOf = global.TranslateConfig.titleParts;
 
   /**
    * 由封面实际尺寸判定卡片是否走横版布局；返回 null＝**不改判**，保留按 source
@@ -188,65 +190,42 @@
     if (!sameCard) openPosterMenu(anchor, event, drama, items, options);
   }
 
-  /**
-   * 按日期和时间分组（±1min 合并）
-   */
-  function groupByDate(dramas) {
-    const groups = {};
+  // 日期分组键与标题：本地日历日。今天 / 昨天加前缀，跨年才写年份
+  const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const dayKeyOf = date => `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
 
-    dramas.forEach(drama => {
-      if (!drama.scrapedAt) {
-        const date = '未知日期';
-        if (!groups[date]) groups[date] = { timeGroups: [] };
-        groups[date].timeGroups.push({ time: null, dramas: [drama] });
-        return;
-      }
-
-      const dateObj = new Date(drama.scrapedAt);
-      const date = dateObj.toLocaleDateString('zh-CN', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      });
-
-      if (!groups[date]) {
-        groups[date] = { timeGroups: [] };
-      }
-
-      // 查找是否有 ±1min 内的时间组
-      const timeMs = dateObj.getTime();
-      let found = false;
-
-      for (const tg of groups[date].timeGroups) {
-        if (tg.time && Math.abs(tg.time - timeMs) < 60000) {
-          tg.dramas.push(drama);
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
-        groups[date].timeGroups.push({
-          time: timeMs,
-          timeStr: formatTime(drama.scrapedAt),
-          dramas: [drama]
-        });
-      }
-    });
-
-    return groups;
+  function dateLabelOf(date, now) {
+    const sameYear = date.getFullYear() === now.getFullYear();
+    const monthDay = `${sameYear ? '' : `${date.getFullYear()}年`}${date.getMonth() + 1}月${date.getDate()}日`;
+    const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    const prefix = dayKeyOf(date) === dayKeyOf(now) ? '今天 · '
+      : dayKeyOf(date) === dayKeyOf(yesterday) ? '昨天 · ' : '';
+    return `${prefix}${monthDay} ${WEEKDAYS[date.getDay()]}`;
   }
 
   /**
-   * 格式化时间
+   * 按入库日期分组（v1.8.0 起只分到日：卡片上方不再标抓取时刻，同一天内保持调用方给的顺序）。
+   * 返回按出现顺序排列的 [{ key, label, dramas }]；缺 scrapedAt 或时间戳非法的条目归入「未知日期」。
+   * now 只供单测固定「今天」。
    */
-  function formatTime(dateStr) {
-    if (!dateStr) return '';
-    const date = new Date(dateStr);
-    return date.toLocaleTimeString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+  function groupByDate(dramas, now = new Date()) {
+    const groups = [];
+    const byKey = new Map();
+
+    for (const drama of dramas || []) {
+      const date = drama && drama.scrapedAt ? new Date(drama.scrapedAt) : null;
+      const valid = date && !Number.isNaN(date.getTime());
+      const key = valid ? dayKeyOf(date) : 'unknown';
+      let group = byKey.get(key);
+      if (!group) {
+        group = { key, label: valid ? dateLabelOf(date, now) : '未知日期', dramas: [] };
+        byKey.set(key, group);
+        groups.push(group);
+      }
+      group.dramas.push(drama);
+    }
+
+    return groups;
   }
 
   /**
@@ -326,6 +305,7 @@
     card.dataset.id = drama.id;
 
     const titleDisplay = titleDisplayOf(drama);
+    const { main: titleMain, sub: titleSub } = titlePartsOf(drama);
 
     // 简介
     const descZh = String(drama.descriptionZh || '').trim();
@@ -338,16 +318,25 @@
     // Lark 按钮双闸门：readOnly（共享页）不渲染，未注入回调（调用方未接入）也不渲染
     const showLarkButton = !options.readOnly && typeof options.onLarkPush === 'function';
 
+    // 卡片操作：右上角浮着（定位在 popup.css），共享页只读、没有操作。v1.8.0 起是线条图标，飞书是纸飞机
+    const translateButton = options.readOnly ? ''
+      : `<button class="btn-translate card-action" title="翻译此卡片" aria-label="翻译此卡片" data-id="${escapeAttribute(drama.id)}">${global.Icons.svg('language')}</button>`;
+    const larkButton = showLarkButton
+      ? `<button class="btn-lark card-action" title="推送到飞书（写入多维表格/发送群消息）" aria-label="推送到飞书" data-id="${escapeAttribute(drama.id)}">${global.Icons.svg('send')}</button>`
+      : '';
+
     card.innerHTML = `
-      ${drama.status === 'new' ? '<div class="status-badge">待翻译</div>' : ''}
-      ${options.readOnly ? '' : `<button class="btn-translate" title="翻译此卡片" data-id="${escapeAttribute(drama.id)}">🌍</button>`}
-      ${showLarkButton ? `<button class="btn-lark" title="推送到飞书（写入多维表格/发送群消息）" data-id="${escapeAttribute(drama.id)}"><img src="${options.assetsBase}/lark.png" alt="Lark"></button>` : ''}
+      ${translateButton || larkButton ? `<div class="card-actions">${larkButton}${translateButton}</div>` : ''}
       <div class="card-content">
         <div class="card-top">
           <img class="card-poster" src="${escapeAttribute(drama.poster || defaultPoster)}" alt="${escapeAttribute(drama.title)}">
           <div class="card-main">
             <div class="card-title">
-              <div class="card-title-text" title="${escapeAttribute(titleDisplay)}">${escapeHtml(titleDisplay)}</div>
+              <div class="card-title-row">
+                <div class="card-title-text" title="${escapeAttribute(titleDisplay)}">${escapeHtml(titleMain)}</div>
+                ${drama.status === 'new' ? '<span class="status-chip">待翻译</span>' : ''}
+              </div>
+              ${titleSub ? `<div class="card-title-sub" title="${escapeAttribute(titleSub)}">${escapeHtml(titleSub)}</div>` : ''}
             </div>
             <div class="card-description">
               ${descZh ? `<div class="card-desc-zh${descEn ? '' : ' desc-zh-only'}">${escapeHtml(descZh)}</div>` : ''}
@@ -364,6 +353,13 @@
         </div>
       </div>
     `;
+
+    // 海报染色（v1.8.0）：卡片底下垫一层模糊放大的海报（timeline-cards.css .drama-card::after），
+    // 底色随海报主色调变。只走 CSS 背景图、不读像素，跨域图片照样能用。不经 innerHTML 拼接：
+    // setProperty 只认一个 CSS 值，JSON 串的引号与反斜杠转义在 CSS 字符串里同样成立
+    if (drama.poster) {
+      card.style.setProperty('--poster-url', `url(${JSON.stringify(String(drama.poster))})`);
+    }
 
     // 绑定翻译/Lark 按钮事件（只读模式不渲染按钮）
     if (!options.readOnly) {
@@ -536,40 +532,33 @@
     const list = dramas || [];
     if (list.length === 0) return false;
 
-    // 按日期分组
-    const grouped = groupByDate(list);
-
-    Object.entries(grouped).forEach(([date, groupData]) => {
+    // 按入库日期分组：日期标题吸顶，末尾是当天入库条数
+    for (const dateGroup of groupByDate(list)) {
       const group = document.createElement('div');
       group.className = 'timeline-date-group';
 
       const dateHeader = document.createElement('div');
       dateHeader.className = 'timeline-date-header';
-      dateHeader.textContent = date;
+      const label = document.createElement('span');
+      label.className = 'timeline-date-label';
+      label.textContent = dateGroup.label;
+      const count = document.createElement('span');
+      count.className = 'timeline-date-count';
+      count.textContent = `+${dateGroup.dramas.length}`;
+      count.title = `当天新入库 ${dateGroup.dramas.length} 部`;
+      dateHeader.append(label, count);
       group.appendChild(dateHeader);
 
-      // 遍历时间组
-      groupData.timeGroups.forEach(tg => {
-        // 时间标签（±1min 内的卡片共享一个时间）
-        if (tg.timeStr) {
-          const timeEl = document.createElement('div');
-          timeEl.className = 'timeline-time';
-          timeEl.textContent = tg.timeStr;
-          group.appendChild(timeEl);
-        }
-
-        // 该时间组内的所有卡片；奇数张时首卡标记 card-full，
-        // Steam 双列下横跨整行，避免出现单卡独占一行的空缺
-        const oddCount = tg.dramas.length % 2 === 1;
-        tg.dramas.forEach((drama, index) => {
-          const card = createDramaCard(drama, options);
-          if (oddCount && index === 0) card.classList.add('card-full');
-          group.appendChild(card);
-        });
+      // 奇数张时首卡标记 card-full，Steam 双列下横跨整行，避免出现单卡独占一行的空缺
+      const oddCount = dateGroup.dramas.length % 2 === 1;
+      dateGroup.dramas.forEach((drama, index) => {
+        const card = createDramaCard(drama, options);
+        if (oddCount && index === 0) card.classList.add('card-full');
+        group.appendChild(card);
       });
 
       container.appendChild(group);
-    });
+    }
 
     // 卡片进入 DOM 后按实际渲染行数微调简介排版：三轮批处理（全卡清样式 →
     // 全卡测量 → 全卡应用），读写不交错，整树只强制约 2 次同步 reflow
@@ -593,7 +582,6 @@
     getDisplayGenres,
     posterMenuItems,
     closePosterMenu,
-    formatTime,
     formatRelativeTime,
     escapeHtml,
     escapeAttribute

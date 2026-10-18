@@ -1,14 +1,18 @@
 /* 弹窗专有样式。设计变量、站点标签条、时间线与卡片等与局域网共享页共用的规则在
    src/shared/timeline-cards.css（popup.html 先引入它再引入本文件）；这里只留弹窗自己的
-   布局、状态栏、卡片右上角按钮、Steam 双列网格与底栏局域网区块。 */
+   布局、状态栏、卡片操作按钮、Steam 双列网格与底栏局域网区块。 */
 
 body {
   width: 520px;
   height: 600px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: var(--bg);
+  font-family: var(--font-sans);
+  /* 顶部一抹站点色光晕：深色为主，站点色只作氛围 */
+  background:
+    radial-gradient(120% 55% at 50% -12%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 62%),
+    var(--bg);
   color: var(--text);
   overflow: hidden;
+  transition: var(--theme-transition);
 }
 
 .app {
@@ -22,15 +26,17 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
+  gap: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+  border-bottom: 1px solid var(--border-soft);
   flex-shrink: 0;
+  transition: var(--theme-transition);
 }
 
 .header-actions {
   display: flex;
-  gap: 8px;
+  gap: 4px;
 }
 
 /* 再次点击已激活标签触发站点刷新：图标转圈作为进行中反馈 */
@@ -41,73 +47,107 @@ body {
 .btn-icon {
   width: 32px;
   height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  border-radius: 8px;
-  font-size: 16px;
-  transition: all 0.2s;
+  border-radius: var(--radius-sm);
+  font-size: 18px;
+  transition: background-color 0.2s, color 0.2s;
 }
 
 .btn-icon:hover {
-  background: var(--bg);
-  color: var(--text);
+  background: var(--accent-soft);
+  color: var(--accent-text);
 }
 
-/* 状态栏：左侧同步服务，右侧版本 */
+.btn-icon:disabled {
+  cursor: default;
+}
+
+/* 全部翻译终态（popup.js showTranslateTerminal）：成功绿勾、失败红叉 */
+.btn-icon .icon-check {
+  color: var(--success);
+}
+
+.btn-icon .icon-x {
+  color: var(--danger);
+}
+
+/* 状态栏：左侧同步服务胶囊，右侧版本胶囊 */
 .status-bar {
   position: relative; /* 临时提示条的定位锚点 */
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 8px 16px;
-  background: rgba(15, 23, 42, 0.92);
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 11px;
   user-select: none;
   flex-shrink: 0;
+}
+
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border: 1px solid var(--border-soft);
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.status-pill:hover {
+  border-color: var(--border);
 }
 
 /* 临时提示条：悬浮在状态栏正下方，不占文档流（显示/消失时时间线不跳动） */
 .toast-bar {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 4px);
   left: 12px;
   right: 12px;
   z-index: 30;
   padding: 7px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   text-align: center;
   pointer-events: none;
   box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
   animation: toast-in 0.18s ease-out;
 }
 
 .toast-bar.is-info {
-  background: rgba(30, 41, 59, 0.96);
+  background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
   border: 1px solid var(--border);
-  color: var(--text-secondary);
+  color: var(--text);
 }
 
 .toast-bar.is-success {
-  background: rgba(16, 185, 129, 0.16);
-  border: 1px solid rgba(16, 185, 129, 0.45);
-  color: #34d399;
+  background: color-mix(in srgb, var(--success) 18%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--success) 45%, transparent);
+  color: var(--success);
 }
 
 .toast-bar.is-error {
-  background: rgba(239, 68, 68, 0.16);
-  border: 1px solid rgba(239, 68, 68, 0.45);
-  color: #f87171;
+  background: color-mix(in srgb, var(--danger) 18%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
 }
 
 .toast-bar.is-warning {
-  background: rgba(245, 158, 11, 0.16);
-  border: 1px solid rgba(245, 158, 11, 0.45);
-  color: #fbbf24;
+  background: color-mix(in srgb, var(--warning) 16%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  color: var(--warning);
 }
 
 @keyframes toast-in {
@@ -121,43 +161,59 @@ body {
   }
 }
 
-.sync-service {
+/* 状态栏内联小按钮：打开脚本文件夹、重启、停止、一键启动 */
+.sync-inline-btn {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-/* 状态栏内联小按钮：📁 打开脚本文件夹、🔄 重启、⏹ 停止、▶ 一键启动 */
-.sync-inline-btn {
+  gap: 3px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 13px;
   line-height: 1;
-  padding: 3px 4px;
+  padding: 3px;
   border-radius: 6px;
-  transition: all 0.2s;
+  transition: background-color 0.2s, color 0.2s;
 }
 
 .sync-inline-btn:hover {
-  background: var(--bg);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
   color: var(--text);
+}
+
+/* 文件夹 / 重启 / 停止：平时收起，悬停或键盘聚焦同步胶囊时展开（宽度动画，不推挤右侧版本胶囊之外的东西） */
+.sync-tools {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-width 0.2s ease, opacity 0.2s ease;
+}
+
+.sync-service:hover .sync-tools,
+.sync-service:focus-within .sync-tools {
+  max-width: 80px;
+  opacity: 1;
 }
 
 .sync-start-btn {
   font-size: 11px;
   font-weight: 600;
   color: var(--success);
-  border: 1px solid rgba(16, 185, 129, 0.45);
-  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--success) 45%, transparent);
+  padding: 2px 8px 2px 6px;
   border-radius: 999px;
 }
 
+.sync-start-btn .icon {
+  font-size: 10px;
+}
+
 .sync-start-btn:hover {
-  background: rgba(16, 185, 129, 0.16);
+  background: color-mix(in srgb, var(--success) 16%, transparent);
   color: var(--success);
 }
 
@@ -166,57 +222,46 @@ body {
   cursor: default;
 }
 
-.sync-service-hint {
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-
 .sync-service-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--warning);
+  flex-shrink: 0;
 }
 
 .sync-service.is-on {
   color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  border-color: color-mix(in srgb, var(--success) 28%, transparent);
 }
 
 .sync-service.is-on .sync-service-dot {
   background: var(--success);
-  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--success) 60%, transparent);
 }
 
 .sync-service.is-off {
   color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
 }
 
 .sync-service.is-off .sync-service-dot {
   background: var(--danger);
-  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
-}
-
-.sync-service.is-on .sync-service-hint,
-.sync-service.is-off .sync-service-hint {
-  color: var(--text-secondary);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--danger) 50%, transparent);
 }
 
 /* 服务在跑但找不到 config/tag.json（v1.7.0）：推送被拒、数据不动，黄色提示去设置页保存一次订阅 */
 .sync-service.is-on.is-warn {
   color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 28%, transparent);
 }
 
 .sync-service.is-on.is-warn .sync-service-dot {
   background: var(--warning);
-  box-shadow: 0 0 8px rgba(245, 158, 11, 0.55);
-}
-
-.version-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-secondary);
-  cursor: pointer;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--warning) 55%, transparent);
 }
 
 .version-status-dot {
@@ -224,25 +269,22 @@ body {
   height: 7px;
   border-radius: 50%;
   background: var(--warning);
-}
-
-.version-status.is-latest {
-  color: var(--success);
+  flex-shrink: 0;
 }
 
 .version-status.is-latest .version-status-dot {
   background: var(--success);
-  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
 }
 
 .version-status.is-upgrade {
   color: var(--warning);
   font-weight: 600;
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
 }
 
 .version-status.is-upgrade .version-status-dot {
   background: var(--warning);
-  box-shadow: 0 0 8px rgba(245, 158, 11, 0.6);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--warning) 60%, transparent);
 }
 
 .version-status.is-fail {
@@ -251,7 +293,6 @@ body {
 
 .version-status.is-fail .version-status-dot {
   background: var(--danger);
-  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
 }
 
 /* 内容区域 */
@@ -259,77 +300,78 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px;
+  padding: 2px 12px 12px;
 }
 
-/* 状态标签 - 固定右上角（三槽位：翻译按钮@8px、Lark 按钮@40px、badge@72px） */
-.status-badge {
-  position: absolute;
-  top: 8px;
-  right: 72px;
-  padding: 3px 8px;
-  background: var(--success);
-  color: white;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 600;
-  z-index: 1;
-}
-
-/* 翻译 / Lark 推送按钮 - 固定右上角，同款样式 */
-.btn-translate,
-.btn-lark {
+/* 卡片操作（推送飞书 / 翻译）：浮在卡片右上角，只有弹窗渲染（timeline-render.js 的 .card-actions）。
+   按钮 top 8 + 高 24 = 底边 32px，正好在英文副标题那一行之上，所以只给标题第一行留白 */
+.card-actions {
   position: absolute;
   top: 8px;
   right: 8px;
-  width: 28px;
-  height: 28px;
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+}
+
+.card-action {
+  width: 24px;
+  height: 24px;
   border: none;
-  background: rgba(255, 255, 255, 0.1);
+  /* 半透明深底 + 模糊：盖在 Steam 横版封面上也看得清 */
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(6px);
   border-radius: 6px;
-  font-size: 16px;
+  color: var(--text-secondary);
+  font-size: 14px;
   cursor: pointer;
-  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s;
+  transition: background-color 0.2s, color 0.2s;
 }
 
-.btn-translate:hover,
-.btn-lark:hover {
-  background: rgba(255, 255, 255, 0.2);
-  transform: scale(1.1);
+.card-action:hover {
+  background: color-mix(in srgb, var(--accent) 28%, var(--bg));
+  color: var(--accent-text);
 }
 
-.btn-translate:disabled,
-.btn-lark:disabled {
-  opacity: 0.5;
+/* 标题第一行给右上角两枚按钮让位：按钮带 24+4+24 = 52px、距卡片右缘 8px，即占到右缘内 60px；
+   标题行右缘在卡片内边距 12px 处，重叠 48px，再留 6px 间隙 */
+.card-title-row {
+  padding-right: 54px;
+}
+
+/* 横版卡（Steam 封面在上）：按钮压在封面右上角，标题行在封面下方，不必留白 */
+.drama-card.card-landscape .card-title-row {
+  padding-right: 0;
+}
+
+/* 横版卡封面加载失败：占位图被藏起（timeline-cards.css），标题行成了最上面一行，又要给按钮让位 */
+.drama-card.card-landscape.poster-fallback .card-title-row {
+  padding-right: 54px;
+}
+
+.card-action:disabled {
   cursor: not-allowed;
-  transform: none;
 }
 
-.btn-lark {
-  right: 40px;
+.card-action .icon-check {
+  color: var(--success);
 }
 
-.btn-lark img {
-  width: 16px;
-  height: 16px;
-  display: block;
-  border-radius: 3px;
-  pointer-events: none;
+.card-action .icon-x {
+  color: var(--danger);
 }
 
-/* Steam 分类：日期组内双列网格，日期/时间标签横跨两列 */
+/* Steam 分类：日期组内双列网格，日期标签横跨两列 */
 .timeline-container[data-source="steam"] .timeline-date-group {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 10px;
 }
 
-.timeline-container[data-source="steam"] .timeline-date-header,
-.timeline-container[data-source="steam"] .timeline-time {
+.timeline-container[data-source="steam"] .timeline-date-header {
   grid-column: 1 / -1;
   margin-bottom: 0;
 }
@@ -361,22 +403,19 @@ body {
   -webkit-line-clamp: 5;
 }
 
-/* 双列窄卡 + 竖版封面：标题让到右上按钮带下方整行显示。
-   触发条件是 Steam 封面加载失败退到竖版占位图（离线/CDN 被挡/游戏下架时
-   整屏都会这样）——真实 header.jpg 恒为 460×215 横版，正常都走 card-landscape。
-   不让行的话：卡宽 224px，右上三槽位按钮从卡右缘算要占到约 112px，而
-   .card-main 被 90px 封面列挤到只剩 90px，标题实测只剩 10px，被裁成一个字。
-   这一行放不下是物理事实，缩封面/改 padding 都救不回来，只能让行。 */
-.timeline-container[data-source="steam"] .drama-card:not(.card-full):not(.card-landscape) .card-title {
+/* 双列窄卡 + 竖版封面：标题行让到右上按钮带下方整行显示。
+   触发条件是 Steam 真发了竖版封面（真实 header.jpg 恒为 460×215 横版，封面失效时也保持横版，见
+   timeline-render.js orientationFromPoster）。卡宽 224px，.card-main 被 90px 封面列挤到只剩约 90px，
+   再给按钮留 54px 标题就只剩一两个字——这一行放不下是物理事实，只能让行。 */
+.timeline-container[data-source="steam"] .drama-card:not(.card-full):not(.card-landscape) .card-title-row {
   padding-right: 0;
-  margin-top: 24px; /* 按钮 top:8 + 高 28 = 36px，减去 card-content 的 14px 内边距 */
+  margin-top: 22px; /* 按钮底边 32px，减去 card-content 的 12px 内边距，再留 2px */
 }
 
-/* 双列窄卡：底部标签改两行（标签行 / 厂商行），单行超长时横向滚动，不堆高 */
+/* 双列窄卡：底部标签改两行（标签行 / 类型行），单行超长时横向滚动，不堆高 */
 .timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-footer {
   flex-direction: column;
   align-items: stretch;
-  justify-content: flex-start;
   gap: 6px;
 }
 
@@ -399,12 +438,6 @@ body {
   white-space: nowrap;
 }
 
-/* 标题区域 */
-.card-title {
-  margin-bottom: 8px;
-  padding-right: 80px; /* 为状态标签留空间 */
-}
-
 .empty-state p {
   color: var(--text-secondary);
   font-size: 13px;
@@ -413,17 +446,18 @@ body {
 
 .btn-primary {
   padding: 8px 20px;
-  background: var(--primary);
-  color: white;
-  border: none;
-  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
   font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background-color 0.2s;
 }
 
 .btn-primary:hover {
-  background: var(--primary-hover);
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
 }
 
 /* 加载状态 */
@@ -433,17 +467,13 @@ body {
 }
 
 .spinner {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   border: 3px solid var(--border);
-  border-top-color: var(--primary);
+  border-top-color: var(--accent);
   border-radius: 50%;
   margin: 0 auto 16px;
   animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 
 /* 底部 */
@@ -451,21 +481,47 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 16px;
-  background: var(--bg-secondary);
-  border-top: 1px solid var(--border);
+  gap: 10px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+  border-top: 1px solid var(--border-soft);
   font-size: 11px;
   flex-shrink: 0;
+  transition: var(--theme-transition);
 }
 
-/* 最近一轮抓取全部失败：「抓取于 …」后缀提示，原因在悬停 title 里 */
-#statsLastUpdate.is-failed {
+#statsTotal {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* 抓取异常警告图标（v1.8.0）：最近一轮全部失败标红、有订阅抓到 0 条标黄；明细在悬停 title 里，
+   点一下重新弹出「抓取于 …」提示。正常时隐藏，底栏只剩条数与翻译状态 */
+.scrape-alert {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: 2px;
+  border: none;
+  padding: 0;
+  border-radius: 5px;
+  background: transparent;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.scrape-alert.is-warning {
+  color: var(--warning);
+}
+
+.scrape-alert.is-error {
   color: var(--danger);
 }
 
-/* 抓取成功却有订阅一条都没拿到（页面跳转 / 站点改版，v1.7.0）：「抓取于 …」后缀提示，明细在悬停 title 里 */
-#statsLastUpdate.is-warning {
-  color: var(--warning);
+.scrape-alert:hover {
+  background: color-mix(in srgb, currentColor 16%, transparent);
 }
 
 /* 本地数据已由更新版本升级（dramasMeta.layout 高于本版本）：状态栏换成升级提示，后台只读停摆 */
@@ -479,36 +535,26 @@ body {
   display: flex;
   align-items: center;
   gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
   color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.lan-share-icon {
+  font-size: 13px;
 }
 
 .lan-share.is-on:hover {
-  color: var(--text);
+  color: var(--accent-text);
+  background: var(--accent-soft);
 }
 
 .lan-share.is-off {
   opacity: 0.65;
-}
-
-.lan-qr-btn {
-  width: 18px;
-  height: 18px;
-  border: none;
-  padding: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 18px;
-  border-radius: 4px;
-}
-
-.lan-qr-btn:hover {
-  background: var(--bg);
-  color: var(--text);
 }
 
 /* 二维码浮层：固定在底栏上方右侧 */
@@ -522,7 +568,7 @@ body {
   align-items: center;
   gap: 8px;
   padding: 12px;
-  background: var(--bg-secondary);
+  background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: var(--shadow);
@@ -532,10 +578,27 @@ body {
   border-radius: 6px;
 }
 
+/* 浮层里的地址：点一下复制（popup.js onLanUrlClick），反馈文字写在它本身上 */
 .lan-qr-url {
-  font-size: 11px;
-  color: var(--text-secondary);
-  user-select: text;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 4px 10px;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: copy;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.lan-qr-url:hover {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.lan-qr-hint {
+  font-size: 10px;
+  color: var(--text-muted);
 }
 
 /* —— 可访问性（v1.5.1）：键盘焦点环。只在 :focus-visible（键盘导航）出现，
@@ -544,10 +607,12 @@ body {
 .tab-group-chip:focus-visible,
 .btn-icon:focus-visible,
 .sync-inline-btn:focus-visible,
-.lan-qr-btn:focus-visible,
+.lan-qr-url:focus-visible,
+.scrape-alert:focus-visible,
 .btn-primary:focus-visible,
+.card-action:focus-visible,
 [role="button"]:focus-visible,
 .lan-qr-popover:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }

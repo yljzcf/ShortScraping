@@ -394,6 +394,58 @@ check('T5 lark 不再转手导出 SOURCE_NAMES，source_name 照旧取自注册�
       && /SiteRegistry\.siteOfDrama\(/.test(serverSrcT9) && !/function siteOfDrama\(/.test(serverSrcT9), '');
 }
 
+// ---------- T10 站点主题色（v1.8.0）：弹窗 / 共享页切到哪个站，整页按它的 accent 染色 ----------
+{
+  const hex = /^#[0-9A-F]{6}$/;
+  const bad = SiteRegistry.SITES.filter(entry => !hex.test(entry.accent || ''));
+  check('T10a 每条 SITES 都有六位大写十六进制的 accent', bad.length === 0, JSON.stringify(bad.map(e => e.host)));
+  const accentsBySite = {};
+  for (const entry of SiteRegistry.SITES) (accentsBySite[entry.site] ||= new Set()).add(entry.accent);
+  const split = Object.entries(accentsBySite).filter(([, set]) => set.size > 1).map(([site]) => site);
+  check('T10b 同一 site 键的各条 host 条目 accent 必须一致（DramaBox 两个域名）', split.length === 0, JSON.stringify(split));
+  check('T10c accentOf 取注册表的值，未知站点退回默认色',
+    SiteRegistry.accentOf('imdb') === '#F5C518' && SiteRegistry.accentOf('dramabox') === '#FC0150'
+      && SiteRegistry.accentOf('nope') === SiteRegistry.DEFAULT_ACCENT && SiteRegistry.accentOf(undefined) === SiteRegistry.DEFAULT_ACCENT
+      && SiteRegistry.accentOf('constructor') === SiteRegistry.DEFAULT_ACCENT,
+    JSON.stringify([SiteRegistry.accentOf('imdb'), SiteRegistry.accentOf('nope')]));
+
+  // applySiteTheme：写到 <html> 的 --accent 与 data-site；拿不到文档（单测假 DOM、Node）时什么也不做
+  const SiteTabs = require(path.join(worktreeRoot, 'src/shared/site-tabs.js'));
+  const props = {};
+  const doc = { documentElement: { style: { setProperty: (k, v) => { props[k] = v; } }, dataset: {} } };
+  SiteTabs.applySiteTheme(doc, 'netflix');
+  check('T10d applySiteTheme 把站点色写到 <html> 上',
+    props['--accent'] === '#E50914' && doc.documentElement.dataset.site === 'netflix', JSON.stringify({ props, site: doc.documentElement.dataset.site }));
+  let threw = false;
+  try { SiteTabs.applySiteTheme(undefined, 'imdb'); SiteTabs.applySiteTheme({}, 'imdb'); } catch (e) { threw = true; }
+  check('T10e 没有文档时 applySiteTheme 静默跳过', !threw, '');
+  const tabsSrc = fs.readFileSync(path.join(worktreeRoot, 'src/shared/site-tabs.js'), 'utf8');
+  check('T10f render 末尾按活动站点套主题（两页切站都经过 render）',
+    /applySiteTheme\(container\.ownerDocument, layout\.activeSource\)/.test(tabsSrc), '');
+}
+
+// ---------- T11 线条图标（v1.8.0）：三页都先载 shared/icons.js，共享页白名单也要有 ----------
+{
+  const Icons = require(path.join(worktreeRoot, 'src/shared/icons.js'));
+  check('T11a Icons.svg 产出带 icon 类的内联 SVG，未登记的名字返回空串',
+    /^<svg class="icon icon-settings"[^>]*>.*<\/svg>$/.test(Icons.svg('settings')) && Icons.svg('nope') === '', Icons.svg('settings').slice(0, 60));
+  for (const [rel, prefix, before] of [
+    ['src/popup/popup.html', '../shared/', ['timeline-render.js', 'popup.js']],
+    ['server/public/share.html', '/shared/', ['timeline-render.js']],
+    ['src/settings/settings.html', '../shared/', ['lark.js']]
+  ]) {
+    const html = fs.readFileSync(path.join(worktreeRoot, rel), 'utf8');
+    const iconsAt = html.indexOf(`src="${prefix}icons.js"`);
+    const laterAt = before.map(name => html.indexOf(name === 'popup.js' ? 'src="popup.js"' : `src="${prefix}${name}"`));
+    check(`T11b ${rel} 引入 icons.js 且排在 ${before.join(' / ')} 之前`,
+      iconsAt >= 0 && laterAt.every(at => at > iconsAt), JSON.stringify({ iconsAt, laterAt }));
+    const names = [...html.matchAll(/data-icon="([^"]+)"/g)].map(m => m[1]);
+    const unknown = names.filter(name => !Icons.NAMES.includes(name));
+    check(`T11c ${rel} 的 data-icon 占位都是登记过的图标`, names.length > 0 && unknown.length === 0, JSON.stringify(unknown));
+  }
+  check('T11d 共享页静态白名单含 icons.js', serverSrc.includes("'/shared/icons.js'"), '');
+}
+
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

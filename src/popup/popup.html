@@ -16,23 +16,25 @@
            SITE_GROUPS 动态渲染（同一时间只展开一组），不要在这里手写按钮 -->
       <div class="category-tabs" id="categoryTabs" role="tablist" aria-label="站点分类"></div>
       <div class="header-actions">
-        <button id="btnTranslateAll" class="btn-icon" title="全部翻译：检查所有待翻译条目并开始翻译">🌐</button>
-        <button id="btnSettings" class="btn-icon" title="设置">⚙️</button>
+        <button id="btnTranslateAll" class="btn-icon" title="全部翻译：检查所有待翻译条目并开始翻译" aria-label="全部翻译" data-icon="language"></button>
+        <button id="btnSettings" class="btn-icon" title="设置" aria-label="设置" data-icon="settings"></button>
       </div>
     </header>
 
-    <!-- 状态栏：左侧同步服务，右侧版本 -->
+    <!-- 状态栏：左侧同步服务胶囊，右侧版本胶囊。点胶囊重新检测（提示写在悬停 title 里）；
+         📁 / 重启 / 停止只在悬停或键盘聚焦同步胶囊时出现，「启动」在服务关闭时常显 -->
     <section class="status-bar">
-      <div class="sync-service" id="syncServiceStatus" role="button" tabindex="0" title="正在检测本地 CSV 同步服务">
-        <button id="btnSyncFolder" class="sync-inline-btn" title="打开同步服务脚本所在文件夹（需先注册一键集成：Windows 运行 server/setup-launcher.bat，macOS 运行 server/setup-autostart.command；未注册时复制路径）">📁</button>
+      <div class="sync-service status-pill" id="syncServiceStatus" role="button" tabindex="0" title="正在检测本地 CSV 同步服务">
         <span class="sync-service-dot" aria-hidden="true"></span>
         <span id="syncServiceText">同步服务：检测中</span>
-        <button id="btnSyncRestart" class="sync-inline-btn hidden" title="重启同步服务" aria-label="重启同步服务">🔄</button>
-        <button id="btnSyncStop" class="sync-inline-btn hidden" title="停止同步服务" aria-label="停止同步服务">⏹</button>
-        <button id="btnSyncStart" class="sync-inline-btn sync-start-btn hidden" title="一键启动同步服务（需先注册一键集成：Windows 运行 server/setup-launcher.bat，macOS 运行 server/setup-autostart.command）">▶ 启动</button>
-        <span class="sync-service-hint">点击刷新状态</span>
+        <span class="sync-tools">
+          <button id="btnSyncFolder" class="sync-inline-btn" title="打开同步服务脚本所在文件夹（需先注册一键集成：Windows 运行 server/setup-launcher.bat，macOS 运行 server/setup-autostart.command；未注册时复制路径）" aria-label="打开同步服务文件夹" data-icon="folder"></button>
+          <button id="btnSyncRestart" class="sync-inline-btn hidden" title="重启同步服务" aria-label="重启同步服务" data-icon="refresh"></button>
+          <button id="btnSyncStop" class="sync-inline-btn hidden" title="停止同步服务" aria-label="停止同步服务" data-icon="stop"></button>
+        </span>
+        <button id="btnSyncStart" class="sync-inline-btn sync-start-btn hidden" title="一键启动同步服务（需先注册一键集成：Windows 运行 server/setup-launcher.bat，macOS 运行 server/setup-autostart.command）" data-icon="play">启动</button>
       </div>
-      <div class="version-status" id="versionStatus" role="button" tabindex="0" title="正在检查远端版本">
+      <div class="version-status status-pill" id="versionStatus" role="button" tabindex="0" title="正在检查远端版本">
         <span class="version-status-dot" aria-hidden="true"></span>
         <span id="versionStatusText">版本：检查中</span>
       </div>
@@ -47,7 +49,7 @@
 
       <!-- 空状态 -->
       <div id="emptyState" class="empty-state hidden">
-        <div class="empty-icon">📺</div>
+        <div class="empty-icon" data-icon="tv" aria-hidden="true"></div>
         <h3>暂无监控数据</h3>
         <p>该分类下还没有数据，请先访问对应榜单页面并点击抓取按钮</p>
         <button id="btnGoScrape" class="btn-primary">前往榜单页面</button>
@@ -60,31 +62,32 @@
       </div>
     </main>
 
-    <!-- 底部状态栏 -->
+    <!-- 底部状态栏：左侧全库条数与翻译状态（抓取异常时多一枚警告图标），右侧局域网。
+         「抓取于 …」不常驻：打开弹窗时在顶部提示条里弹一下（popup.js showLastUpdateToast） -->
     <footer class="footer">
       <div class="status">
         <span class="status-dot"></span>
+        <span id="statsTotal">共 0 部</span>
+        <span class="divider" aria-hidden="true">·</span>
         <span id="statusText">就绪</span>
+        <button id="scrapeAlert" class="scrape-alert hidden" aria-label="抓取异常，点击查看" data-icon="alert"></button>
       </div>
-      <div class="lan-share" id="lanShare" role="button" tabindex="0" title="局域网共享链接">
-        <span class="lan-share-icon" aria-hidden="true">📡</span>
-        <span id="lanShareText">检测中</span>
-        <button id="btnLanQr" class="lan-qr-btn hidden" title="显示二维码，手机扫码打开">▦</button>
-      </div>
-      <div class="stats">
-        <span id="statsTotal">0 部短剧</span>
-        <span class="divider">|</span>
-        <span id="statsLastUpdate">未更新</span>
+      <div class="lan-share" id="lanShare" role="button" tabindex="0" aria-haspopup="dialog" title="局域网共享">
+        <span class="lan-share-icon" aria-hidden="true" data-icon="wifi"></span>
+        <span id="lanShareText">局域网</span>
       </div>
     </footer>
 
-    <!-- 局域网链接二维码浮层 -->
-    <div id="lanQrPopover" class="lan-qr-popover hidden" role="dialog" aria-label="局域网共享二维码" tabindex="-1">
+    <!-- 局域网浮层：点底栏「局域网」开合；二维码给手机扫，点地址复制 -->
+    <div id="lanQrPopover" class="lan-qr-popover hidden" role="dialog" aria-label="局域网共享二维码与地址" tabindex="-1">
       <canvas id="lanQrCanvas" width="0" height="0"></canvas>
-      <div class="lan-qr-url" id="lanQrUrl"></div>
+      <button type="button" class="lan-qr-url" id="lanQrUrl" title="点击复制局域网地址"></button>
+      <div class="lan-qr-hint">手机扫码打开 · 点地址复制</div>
     </div>
   </div>
 
+  <!-- 线条图标：载入即在 DOMContentLoaded 时填好上面的 data-icon 占位；timeline-render 画卡片时也要用 -->
+  <script src="../shared/icons.js"></script>
   <script src="../shared/url-match.js"></script>
   <!-- 订阅 URL 清单（configuredScrapeUrls）与归属判定（dramasUnderUrls）与后台/设置页共用，依赖 url-match，须排在它之后 -->
   <script src="../shared/subscription-config.js"></script>

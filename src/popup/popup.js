@@ -147,14 +147,13 @@
 
     elements.stats = {
       total: document.getElementById('statsTotal'),
-      lastUpdate: document.getElementById('statsLastUpdate'),
-      status: document.getElementById('statusText')
+      status: document.getElementById('statusText'),
+      alert: document.getElementById('scrapeAlert')
     };
 
     elements.lanShare = {
       container: document.getElementById('lanShare'),
       text: document.getElementById('lanShareText'),
-      qrBtn: document.getElementById('btnLanQr'),
       popover: document.getElementById('lanQrPopover'),
       qrCanvas: document.getElementById('lanQrCanvas'),
       qrUrl: document.getElementById('lanQrUrl')
@@ -171,7 +170,7 @@
   /**
    * div[role="button"] 的键盘可达绑定：click + Enter/Space 键激活
    * （Space 需 preventDefault 防页面滚动）。原生 button 不需要此包装。
-   * 只认焦点在容器本身：内嵌的 📁/▶/🔄/⏹/▦ 是原生按钮，它们的 keydown 冒泡上来时
+   * 只认焦点在容器本身：内嵌的文件夹 / 启动 / 重启 / 停止是原生按钮，它们的 keydown 冒泡上来时
    * 若在这里 preventDefault，按钮自己的键盘激活就被取消，执行成了容器的动作。
    */
   function bindActivatable(el, handler) {
@@ -207,10 +206,16 @@
     });
     // 箭头包装防 click 事件对象误入参数位；手动重检永远绕过缓存
     bindActivatable(elements.versionStatus.container, () => checkVersionStatus({ force: true }));
+    // 点底栏「局域网」开合二维码浮层；浮层里点地址复制（v1.8.0 前是点区块复制、另有一枚二维码按钮）
     bindActivatable(elements.lanShare.container, onLanShareClick);
-    elements.lanShare.qrBtn.addEventListener('click', (e) => {
+    elements.lanShare.qrUrl.addEventListener('click', (e) => {
       e.stopPropagation();
-      toggleLanQrPopover();
+      onLanUrlClick();
+    });
+    // 抓取异常的警告图标：再弹一次「抓取于 …」提示（明细在它的悬停 title 里）
+    elements.stats.alert.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showLastUpdateToast();
     });
     // 点浮层与局域网区块之外的任意位置关闭二维码
     document.addEventListener('click', (e) => {
@@ -221,13 +226,13 @@
         popover.classList.add('hidden');
       }
     });
-    // Esc 关闭二维码浮层并把焦点归还开启按钮
+    // Esc 关闭二维码浮层并把焦点归还底栏「局域网」
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
-      const { popover, qrBtn } = elements.lanShare;
+      const { popover, container } = elements.lanShare;
       if (!popover.classList.contains('hidden')) {
         popover.classList.add('hidden');
-        qrBtn.focus();
+        container.focus();
       }
     });
 
@@ -519,15 +524,14 @@
    * （--local-only 模式或旧版服务）；非空：展示首个地址，其余进悬停提示。
    */
   function updateLanShare(lanUrls) {
-    const { container, text, qrBtn, popover } = elements.lanShare;
+    const { container, text, popover } = elements.lanShare;
     container.classList.remove('is-on', 'is-off');
     state.lanUrls = Array.isArray(lanUrls) ? lanUrls : [];
 
     if (lanUrls === null) {
       container.classList.add('is-off');
       container.title = '同步服务未启动：运行 npm run sync（Windows 可双击 start-sync.bat，macOS 可双击 start-sync.command）后点击重新检测';
-      text.textContent = '未启动';
-      qrBtn.classList.add('hidden');
+      text.textContent = '局域网未启动';
       popover.classList.add('hidden');
       return;
     }
@@ -535,8 +539,7 @@
     if (state.lanUrls.length === 0) {
       container.classList.add('is-off');
       container.title = '同步服务未返回局域网地址（--local-only 模式或旧版服务）；重启最新版同步服务后点击重新检测';
-      text.textContent = '不可用';
-      qrBtn.classList.add('hidden');
+      text.textContent = '局域网不可用';
       popover.classList.add('hidden');
       return;
     }
@@ -546,9 +549,8 @@
     const extra = state.lanUrls.length > 1
       ? `\n其他候选：${state.lanUrls.slice(1).join('、')}`
       : '';
-    container.title = `局域网共享链接：点击复制 ${primary}${extra}`;
-    text.textContent = primary.replace(/^https?:\/\//, '');
-    qrBtn.classList.remove('hidden');
+    container.title = `局域网共享：点击显示二维码与地址 ${primary}${extra}`;
+    text.textContent = '局域网';
   }
 
   /**
@@ -578,14 +580,21 @@
   }
 
   /**
-   * 点击局域网区块：有链接则复制，无链接则触发重新检测。
+   * 点击底栏「局域网」：有链接则开合二维码浮层（浮层里有地址），无链接则触发重新检测。
    */
-  async function onLanShareClick() {
+  function onLanShareClick() {
     if (state.lanUrls.length === 0) {
       checkSyncServiceStatus();
       return;
     }
+    toggleLanQrPopover();
+  }
 
+  /**
+   * 点浮层里的地址：复制链接。反馈写在地址本身上，1.2 秒后恢复；复制失败时错误提示里直接给出链接。
+   */
+  async function onLanUrlClick() {
+    if (state.lanUrls.length === 0) return;
     const url = state.lanUrls[0];
     let copied = true;
     try {
@@ -595,10 +604,9 @@
       showToast(`复制链接失败（${e.message}）：${url}`, { type: 'error', duration: 6000 });
     }
 
-    const restore = url.replace(/^https?:\/\//, '');
-    elements.lanShare.text.textContent = copied ? '已复制 ✓' : '复制失败';
+    elements.lanShare.qrUrl.textContent = copied ? '已复制 ✓' : '复制失败';
     setTimeout(() => {
-      elements.lanShare.text.textContent = restore;
+      elements.lanShare.qrUrl.textContent = url;
     }, 1200);
   }
 
@@ -615,7 +623,7 @@
       QrCode.drawToCanvas(qrCanvas, url, 4, 4);
       qrUrl.textContent = url;
       popover.classList.remove('hidden');
-      popover.focus(); // 焦点移入 dialog，Esc 关闭时归还 qrBtn
+      popover.focus(); // 焦点移入 dialog，Esc 关闭时归还底栏「局域网」
     } catch (e) {
       console.error('[ShortScraping] 二维码生成失败:', e);
     }
@@ -782,6 +790,11 @@
       if (state.activeSource === null) state.activeSource = prefs.activeSource || null;
 
       renderNow(); // 弹窗打开首帧不经去抖
+      // 「抓取于 …」只在打开弹窗时弹一下；订阅变化重读数据（也走这里）与之后的 storage 变化都不再弹
+      if (!lastUpdateToasted) {
+        lastUpdateToasted = true;
+        showLastUpdateToast();
+      }
     } catch (e) {
       console.error('[ShortScraping] 加载数据失败:', e);
     } finally {
@@ -795,6 +808,8 @@
   let toastTimer = null;
   // 「缺订阅配置」提示每次打开弹窗只弹一次（状态栏重新检测不再重复弹）
   let tagConfigMissingToasted = false;
+  // 「抓取于 …」提示每次打开弹窗只弹一次（loadData 首帧之后）
+  let lastUpdateToasted = false;
 
   function showToast(message, { type = 'info', duration = 3000 } = {}) {
     const bar = elements.toastBar;
@@ -900,10 +915,16 @@
    * 全部翻译按钮状态机。任务跑在后台 SW（弹窗关闭也继续），按钮不再依赖
    * 可能挂几十分钟的 sendMessage 往返，而是由 SW 持久化的 translateRunState
    * 驱动：点击只做触发与传输错误反馈，进度/终态经 storage.onChanged 到达，
-   * 弹窗重开时经 getTranslateState 对账（后台在翻则恢复 ⏳）。
+   * 弹窗重开时经 getTranslateState 对账（后台在翻则恢复转圈）。
    */
+  // 按钮瞬态图标（v1.8.0 起是 shared/icons.js 的线条图标，取代 ⏳ / ✅ / ❌）：
+  // 全部翻译、单卡翻译、推送飞书三处共用；转圈与红绿配色在 css 里（.icon-loader / .icon-check / .icon-x）
+  const BUTTON_BUSY_ICON = Icons.svg('loader');
+  const BUTTON_DONE_ICON = Icons.svg('check');
+  const BUTTON_FAILED_ICON = Icons.svg('x');
+
   const translateUi = {
-    manualPending: false,  // 本弹窗发起过手动翻译，终态时显示 ✅/❌ 反馈
+    manualPending: false,  // 本弹窗发起过手动翻译，终态时显示成功 / 失败图标反馈
     sawRunning: false,     // 本弹窗见过 running:true，终态需 1.5s 宽限吸收轮间隙
     graceTimer: null,
     terminalTimer: null
@@ -923,7 +944,7 @@
   function setTranslateBusy(state) {
     const btn = elements.buttons.translateAll;
     btn.disabled = true;
-    btn.textContent = '⏳';
+    btn.innerHTML = BUTTON_BUSY_ICON;
     btn.title = typeof state?.processedCount === 'number'
       ? `翻译中：已处理 ${state.processedCount}/${state.pendingCount}，成功 ${state.translatedCount}`
       : '翻译中…';
@@ -931,7 +952,7 @@
 
   function resetTranslateButton() {
     const btn = elements.buttons.translateAll;
-    btn.textContent = '🌐';
+    btn.innerHTML = Icons.svg('language');
     btn.disabled = false;
     btn.title = '全部翻译：检查所有待翻译条目并开始翻译';
   }
@@ -992,13 +1013,13 @@
     const summary = state.summary || {};
 
     if (summary.error) {
-      btn.textContent = '❌';
+      btn.innerHTML = BUTTON_FAILED_ICON;
       btn.title = `全部翻译失败：${summary.error}，可点击重试`;
     } else if ((summary.pendingCount || 0) === 0) {
-      btn.textContent = '✅';
+      btn.innerHTML = BUTTON_DONE_ICON;
       btn.title = '全部翻译：当前没有待翻译条目';
     } else {
-      btn.textContent = '✅';
+      btn.innerHTML = BUTTON_DONE_ICON;
       btn.title = `全部翻译：本轮检查到 ${summary.pendingCount} 条待翻译，成功翻译 ${summary.translatedCount || 0} 条`;
     }
 
@@ -1025,7 +1046,7 @@
       console.error('[ShortScraping] 全部翻译失败:', e);
       translateUi.manualPending = false;
       const btn = elements.buttons.translateAll;
-      btn.textContent = '❌';
+      btn.innerHTML = BUTTON_FAILED_ICON;
       btn.title = `全部翻译失败：${e.message}，可点击重试`;
       translateUi.terminalTimer = setTimeout(() => {
         translateUi.terminalTimer = null;
@@ -1048,13 +1069,13 @@
    * 查找节点，避免写到重渲染后已脱离 DOM 的旧节点。
    */
   const larkInFlight = new Set();
-  const LARK_BUTTON_ICON = '<img src="../../assets/icons/lark.png" alt="Lark">';
+  const LARK_BUTTON_ICON = Icons.svg('send');
 
   /**
-   * 卡片右上角按钮（🌍 / Lark）的瞬态：⏳ 进行中、✅/❌ 终态 2 秒窗口。写入按 selector +
+   * 卡片操作按钮（翻译 / Lark）的瞬态：转圈进行中、成功 / 失败图标终态 2 秒窗口。写入按 selector +
    * data-id 重查当前节点（找不到才退回传入的旧节点），并记进 cardButtonStates——
    * storage.onChanged 的全量重渲染会把按钮重建成默认态，而翻译成功本身就会触发一次
-   * 重渲染（落库 → onChanged），不重贴的话 ✅ 只闪几十毫秒（2026-09-17 真机实测）。
+   * 重渲染（落库 → onChanged），不重贴的话成功图标只闪几十毫秒（2026-09-17 真机实测）。
    * renderTimeline 重建卡片后调 reapplyCardButtonStates 按记录重贴；复原默认态时忘掉。
    */
   const cardButtonStates = new Map();   // `${selector}|${dramaId}` → { selector, dramaId, html, disabled }
@@ -1098,7 +1119,7 @@
     }
 
     larkInFlight.add(dramaId);
-    setLarkButtonState(dramaId, btn, '⏳', true);
+    setLarkButtonState(dramaId, btn, BUTTON_BUSY_ICON, true);
 
     try {
       const response = await chrome.runtime.sendMessage({ action: 'larkPush', dramaId });
@@ -1115,16 +1136,16 @@
       }
 
       showToast('已推送到飞书工作流', { type: 'success' });
-      setLarkButtonState(dramaId, btn, '✅', true);
+      setLarkButtonState(dramaId, btn, BUTTON_DONE_ICON, true);
     } catch (e) {
       console.error('[ShortScraping] Lark 推送失败:', e);
       showToast(`Lark 推送失败：${e.message}`, { type: 'error', duration: 5000 });
-      setLarkButtonState(dramaId, btn, '❌', true);
+      setLarkButtonState(dramaId, btn, BUTTON_FAILED_ICON, true);
     } finally {
       larkInFlight.delete(dramaId);
     }
 
-    // ✅/❌ 展示 2 秒后复原图标；期间若同卡又发起新推送，交给新流程接管
+    // 成功 / 失败图标展示 2 秒后复原；期间若同卡又发起新推送，交给新流程接管
     setTimeout(() => {
       if (!larkInFlight.has(dramaId)) {
         resetLarkButtonState(dramaId, btn);
@@ -1182,7 +1203,7 @@
    * onChanged 自会刷新）；只翻出一半时后台保持待翻译等下轮补齐，要提示用户这不是失败。
    */
   const translateInFlight = new Set();
-  const TRANSLATE_BUTTON_ICON = '🌍';
+  const TRANSLATE_BUTTON_ICON = Icons.svg('language');
 
   async function translateSingleCard(dramaId, btn) {
     if (translateInFlight.has(dramaId)) {
@@ -1191,7 +1212,7 @@
     }
 
     translateInFlight.add(dramaId);
-    setCardButtonState('.btn-translate', dramaId, btn, '⏳', true);
+    setCardButtonState('.btn-translate', dramaId, btn, BUTTON_BUSY_ICON, true);
 
     try {
       const response = await chrome.runtime.sendMessage({ action: 'translateSingle', dramaId });
@@ -1199,19 +1220,19 @@
         throw new Error(response?.error || '后台翻译失败');
       }
 
-      setCardButtonState('.btn-translate', dramaId, btn, '✅', true);
+      setCardButtonState('.btn-translate', dramaId, btn, BUTTON_DONE_ICON, true);
       if (response.complete === false) {
         showToast('只翻出一部分，已保存；剩余部分留待下轮自动补齐', { type: 'info', duration: 4000 });
       }
     } catch (e) {
       console.error('[ShortScraping] 翻译失败:', e);
       showToast(`翻译失败：${e.message}`, { type: 'error', duration: 5000 });
-      setCardButtonState('.btn-translate', dramaId, btn, '❌', true);
+      setCardButtonState('.btn-translate', dramaId, btn, BUTTON_FAILED_ICON, true);
     } finally {
       translateInFlight.delete(dramaId);
     }
 
-    // ✅/❌ 展示 2 秒后复原图标；期间若同卡又发起新翻译，交给新流程接管
+    // 成功 / 失败图标展示 2 秒后复原；期间若同卡又发起新翻译，交给新流程接管
     setTimeout(() => {
       if (!translateInFlight.has(dramaId)) {
         resetCardButtonState('.btn-translate', dramaId, btn, TRANSLATE_BUTTON_ICON);
@@ -1393,41 +1414,60 @@
   }
 
   /**
-   * 更新统计
+   * 更新底栏：左侧全库条数与翻译状态（v1.8.0 起按全库统计，不再只算当前站点），抓取异常时多一枚警告图标。
+   * 「抓取于 …」不常驻底栏，打开弹窗时在顶部提示条里弹一下（showLastUpdateToast）。
    */
   function updateStats() {
-    const visible = getVisibleDramas();
-    const total = visible.length;
-    const translated = visible.filter(d => d.status === 'trans').length;
+    const total = state.dramas.length;
+    const translated = state.dramas.filter(d => d.status === 'trans').length;
     const pending = total - translated;
 
-    elements.stats.total.textContent = `${total} 部`;
-    // 整轮全失败时后台不更新 lastScrape（断网/站点改版时定时抓取停摆），「抓取于」停在上次成功；
-    // 失败记录比它新就在后面点明，原因放悬停提示
-    const failure = latestRoundFailure();
-    // 抓取成功却一条都没拿到的订阅（v1.7.0）：整轮全失败的提示优先，那时不另报
-    const warnings = failure ? [] : currentScrapeWarnings();
-    elements.stats.lastUpdate.textContent = (state.lastScrape
-      ? `抓取于 ${TimelineRender.formatRelativeTime(state.lastScrape)}`
-      : '未抓取') + (failure ? ' · 最近一轮全部失败' : (warnings.length ? ` · ${warnings.length} 个订阅抓到 0 条` : ''));
-    const counts = failure && Number.isFinite(failure.total) ? ` ${failure.failed}/${failure.total} 个来源` : '';
-    elements.stats.lastUpdate.title = failure
-      ? `${TimelineRender.formatRelativeTime(failure.at)}那一轮${counts}全部失败：${failure.error || '未知错误'}`
-      : (warnings.length ? scrapeWarningsTitle(warnings) : '');
-    elements.stats.lastUpdate.classList.toggle('is-failed', Boolean(failure));
-    elements.stats.lastUpdate.classList.toggle('is-warning', warnings.length > 0);
+    elements.stats.total.textContent = `共 ${total.toLocaleString()} 部`;
+
+    // 抓取异常（整轮全失败 / 有订阅抓到 0 条）：留一枚警告图标，悬停看明细、点一下再弹提示；异常清掉随之隐藏
+    const summary = lastUpdateSummary();
+    const alert = elements.stats.alert;
+    alert.classList.toggle('hidden', summary.level === 'info');
+    alert.classList.toggle('is-error', summary.level === 'error');
+    alert.classList.toggle('is-warning', summary.level === 'warning');
+    alert.title = summary.level === 'info' ? '' : `${summary.text}\n${summary.title}`;
+
     // 数据已是更新版本的布局：后台只读停摆（不入库、不推送、不翻译），翻译计数也已冻结不再变化，
     // 状态栏改成升级提示，免得用户以为扩展还在正常工作
     const ahead = state.dramasLayoutAhead;
     elements.stats.status.textContent = ahead
       ? DRAMAS_LAYOUT_AHEAD_HINT
       : (pending > 0
-        ? `${translated} 已翻译, ${pending} 待翻译`
+        ? `${pending.toLocaleString()} 部待翻译`
         : (total > 0 ? '全部已翻译' : '暂无数据'));
     elements.stats.status.title = ahead
       ? '本地数据已被更新版本的扩展升级为新的存储格式，当前版本只读：不再抓取入库、同步与翻译。请安装最新版扩展'
-      : '';
+      : (pending > 0 ? `已翻译 ${translated.toLocaleString()} 部，待翻译 ${pending.toLocaleString()} 部` : '');
     elements.stats.status.classList.toggle('is-warning', ahead);
+  }
+
+  /**
+   * 「抓取于 …」的文案、悬停明细与级别：info＝正常；error＝最近一轮全部失败（比最近一次成功更新）；
+   * warning＝抓取成功却有订阅一条都没拿到（v1.7.0）。整轮全失败的提示优先，那时不另报 0 条告警。
+   * 整轮全失败时后台不更新 lastScrape（断网/站点改版时定时抓取停摆），「抓取于」停在上次成功。
+   */
+  function lastUpdateSummary() {
+    const failure = latestRoundFailure();
+    const warnings = failure ? [] : currentScrapeWarnings();
+    const text = (state.lastScrape
+      ? `抓取于 ${TimelineRender.formatRelativeTime(state.lastScrape)}`
+      : '未抓取') + (failure ? ' · 最近一轮全部失败' : (warnings.length ? ` · ${warnings.length} 个订阅抓到 0 条` : ''));
+    const counts = failure && Number.isFinite(failure.total) ? ` ${failure.failed}/${failure.total} 个来源` : '';
+    const title = failure
+      ? `${TimelineRender.formatRelativeTime(failure.at)}那一轮${counts}全部失败：${failure.error || '未知错误'}`
+      : (warnings.length ? scrapeWarningsTitle(warnings) : '');
+    return { text, title, level: failure ? 'error' : (warnings.length ? 'warning' : 'info') };
+  }
+
+  /** 顶部提示条弹一下「抓取于 …」：正常 3 秒；有异常停 6 秒（明细看底栏警告图标的悬停）。 */
+  function showLastUpdateToast() {
+    const summary = lastUpdateSummary();
+    showToast(summary.text, { type: summary.level, duration: summary.level === 'info' ? 3000 : 6000 });
   }
 
   // blocked / failed 是 v1.7.4 细分出来的（见后台 scrapeWarningOf / nextScrapeWarnings），detail 附在原因后面

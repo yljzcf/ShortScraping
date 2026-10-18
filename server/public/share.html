@@ -27,7 +27,7 @@
       <div class="timeline-container"></div>
 
       <div id="emptyState" class="empty-state hidden">
-        <div class="empty-icon">📺</div>
+        <div class="empty-icon" data-icon="tv" aria-hidden="true"></div>
         <h3>暂无监控数据</h3>
         <p>该分类下还没有数据；请在主机的扩展中完成抓取后再来查看</p>
       </div>
@@ -47,6 +47,8 @@
     </footer>
   </div>
 
+  <!-- 线条图标：载入即在 DOMContentLoaded 时填好 data-icon 占位 -->
+  <script src="/shared/icons.js"></script>
   <script src="/shared/site-registry.js"></script>
   <script src="/shared/site-tabs.js"></script>
   <!-- timeline-render 的标题文案取自 translate-config.titleDisplay，须排在它之前 -->

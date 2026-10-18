@@ -215,6 +215,8 @@ async function popupFixture(stored) {
     setTimeout: () => 0,
     clearTimeout() {}
   });
+  // popup.html 先载 shared/icons.js（按钮瞬态图标在 popup.js 求值时就取，v1.8.0），夹具照同一顺序
+  vm.runInContext(fs.readFileSync(path.join(root, 'src/shared/icons.js'), 'utf8'), context);
   let script = fs.readFileSync(path.join(root, 'src/popup/popup.js'), 'utf8');
   const marker = "document.addEventListener('DOMContentLoaded', init);";
   if (!script.includes(marker)) throw new Error('popup.js 的 DOMContentLoaded 注册行已变，夹具需同步');
@@ -241,7 +243,7 @@ const popupStore = extra => ({
 }
 {
   const p = await popupFixture(popupStore());
-  check('P3 没有 dramasMeta：照常显示翻译计数、不标红', p.status().textContent === '1 已翻译, 1 待翻译' && !p.status().classes.has('is-warning'),
+  check('P3 没有 dramasMeta：照常显示翻译计数、不标红', p.status().textContent === '1 部待翻译' && !p.status().classes.has('is-warning'),
     JSON.stringify({ text: p.status().textContent, classes: [...p.status().classes] }));
   p.fireChange({ dramasMeta: { newValue: { layout: 2 } } });
   check('P4 弹窗开着时出现 layout:2 标记：状态栏随即换成升级提示', p.status().textContent === HINT && p.status().classes.has('is-warning'),
