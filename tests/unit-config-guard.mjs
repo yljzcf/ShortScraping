@@ -320,7 +320,7 @@ const ok = { status: 200, body: { ok: true } };
 
   // S4d-f 服务端缺 config/tag.json 的 409（TAG_CONFIG_MISSING，v1.7.0）：同样不抛、不重推同内容，
   // 告警带错误码并点明恢复路径（设置页保存订阅 → 打开弹窗补推）
-  bg.server = async () => ({ status: 409, body: { ok: false, code: 'TAG_CONFIG_MISSING', error: '未找到 config/tag.json，已拒绝按零订阅覆盖现有 3 条时间线（未写入任何文件）；请在扩展设置页「网页订阅」点一次保存以重新生成该文件' } });
+  bg.server = async () => ({ status: 409, body: { ok: false, code: 'TAG_CONFIG_MISSING', error: '未找到 config/tag.json，已拒绝按零订阅覆盖现有 3 条时间线（未写入任何文件）；请在扩展设置页「订阅」点一次保存以重新生成该文件' } });
   bg.seed(card('tt0404'));
   resetSync(bg);
   const beforeMissing = syncPosts(bg).length;

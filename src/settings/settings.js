@@ -693,15 +693,16 @@
   function renderConfigSummary() {
     elements.configSummary.innerHTML = '';
 
+    // tab：点卡片跳到的分页（v1.8.1 概览卡片可点），须与导航的 data-tab 一致（unit-settings-guards S14 守着）
     const cards = [
-      { label: '网页订阅', value: `${state.urlTags.length} 个 URL` },
-      { label: '定时任务', value: getScheduleText(state.scheduleConfig) },
-      { label: '翻译接口', value: getTranslateText(state.translateConfig) },
-      { label: 'Lark 推送', value: getLarkText(state.larkConfig) }
+      { label: '订阅', value: `${state.urlTags.length} 个 URL`, tab: 'subscriptions' },
+      { label: '定时任务', value: getScheduleText(state.scheduleConfig), tab: 'schedule' },
+      { label: '翻译', value: getTranslateText(state.translateConfig), tab: 'translate' },
+      { label: '飞书', value: getLarkText(state.larkConfig), tab: 'lark' }
     ];
 
     cards.forEach(card => {
-      elements.configSummary.appendChild(createSummaryCard(card.label, card.value));
+      elements.configSummary.appendChild(createSummaryCard(card.label, card.value, card.tab));
     });
   }
 
@@ -775,7 +776,7 @@
       : '已勾选，保存后由后台记下水位线（下次后台唤醒时生效）。';
   }
 
-  function createSummaryCard(label, value) {
+  function createSummaryCard(label, value, tab) {
     const card = document.createElement('div');
     card.className = 'summary-card';
     // textContent 天然不解析 HTML：不必再为这一处留一份 escapeHtml（v1.7.0 删）
@@ -784,6 +785,18 @@
       cell.className = className;
       cell.textContent = text === null || text === undefined ? '' : String(text);
       card.appendChild(cell);
+    }
+    // 点卡片 / 键盘 Enter、空格跳到对应分页（v1.8.1）
+    if (tab) {
+      card.setAttribute('role', 'button');
+      card.setAttribute('tabindex', '0');
+      card.title = `去「${label}」设置`;
+      card.addEventListener('click', () => switchTab(tab));
+      card.addEventListener('keydown', event => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        switchTab(tab);
+      });
     }
     return card;
   }
@@ -1001,7 +1014,7 @@
       if (syncResult.ok) {
         if (!preflight) await clearConfigAhead('tag');
         // 下载只是发起（a.click() 拿不到另存为被取消、被浏览器拦下的结果），提醒回收站还有一份
-        const backupNote = doomedCount > 0 ? '；备份文件已触发下载，未保存成功可在「数据存档」导出自动清理回收站' : '';
+        const backupNote = doomedCount > 0 ? '；备份文件已触发下载，未保存成功可在「数据」导出自动清理回收站' : '';
         showStatus(`已保存 ${state.urlTags.length} 条网页订阅，并写回 config/tag.json${backupNote}`, true);
       } else {
         showStatus(`已保存到扩展本地配置；写回 config/tag.json 失败：${syncResult.error}——本地订阅会保留，并在同步服务启动后（扩展下次唤醒时）自动写回文件`, false);
@@ -1047,7 +1060,7 @@
     return `${head}\n其下的 ${doomedCount} 条历史记录会被一并删除，且不可恢复。\n`
       + `继续前会自动下载这 ${doomedCount} 条的 JSON 备份文件；日后如需还原，`
       + `要先把订阅重新加回来，再用下方「导入恢复」写回。\n`
-      + `若下载被取消或拦截，这批条目仍会存进「数据存档 → 自动清理回收站」（保留最近 3 批），可随时补导。\n\n是否继续？`;
+      + `若下载被取消或拦截，这批条目仍会存进「数据 → 导出自动清理回收站」（保留最近 3 批），可随时补导。\n\n是否继续？`;
   }
 
   /**
@@ -1648,7 +1661,7 @@
       text.textContent = '同步服务：已开启';
       // 服务端缺 config/tag.json 时推送被 409 拒绝（v1.7.0，数据不动）：在这里点明怎么恢复
       archiveInfo.textContent = result.tagConfigMissing === true
-        ? '同步服务找不到 config/tag.json：时间线推送被拒绝（已有的 CSV 与共享页不会被清空）。到「网页订阅」点一次保存即可重新生成该文件。'
+        ? '同步服务找不到 config/tag.json：时间线推送被拒绝（已有的 CSV 与共享页不会被清空）。到「订阅」点一次保存即可重新生成该文件。'
         : (result.csvPath ? `CSV 输出路径：${result.csvPath}` : '同步服务已开启，可以写入 CSV 和配置文件。');
       return;
     }

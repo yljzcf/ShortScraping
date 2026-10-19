@@ -565,6 +565,30 @@ check('S13 createSummaryCard 用 textContent、设置页不再留 escapeHtml',
   /textContent/.test(grab('function createSummaryCard')) && !/innerHTML/.test(grab('function createSummaryCard'))
     && !/function escapeHtml\(/.test(src) && !/escapeHtml\(/.test(src), '');
 
+// ---------- S14 设置页整理（v1.8.1）：左侧竖排导航；概览卡片点了跳到对应分页 ----------
+{
+  const html = fs.readFileSync(path.join(root, 'src/settings/settings.html'), 'utf8');
+  const nav = html.match(/<nav\b[^>]*class="tabs"[^>]*>/)?.[0] || '';
+  check('S14a 导航是竖排 tablist（aria-orientation="vertical"）', /aria-orientation="vertical"/.test(nav), nav);
+  const navTabs = new Set([...html.matchAll(/<button\b[^>]*\bdata-tab="([^"]+)"/g)].map(m => m[1]));
+  const cardTabs = [...grab('function renderConfigSummary').matchAll(/\btab: '([^']+)'/g)].map(m => m[1]);
+  check('S14b 概览的 4 张卡都指向导航里存在的分页', cardTabs.length === 4 && cardTabs.every(tab => navTabs.has(tab)),
+    JSON.stringify({ cardTabs, navTabs: [...navTabs] }));
+  const card = grab('function createSummaryCard');
+  check('S14c 卡片可点也可键盘操作，都走 switchTab', /role', 'button'/.test(card) && /tabindex', '0'/.test(card)
+    && /addEventListener\('click', \(\) => switchTab\(tab\)\)/.test(card) && /'Enter'/.test(card), '');
+  // 挪进概览的两块：同步服务状态（原在数据存档）与分组图标（原在网页订阅）
+  const panelOf = id => {
+    const at = html.indexOf(`id="${id}"`);
+    const panels = [...html.matchAll(/<section\b[^>]*\bid="(tab-[^"]+)"/g)].filter(m => m.index < at);
+    return panels.at(-1)?.[1] || null;
+  };
+  check('S14d 同步服务状态与分组图标都在「概览」分页', panelOf('syncServiceStatus') === 'tab-config' && panelOf('btnCheckSync') === 'tab-config'
+    && panelOf('groupPinRows') === 'tab-config', JSON.stringify([panelOf('syncServiceStatus'), panelOf('groupPinRows')]));
+  check('S14e 飞书页只有一个保存按钮，放在页底的保存条里', panelOf('btnSaveLark') === 'tab-lark'
+    && html.indexOf('id="btnSaveLark"') > html.indexOf('id="btnLarkBotTestSend"') && /class="save-bar"/.test(html), '');
+}
+
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));
 const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);

@@ -294,7 +294,7 @@
         if (tagConfigMissing) {
           if (!tagConfigMissingToasted) {
             tagConfigMissingToasted = true;
-            showToast('同步服务找不到 config/tag.json，时间线暂停写入：到设置页「网页订阅」点一次保存即可恢复', { type: 'error', duration: 6000 });
+            showToast('同步服务找不到 config/tag.json，时间线暂停写入：到设置页「订阅」点一次保存即可恢复', { type: 'error', duration: 6000 });
           }
           return;
         }
@@ -650,7 +650,7 @@
     if (status === 'degraded') {
       container.classList.add('is-on', 'is-warn');
       container.title = '同步服务在运行，但找不到 config/tag.json：推送被拒绝（已有的 CSV 与共享页不会被清空）。'
-        + '到设置页「网页订阅」点一次保存即可重新生成该文件，再打开弹窗就会补推；点击可重新检测';
+        + '到设置页「订阅」点一次保存即可重新生成该文件，再打开弹窗就会补推；点击可重新检测';
       text.textContent = '同步服务：缺订阅配置';
       return;
     }

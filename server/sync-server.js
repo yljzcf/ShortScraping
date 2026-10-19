@@ -406,7 +406,7 @@ function readTagConfig() {
  */
 function tagConfigMissingError(existingCount) {
   const error = new Error(`未找到 config/tag.json，已拒绝按零订阅覆盖现有 ${existingCount} 条时间线（未写入任何文件）；` +
-    '请在扩展设置页「网页订阅」点一次保存以重新生成该文件');
+    '请在扩展设置页「订阅」点一次保存以重新生成该文件');
   error.statusCode = 409;
   error.apiCode = 'TAG_CONFIG_MISSING';
   return error;

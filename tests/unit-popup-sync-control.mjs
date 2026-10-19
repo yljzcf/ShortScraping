@@ -578,11 +578,11 @@ function scheduleRestart(h, { body, oldMs = 1500, downMs = 1000, newPid = 200 })
   const container = h.byId.syncServiceStatus;
   check('D1 缺订阅配置：状态栏文案「缺订阅配置」、黄色（is-on + is-warn），悬停说明怎么恢复',
     h.statusText() === '同步服务：缺订阅配置' && container.classes.has('is-on') && container.classes.has('is-warn')
-      && /tag\.json/.test(container.title) && /网页订阅/.test(container.title), JSON.stringify({ text: h.statusText(), title: container.title }));
+      && /tag\.json/.test(container.title) && /「订阅」/.test(container.title), JSON.stringify({ text: h.statusText(), title: container.title }));
   check('D2 服务仍在跑：⏹/🔄 照常可见，▶ 隐藏', !h.hidden('btnSyncStop') && !h.hidden('btnSyncRestart') && h.hidden('btnSyncStart'), '');
   check('D3 不发注定被 409 拒绝的补喂消息', !h.messages.some(m => m.action === 'warmupCsvSync'), JSON.stringify(h.messages));
   const hints = () => h.toasts.filter(t => /tag\.json/.test(t.message));
-  check('D4 提示一次去设置页「网页订阅」保存（error 样式）', hints().length === 1 && hints()[0].type === 'error' && /网页订阅/.test(hints()[0].message),
+  check('D4 提示一次去设置页「订阅」保存（error 样式）', hints().length === 1 && hints()[0].type === 'error' && /「订阅」/.test(hints()[0].message),
     JSON.stringify(h.toasts));
   await h.drive(h.fx.checkSyncServiceStatus());
   check('D5 同一次打开里重新检测不重复提示', hints().length === 1, JSON.stringify(h.toasts));

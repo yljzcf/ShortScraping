@@ -1134,7 +1134,7 @@ function pruneDramasOutsideConfiguredUrls(urlTags, { force = false, reason = '�
  * 抓取结束的强制清理），只有设置页退订那一条路径有确认框和导出备份。手改 tag.json 的笔误、
  * 服务没开时新增订阅被旧文件回滚，都会走到这里静默删掉整条订阅的历史（与 2026-09-17 事故
  * 同类）。所以把整批条目追加进 storage.pruneTrash（最新在尾、最多 PRUNE_TRASH_MAX_BATCHES
- * 批），设置页「数据存档」可导出成导入恢复认的 JSON。返回追加后的新数组，由调用方与删除
+ * 批），设置页「数据」可导出成导入恢复认的 JSON。返回追加后的新数组，由调用方与删除
  * 同一次 set 落库：写失败即整次失败、本轮不删——宁可不清理，也不在没有留底的情况下删历史。
  */
 async function nextPruneTrash(reason, removed) {
