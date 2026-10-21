@@ -10,6 +10,7 @@
  * 分层纪律：
  * - 纯函数层（DEFAULT_CONFIG / normalizeConfig / configReadiness / buildPayload）
  *   三端可用：后台 importScripts / 设置页 <script> 标签 / 同步服务 require；
+ * - 多维表格自动同步（v1.8.3）的写表逻辑在 lark-bitable.js、由同步服务调用；本模块只出它的配置字段。
  * - 效果层（pushDrama 等带 fetch 的函数）只允许在后台 service worker 调用：
  *   弹窗关闭后请求仍需完成，且设置页「发送测试」也走后台消息，测试路径=真实路径。
  *   请求一律经 fetch-util.js 的 FetchUtil.fetchWithDeadline（期限连正文一起算，v1.7.0 审查 H1）。
@@ -33,8 +34,35 @@
     // 两个字段即开关：都填才带图，缺一就发无图卡。
     feishuAppId: '',
     feishuAppSecret: '',
-    requestTimeoutSec: 15
+    requestTimeoutSec: 15,
+    // 多维表格自动同步（v1.8.3）：同步服务每次收到 /sync 后，把「已翻译、表里还没有」的条目追加进
+    // 这张表（只追加不更新）。凭据单独一组：封面用的 feishuApp* 是飞书租户应用，表可能在 Lark 租户
+    // （本项目用户就是），跨云的应用进不了对方租户的表。OpenAPI 域名按表格链接的域名自动选
+    bitableEnabled: false,
+    bitableUrl: '',
+    bitableAppId: '',
+    bitableAppSecret: '',
+    bitableFields: null // null＝全部用 DEFAULT_BITABLE_FIELDS；normalizeConfig 输出完整对象
   };
+
+  // 多维表格的列名映射：键是条目字段，值是表里的列名；值为空串＝不写这一列。
+  // 默认值是本项目用户自己那张「数据总表」的列名（2026-10-21 用户定），别人的表按需在
+  // config/lark.json 的 bitableFields 里改。uid 是去重依据，不能关
+  const DEFAULT_BITABLE_FIELDS = Object.freeze({
+    uid: 'uid',
+    title: 'title0',
+    description: 'des0',
+    genres: 'tag0',
+    titleZh: '标题',
+    descriptionZh: '简介',
+    platform: '平台',
+    tags: '来源标签',
+    contentTags: '内容标签',
+    poster: '海报链接',
+    url: '跳转链接',
+    scrapedAt: '抓取时间',
+    playUrl: 'IMDB跳转播放'
+  });
 
   const FEISHU_TOKEN_API = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
   const FEISHU_IMAGE_API = 'https://open.feishu.cn/open-apis/im/v1/images';
@@ -62,6 +90,16 @@
     ? require('./fetch-util.js')
     : global.FetchUtil;
 
+  /** 列名映射归一：只认 DEFAULT_BITABLE_FIELDS 里的键，值 trim；缺的键用默认列名，显式空串保留（＝关掉这一列） */
+  function normalizeBitableFields(raw) {
+    const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const fields = {};
+    for (const [key, fallback] of Object.entries(DEFAULT_BITABLE_FIELDS)) {
+      fields[key] = typeof source[key] === 'string' ? source[key].trim() : fallback;
+    }
+    return fields;
+  }
+
   function normalizeConfig(rawConfig) {
     const config = { ...DEFAULT_CONFIG, ...(rawConfig || {}) };
     const timeout = Number(config.requestTimeoutSec);
@@ -72,7 +110,12 @@
       botEnabled: Boolean(config.botEnabled),
       feishuAppId: String(config.feishuAppId || '').trim(),
       feishuAppSecret: String(config.feishuAppSecret || '').trim(),
-      requestTimeoutSec: Number.isInteger(timeout) && timeout > 0 ? timeout : DEFAULT_CONFIG.requestTimeoutSec
+      requestTimeoutSec: Number.isInteger(timeout) && timeout > 0 ? timeout : DEFAULT_CONFIG.requestTimeoutSec,
+      bitableEnabled: Boolean(config.bitableEnabled),
+      bitableUrl: String(config.bitableUrl || '').trim(),
+      bitableAppId: String(config.bitableAppId || '').trim(),
+      bitableAppSecret: String(config.bitableAppSecret || '').trim(),
+      bitableFields: normalizeBitableFields(config.bitableFields)
     };
   }
 
@@ -821,9 +864,11 @@
 
   const api = {
     DEFAULT_CONFIG,
+    DEFAULT_BITABLE_FIELDS,
     TABLE_COLUMNS,
     TABLE_HEADERS,
     normalizeConfig,
+    normalizeBitableFields,
     configReadiness,
     botReadiness,
     imageReadiness,

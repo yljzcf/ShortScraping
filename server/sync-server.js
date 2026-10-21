@@ -26,6 +26,7 @@ const { promisify } = require('util');
 const { spawn, spawnSync } = require('child_process');
 const SubscriptionConfig = require('../src/shared/subscription-config.js');
 const Lark = require('../src/shared/lark.js');
+const LarkBitable = require('../src/shared/lark-bitable.js');
 const TimelineCsv = require('../src/shared/timeline-csv.js');
 const ScheduleConfig = require('../src/shared/schedule-config.js');
 const TranslateConfig = require('../src/shared/translate-config.js');
@@ -533,7 +534,8 @@ function isAllowedHost(hostHeader) {
 const EXTENSION_ORIGIN_PATTERN = /^chrome-extension:\/\/[a-p]{32}$/;
 // 会改盘或进程状态的写路由：只有「来源合格 + JSON 请求体 + 这些路由」的请求才可能触发首见即固定（v1.7.0）。
 // 以前固定发生在 Content-Type 与路由判定之前，未固定期间任何扩展发个 415 / 404 的 POST 也能抢走固定位
-const WRITE_ROUTES = new Set(['/sync', '/config/tag', '/config/trans', '/config/lark', '/config/cron', '/known-items', '/shutdown', '/restart']);
+// /lark/bitable/test 不改盘，但要用请求体里的 App Secret 去外网换令牌，同样只许固定来源调用
+const WRITE_ROUTES = new Set(['/sync', '/config/tag', '/config/trans', '/config/lark', '/config/cron', '/known-items', '/shutdown', '/restart', '/lark/bitable/test']);
 let pinnedWriteOrigin = null;
 
 /** 盘上的固定来源：{ state: 'missing' }（文件不在）/ { state: 'ok', origin } / { state: 'unreadable' }（读不动、坏 JSON、来源不合法）。 */
@@ -833,6 +835,244 @@ function readKnownItems() {
   }
 }
 
+/* —— 多维表格自动同步（v1.8.3）——
+ * 每次 /sync 落盘后（以及启动后、Lark 配置写回后）在后台跑一轮：把「已翻译、表里还没有」的条目追加进
+ * config/lark.json 配置的多维表格。全程不阻塞 /sync 的响应，失败只记日志与状态、5 分钟后重试，
+ * 不影响同步本身（同 backupBeforeOverwrite 的姿态）。
+ * - 配置每轮重新读盘（同 readTagConfig）：设置页保存或手改 lark.json 立即生效；文件坏了按未启用处理。
+ * - 已写入的 uid 记在 db/lark-bitable.json（换了表就重新计）：表里手删的行不会被加回来。
+ * - 「内容标签」列只在本机有 docs/genre-taxonomy/content-tags.json 时才填（体系只留本地，2026-10-21 用户定）。
+ * - 身份默认走本机已登录的 lark-cli（没填 App ID / Secret 时，2026-10-21 用户定）：由这里起进程，
+ *   lark-bitable.js 只拿到 runLarkCli 这个函数。
+ */
+const BITABLE_STATE_PATH = path.join(DB_DIR, 'lark-bitable.json');
+const CONTENT_TAGS_PATH = path.join(PROJECT_DIR, 'docs', 'genre-taxonomy', 'content-tags.json');
+const BITABLE_DEBOUNCE_MS = Number(process.env.SHORTSCRAPING_BITABLE_DEBOUNCE_MS) || 3000;
+const BITABLE_STARTUP_DELAY_MS = Number(process.env.SHORTSCRAPING_BITABLE_STARTUP_MS) || 15000;
+const BITABLE_RETRY_MS = Number(process.env.SHORTSCRAPING_BITABLE_RETRY_MS) || 5 * 60 * 1000;
+// 仅供测试：把 OpenAPI 根地址指到本机假接口；只认 http://127.0.0.1:<端口>，别的值一律忽略
+const BITABLE_API_BASE = /^http:\/\/127\.0\.0\.1:\d+$/.test(process.env.SHORTSCRAPING_LARK_API_BASE || '')
+  ? process.env.SHORTSCRAPING_LARK_API_BASE
+  : null;
+
+const bitableRuntime = { timer: null, retryTimer: null, running: false, rerun: false, ranSinceStart: false };
+
+/**
+ * 找 lark-cli：SHORTSCRAPING_LARK_CLI → node 同目录（npm -g 装在这里）→ Homebrew / /usr/local → PATH。
+ * launchd 拉起的服务 PATH 很短，而 lark-cli 本身是 `#!/usr/bin/env node` 脚本：找到的是 node 脚本时
+ * 用本进程的 node 去跑它，不依赖 PATH 里有 node。返回 { command, prefix, path } 或 null。
+ */
+function resolveLarkCli() {
+  const names = process.platform === 'win32' ? ['lark-cli.cmd', 'lark-cli.exe', 'lark-cli'] : ['lark-cli'];
+  const dirs = [path.dirname(process.execPath), '/opt/homebrew/bin', '/usr/local/bin',
+    ...String(process.env.PATH || '').split(path.delimiter)].filter(Boolean);
+  const candidates = [process.env.SHORTSCRAPING_LARK_CLI, ...dirs.flatMap(dir => names.map(name => path.join(dir, name)))].filter(Boolean);
+  for (const candidate of candidates) {
+    let real;
+    try {
+      real = fs.realpathSync(candidate);
+      if (!fs.statSync(real).isFile()) continue;
+    } catch (error) {
+      continue;
+    }
+    let head = '';
+    try {
+      const fd = fs.openSync(real, 'r');
+      const buffer = Buffer.alloc(128);
+      const bytes = fs.readSync(fd, buffer, 0, 128, 0);
+      fs.closeSync(fd);
+      head = buffer.subarray(0, bytes).toString('utf8').split('\n')[0];
+    } catch (error) { /* 读不了头就当普通可执行文件 */ }
+    const isNodeScript = /^#!.*\bnode\b/.test(head) || /\.(c|m)?js$/.test(real);
+    return isNodeScript ? { command: process.execPath, prefix: [real], path: real } : { command: real, prefix: [], path: real };
+  }
+  return null;
+}
+
+/** 跑一次 lark-cli：写入体走 stdin，超时杀进程；结果原样交回（解析在 lark-bitable.js） */
+function runLarkCli(args, { input, timeoutMs = 60000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const cli = resolveLarkCli();
+    if (!cli) {
+      reject(new Error('找不到 lark-cli：先安装并在终端运行 lark-cli auth login --domain all 登录；装在别处可设环境变量 SHORTSCRAPING_LARK_CLI'));
+      return;
+    }
+    const child = spawn(cli.command, [...cli.prefix, ...args], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(reject, new Error(`lark-cli ${timeoutMs / 1000} 秒内没有返回（${args.slice(1, 3).join(' ')}）`));
+    }, timeoutMs);
+    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    child.on('error', error => finish(reject, error));
+    child.on('close', code => finish(resolve, { code, stdout, stderr }));
+    child.stdin.on('error', () => { /* 进程先退出时写 stdin 会 EPIPE，结果以退出码与输出为准 */ });
+    child.stdin.end(input === undefined ? '' : input);
+  });
+}
+let contentTagsCache = null; // { mtimeMs, fn }
+
+/** 读 config/lark.json 并归一；文件不在或坏了返回 null（坏文件告警，但不拒绝任何请求） */
+function readLarkConfigFile() {
+  try {
+    return Lark.normalizeConfig(parseJsonText(fs.readFileSync(LARK_CONFIG_PATH, 'utf8')));
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn('[ShortScraping Sync] 读取 config/lark.json 失败，多维表格同步按未启用处理:', error.message);
+    return null;
+  }
+}
+
+function readBitableState() {
+  try {
+    const raw = parseJsonText(fs.readFileSync(BITABLE_STATE_PATH, 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn('[ShortScraping Sync] 读取 db/lark-bitable.json 失败，按空状态处理:', error.message);
+    return {};
+  }
+}
+
+function writeBitableState(state) {
+  try {
+    writeJsonAtomic(BITABLE_STATE_PATH, state);
+  } catch (error) {
+    console.warn('[ShortScraping Sync] 写入 db/lark-bitable.json 失败:', error.message);
+  }
+}
+
+/** 同一张表的标识：换了链接（或表）就从头计已写入集合 */
+function bitableTargetKey(config) {
+  const target = LarkBitable.parseBitableUrl(config.bitableUrl);
+  return target ? `${target.kind}:${target.token}/${target.tableId}` : '';
+}
+
+/** genres → 中文内容标签（按体系维度排序）；本机没有体系文件时返回 null（不填这一列） */
+function loadContentTagsFor() {
+  let stat;
+  try {
+    stat = fs.statSync(CONTENT_TAGS_PATH);
+  } catch (error) {
+    contentTagsCache = null;
+    return null;
+  }
+  if (contentTagsCache && contentTagsCache.mtimeMs === stat.mtimeMs) return contentTagsCache.fn;
+  try {
+    const raw = parseJsonText(fs.readFileSync(CONTENT_TAGS_PATH, 'utf8'));
+    const rank = new Map((Array.isArray(raw.order) ? raw.order : []).map((tag, i) => [tag, i]));
+    const mapping = raw.mapping && typeof raw.mapping === 'object' ? raw.mapping : {};
+    const fn = genres => {
+      const tags = new Set();
+      for (const genre of genres) {
+        for (const tag of mapping[String(genre).trim().toLowerCase()] || []) tags.add(tag);
+      }
+      return [...tags].sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity));
+    };
+    contentTagsCache = { mtimeMs: stat.mtimeMs, fn };
+    return fn;
+  } catch (error) {
+    console.warn('[ShortScraping Sync] 读取内容标签体系失败，本轮不填「内容标签」列:', error.message);
+    contentTagsCache = null;
+    return null;
+  }
+}
+
+/** 排一轮同步（防抖）；未启用时什么都不做，连定时器都不挂 */
+function scheduleBitableSync(delayMs = BITABLE_DEBOUNCE_MS) {
+  const config = readLarkConfigFile();
+  if (!config || !LarkBitable.bitableReadiness(config).ok) return;
+  if (bitableRuntime.running) {
+    bitableRuntime.rerun = true;
+    return;
+  }
+  clearTimeout(bitableRuntime.timer);
+  bitableRuntime.timer = setTimeout(() => {
+    bitableRuntime.timer = null;
+    runBitableSync().catch(error => console.warn('[ShortScraping Sync] 多维表格同步异常:', error.message));
+  }, delayMs);
+  bitableRuntime.timer.unref?.();
+}
+
+async function runBitableSync() {
+  const config = readLarkConfigFile();
+  if (!config || !LarkBitable.bitableReadiness(config).ok) return;
+  const ctx = LarkBitable.createContext(config, { apiBaseOverride: BITABLE_API_BASE, runCli: runLarkCli });
+  if (!ctx) return;
+  bitableRuntime.running = true;
+  bitableRuntime.rerun = false;
+  clearTimeout(bitableRuntime.retryTimer);
+  bitableRuntime.retryTimer = null;
+  const key = bitableTargetKey(config);
+  const previous = readBitableState();
+  const synced = new Set(previous.target === key && Array.isArray(previous.syncedIds) ? previous.syncedIds : []);
+  const now = () => new Date().toISOString();
+  try {
+    const result = await LarkBitable.syncOnce(ctx, {
+      dramas: latestDramas,
+      syncedIds: synced,
+      contentTagsFor: loadContentTagsFor()
+    });
+    for (const id of result.existingIds) synced.add(id);
+    for (const id of result.addedIds) synced.add(id);
+    writeBitableState({
+      target: key,
+      lastRunAt: now(),
+      lastOkAt: now(),
+      lastError: null,
+      lastAdded: result.added,
+      rowCount: result.rowCount,
+      missingColumns: result.missingColumns,
+      syncedIds: [...synced]
+    });
+    if (result.added > 0) {
+      console.log(`[ShortScraping Sync] 多维表格：追加 ${result.added} 条（表内现 ${result.rowCount} 行）`
+        + (result.missingColumns.length ? `；表里没有这些列，已跳过：${result.missingColumns.join('、')}` : ''));
+    }
+  } catch (error) {
+    writeBitableState({ ...previous, target: key, lastRunAt: now(), lastError: error.message, syncedIds: [...synced] });
+    console.warn(`[ShortScraping Sync] 多维表格同步失败（${Math.round(BITABLE_RETRY_MS / 60000)} 分钟后重试）:`, error.message);
+    bitableRuntime.retryTimer = setTimeout(() => scheduleBitableSync(0), BITABLE_RETRY_MS);
+    bitableRuntime.retryTimer.unref?.();
+  } finally {
+    bitableRuntime.running = false;
+    bitableRuntime.ranSinceStart = true;
+    if (bitableRuntime.rerun) scheduleBitableSync();
+  }
+}
+
+/** /health 本机块里的同步状态（不含已写入 uid 清单与任何凭据） */
+function bitableHealth() {
+  const config = readLarkConfigFile();
+  const enabled = Boolean(config?.bitableEnabled);
+  const body = { enabled };
+  if (!enabled) return body;
+  const readiness = LarkBitable.bitableReadiness(config);
+  const state = readBitableState();
+  const sameTarget = state.target === bitableTargetKey(config);
+  return {
+    enabled,
+    ready: readiness.ok,
+    missing: readiness.missing,
+    mode: LarkBitable.authMode(config),
+    running: bitableRuntime.running,
+    contentTags: fs.existsSync(CONTENT_TAGS_PATH),
+    lastRunAt: sameTarget ? state.lastRunAt || null : null,
+    lastOkAt: sameTarget ? state.lastOkAt || null : null,
+    lastError: sameTarget ? state.lastError || null : null,
+    lastAdded: sameTarget ? state.lastAdded ?? null : null,
+    rowCount: sameTarget ? state.rowCount ?? null : null,
+    missingColumns: sameTarget && Array.isArray(state.missingColumns) ? state.missingColumns : []
+  };
+}
+
 /**
  * 读完请求体并解析成 JSON（五个写接口共用，v1.7.0 收拢）：坏 JSON 回 400（带 statusCode，经 sendRouteError），
  * 以前各路由直接 JSON.parse(body || '{}')，SyntaxError 一路冒成 500 并打整段堆栈，像是服务自己出了错。
@@ -915,6 +1155,8 @@ async function handleRequest(req, res) {
       body.csvInSync = csvInSync();
       // 订阅配置文件缺失（v1.7.0）：推送会被 409 TAG_CONFIG_MISSING 拒绝，弹窗据此提示去设置页保存一次订阅
       body.tagConfigMissing = !fs.existsSync(TAG_CONFIG_PATH);
+      // 多维表格自动同步状态（v1.8.3）：设置页回显上次同步结果
+      body.bitableSync = bitableHealth();
     }
     return sendJson(res, 200, body);
   }
@@ -1090,6 +1332,8 @@ async function handleRequest(req, res) {
         count = TimelineCsv.countTimelineRows(configured);
       }
 
+      // 内容变了、本进程还没跑过、或上一轮失败时才排同步：扩展唤醒的同内容补推不必每次都去读表
+      if (snapshotChanged || !bitableRuntime.ranSinceStart || readBitableState().lastError) scheduleBitableSync();
       return sendJson(res, 200, { ok: true, count, csvPath: CSV_PATH, contentHash });
     } catch (error) {
       return sendRouteError(res, '同步失败', error);
@@ -1129,6 +1373,7 @@ async function handleRequest(req, res) {
       const rawConfig = pickConfigObject(payload, 'larkConfig');
       if (!rawConfig) return sendJson(res, 400, { ok: false, error: '缺少有效的 larkConfig 对象，未写入' });
       const config = writeLarkConfig(rawConfig);
+      scheduleBitableSync(); // 刚打开开关或改了表格链接：不必等下一次 /sync
       return sendJson(res, 200, { ok: true, config, configPath: LARK_CONFIG_PATH });
     } catch (error) {
       return sendRouteError(res, '写入 Lark 推送配置失败', error);
@@ -1144,6 +1389,28 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { ok: true, config, configPath: CRON_CONFIG_PATH });
     } catch (error) {
       return sendRouteError(res, '写入定时任务配置失败', error);
+    }
+  }
+
+  // 设置页「测试连接」（v1.8.3）：用表单草稿（未保存）只读检查凭据、表格、列名与待追加条数，不写表
+  if (req.method === 'POST' && pathname === '/lark/bitable/test') {
+    try {
+      const payload = await readJsonBody(req);
+      const rawConfig = pickConfigObject(payload, 'larkConfig');
+      if (!rawConfig) return sendJson(res, 400, { ok: false, error: '缺少有效的 larkConfig 对象' });
+      const draft = Lark.normalizeConfig({ ...rawConfig, bitableEnabled: true });
+      const readiness = LarkBitable.bitableReadiness(draft);
+      if (!readiness.ok) {
+        return sendJson(res, 400, { ok: false, error: `配置不完整：${readiness.missing.join('、')}`, missing: readiness.missing });
+      }
+      const ctx = LarkBitable.createContext(draft, { apiBaseOverride: BITABLE_API_BASE, runCli: runLarkCli });
+      const state = readBitableState();
+      const synced = new Set(state.target === bitableTargetKey(draft) && Array.isArray(state.syncedIds) ? state.syncedIds : []);
+      const result = await LarkBitable.testConnection(ctx, { dramas: latestDramas, syncedIds: synced });
+      return sendJson(res, 200, { ok: true, ...result, contentTags: fs.existsSync(CONTENT_TAGS_PATH) });
+    } catch (error) {
+      if (error instanceof LarkBitable.BitableError) return sendJson(res, 502, { ok: false, error: error.message, code: error.code ?? null });
+      return sendRouteError(res, '测试多维表格连接失败', error);
     }
   }
 
@@ -1180,6 +1447,8 @@ ensureDb();
 loadSnapshot();
 healCsvFromSnapshot();
 loadPinnedWriteOrigin();
+// 启动后补一轮多维表格同步：停机期间扩展推不进来，开机后扩展可能很久才推第一次
+scheduleBitableSync(BITABLE_STARTUP_DELAY_MS);
 
 // SSE 心跳：防止空闲长连接被中间设备掐断
 setInterval(() => {

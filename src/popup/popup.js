@@ -13,6 +13,11 @@
   // 状态
   let state = {
     dramas: [],
+    // 未按订阅过滤的全库（v1.8.2 搜索用）：dramas 只含仍订阅的条目，搜索要连已退订的一起搜
+    allDramas: [],
+    // 搜索（v1.8.2）：query 是已提交的词，非空＝结果态（内容区显示搜索结果，跨弹窗开关经
+    // storage 键 popupSearch 保留，用户点关闭才清）；editing＝头部输入框展开但还没提交
+    search: { editing: false, query: '' },
     urlTags: [],
     lastScrape: null,
     // 后台写的「最近一轮全部失败」{ at, failed, total, error }；有 URL 成功时后台同一次写清成 null
@@ -94,7 +99,8 @@
       }
 
       if (changes.dramas) {
-        state.dramas = filterDramasByConfiguredUrls(changes.dramas.newValue || []);
+        state.allDramas = changes.dramas.newValue || [];
+        state.dramas = filterDramasByConfiguredUrls(state.allDramas);
       } else if (changes.urlTags) {
         loadData();
         return;
@@ -118,7 +124,10 @@
       timeline: document.querySelector('.timeline-container')
     };
 
+    elements.header = document.querySelector('.header');
+
     elements.buttons = {
+      search: document.getElementById('btnSearch'),
       translateAll: document.getElementById('btnTranslateAll'),
       settings: document.getElementById('btnSettings'),
       goScrape: document.getElementById('btnGoScrape')
@@ -127,6 +136,25 @@
     elements.states = {
       empty: document.getElementById('emptyState'),
       loading: document.getElementById('loadingState')
+    };
+
+    // 空状态的标题与说明：搜索没结果时换文案，回到站点时换回 HTML 里写的原文
+    elements.emptyText = {
+      title: document.getElementById('emptyTitle'),
+      desc: document.getElementById('emptyDesc')
+    };
+    elements.emptyText.defaults = {
+      title: elements.emptyText.title.textContent,
+      desc: elements.emptyText.desc.textContent
+    };
+
+    elements.search = {
+      input: document.getElementById('searchInput'),
+      submit: document.getElementById('btnSearchSubmit'),
+      cancel: document.getElementById('btnSearchCancel'),
+      resultBar: document.getElementById('searchResultBar'),
+      resultText: document.getElementById('searchResultText'),
+      close: document.getElementById('btnSearchClose')
     };
 
     elements.toastBar = document.getElementById('toastBar');
@@ -185,6 +213,7 @@
   }
 
   function bindEvents() {
+    bindSearchEvents();
     elements.buttons.translateAll.addEventListener('click', translateAllData);
     elements.buttons.settings.addEventListener('click', openSettings);
     bindActivatable(elements.syncService.container, checkSyncServiceStatus);
@@ -774,11 +803,12 @@
     showLoading(true);
 
     try {
-      const result = await chrome.storage.local.get(['dramas', 'dramasMeta', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'lastScrapeWarnings', 'syncServerDir', 'siteTabPrefs']);
+      const result = await chrome.storage.local.get(['dramas', 'dramasMeta', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'lastScrapeWarnings', 'syncServerDir', 'siteTabPrefs', 'popupSearch']);
 
       state.dramasLayoutAhead = isDramasLayoutAhead(result.dramasMeta);
       state.urlTags = result.urlTags || [];
-      state.dramas = filterDramasByConfiguredUrls(result.dramas || []);
+      state.allDramas = result.dramas || [];
+      state.dramas = filterDramasByConfiguredUrls(state.allDramas);
       state.lastScrape = result.lastScrape;
       state.lastScrapeFailure = result.lastScrapeFailure || null;
       state.lastScrapeWarnings = result.lastScrapeWarnings || null;
@@ -788,6 +818,12 @@
       const prefs = result.siteTabPrefs || {};
       state.groupPins = prefs.pins || {};
       if (state.activeSource === null) state.activeSource = prefs.activeSource || null;
+
+      // 上次没关的搜索：首帧就直接是结果态，不先闪一下站点页
+      if (!searchRestored) {
+        searchRestored = true;
+        restoreSearch(result.popupSearch);
+      }
 
       renderNow(); // 弹窗打开首帧不经去抖
       // 「抓取于 …」只在打开弹窗时弹一下；订阅变化重读数据（也走这里）与之后的 storage 变化都不再弹
@@ -1245,6 +1281,7 @@
    * TimelineRender（src/shared/timeline-render.js，与局域网共享页共用同一份文件）。
    */
   function getVisibleDramas() {
+    if (isSearchActive()) return DramaSearch.searchDramas(state.allDramas, state.search.query);
     if (!state.activeSource) return [];
     return state.dramas.filter(d => TimelineRender.dramaSource(d) === state.activeSource);
   }
@@ -1330,9 +1367,14 @@
   // —— 每个站点各自的滚动位置（弹窗本次打开期间有效）。滚动容器是 main.content；
   // 时间线每次重渲染都整树重建，不记的话后台抓取一来就把正在看的位置弹回顶部 ——
   const scrollBySource = new Map();
-  // 当前 DOM 里渲染的是哪个站点。切站时 state.activeSource 先于渲染改掉，
+  // 当前 DOM 里渲染的是哪个站点（搜索结果态记作 SEARCH_SCROLL_KEY）。切站时 state.activeSource 先于渲染改掉，
   // 存位置必须认这个「已渲染」的站点，否则会把上一站的位置记到新站头上
   let renderedSource = null;
+
+  /** 当前该显示哪一页的滚动位置：搜索结果态共用一个键，否则按站点。 */
+  function currentViewKey() {
+    return isSearchActive() ? SEARCH_SCROLL_KEY : state.activeSource;
+  }
 
   function rememberScroll() {
     if (renderedSource && elements.content) {
@@ -1343,8 +1385,9 @@
   function restoreScroll() {
     if (!elements.content) return;
     // 内容变短时浏览器会自动夹取，无需自行 clamp
-    elements.content.scrollTop = state.activeSource ? (scrollBySource.get(state.activeSource) || 0) : 0;
-    renderedSource = state.activeSource;
+    const key = currentViewKey();
+    elements.content.scrollTop = key ? (scrollBySource.get(key) || 0) : 0;
+    renderedSource = key;
   }
 
   // —— onChanged 渲染去抖：trailing 250ms 合并变更风暴；首个挂起变更起算 1s
@@ -1387,9 +1430,13 @@
     // 活动站点必须落在已订阅集合内；为空或已退订由 SiteTabs 在此归正（可能为 null）
     renderCategoryTabs();
 
-    const hasData = TimelineRender.renderTimeline(elements.containers.timeline, getVisibleDramas(), {
-      source: state.activeSource || 'imdb',
+    // 搜索结果跨站混排：source 记作 'search'，不套任何站点专属版式（Steam 双列等）
+    const searching = isSearchActive();
+    const visible = getVisibleDramas();
+    const hasData = TimelineRender.renderTimeline(elements.containers.timeline, visible, {
+      source: searching ? 'search' : (state.activeSource || 'imdb'),
       readOnly: false,
+      ...searchRenderOptions(),
       assetsBase: '../../assets/icons',
       onTranslate: translateSingleCard,
       onLarkPush: pushCardToLark,
@@ -1398,8 +1445,167 @@
     });
     // 整树重建把按钮全部重建成默认态，把进行中 / 终态的瞬态按 data-id 贴回去
     reapplyCardButtonStates();
+    renderSearchChrome(visible.length);
     elements.states.empty.classList.toggle('hidden', hasData);
     restoreScroll();
+  }
+
+  // —— 搜索（v1.8.2）：头部放大镜 → 输入框顶替标签条 → 提交后内容区换成全库搜索结果。
+  // 匹配判据在 shared/drama-search.js；结果沿用时间线卡片，按钮照常可用 ——
+  const SEARCH_SCROLL_KEY = '__search__';
+  const SEARCH_STORAGE_KEY = 'popupSearch';
+  let searchRestored = false;
+
+  function isSearchActive() {
+    return Boolean(state.search.query);
+  }
+
+  function bindSearchEvents() {
+    const { input, submit, cancel, close } = elements.search;
+    elements.buttons.search.addEventListener('click', openSearchEditor);
+    submit.addEventListener('click', submitSearch);
+    cancel.addEventListener('click', cancelSearch);
+    close.addEventListener('click', closeSearch);
+    input.addEventListener('keydown', (e) => {
+      // 中文输入法选字时的回车属于输入法，不是提交
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submitSearch();
+      } else if (e.key === 'Escape') {
+        // type=search 的 Esc 默认清空输入框，这里接管成「取消」
+        e.preventDefault();
+        cancelSearch();
+      }
+    });
+    // 还没搜过、输入框是空的就点到别处：当作取消，标签条回来
+    input.addEventListener('blur', () => {
+      if (state.search.editing && !isSearchActive() && !input.value.trim()) cancelSearch();
+    });
+  }
+
+  /** 头部形态：编辑中或结果态时搜索条顶替标签条（CSS 按 .header.is-searching 切换）。 */
+  function syncSearchHeader() {
+    elements.header.classList.toggle('is-searching', state.search.editing || isSearchActive());
+  }
+
+  function openSearchEditor() {
+    state.search.editing = true;
+    elements.search.input.value = state.search.query;
+    syncSearchHeader();
+    elements.search.input.focus();
+  }
+
+  function submitSearch() {
+    const query = String(elements.search.input.value || '').trim();
+    if (!query) {
+      // 清空了再按搜索＝不搜了
+      if (isSearchActive()) closeSearch();
+      else cancelSearch();
+      return;
+    }
+    state.search.editing = false;
+    if (query !== state.search.query) {
+      state.search.query = query;
+      forgetSearchScroll(); // 换了词从头看
+      persistSearch(query);
+    }
+    elements.search.input.value = query;
+    syncSearchHeader();
+    renderNow();
+  }
+
+  /**
+   * 取消（× / Esc）：
+   * - 还没搜过：收起输入框，标签条回来；
+   * - 结果态下改了一半的词：先退回当前词，结果不动（再按一次才关闭搜索）；
+   * - 结果态、词没改：关闭搜索。
+   */
+  function cancelSearch() {
+    const { input } = elements.search;
+    if (isSearchActive()) {
+      if (String(input.value || '').trim() !== state.search.query) {
+        input.value = state.search.query;
+        state.search.editing = false;
+        return;
+      }
+      closeSearch();
+      return;
+    }
+    state.search.editing = false;
+    input.value = '';
+    syncSearchHeader();
+  }
+
+  /** 关闭搜索：清掉保留的词，回到当前站点的时间线。 */
+  function closeSearch() {
+    state.search.query = '';
+    state.search.editing = false;
+    elements.search.input.value = '';
+    forgetSearchScroll();
+    persistSearch('');
+    syncSearchHeader();
+    renderNow();
+  }
+
+  /**
+   * 丢掉搜索结果的滚动位置。DOM 里正显示着搜索结果时还要让下一次渲染别把当前位置存回去
+   * （renderTimeline 先 rememberScroll 再重建），否则刚删的位置又被写回来
+   */
+  function forgetSearchScroll() {
+    scrollBySource.delete(SEARCH_SCROLL_KEY);
+    if (renderedSource === SEARCH_SCROLL_KEY) renderedSource = null;
+  }
+
+  /** 弹窗打开时恢复上次没关的搜索（只在首帧做一次）。 */
+  function restoreSearch(saved) {
+    const query = saved && typeof saved.query === 'string' ? saved.query.trim() : '';
+    if (!query) return;
+    state.search.query = query;
+    elements.search.input.value = query;
+    syncSearchHeader();
+  }
+
+  /** 搜索词跨弹窗开关保留；写失败只影响下次打开，不打断当前浏览。 */
+  async function persistSearch(query) {
+    try {
+      if (query) await chrome.storage.local.set({ [SEARCH_STORAGE_KEY]: { query } });
+      else await chrome.storage.local.remove(SEARCH_STORAGE_KEY);
+    } catch (e) {
+      console.warn('[ShortScraping] 保存搜索词失败:', e);
+    }
+  }
+
+  /**
+   * 结果卡片的搜索选项：命中词高亮、经中文对照命中的题材整枚标亮、「已退订」标记
+   * （不在按订阅过滤后的 state.dramas 里的就是）。不在搜索态时全为 null，卡片与平时一致。
+   */
+  function searchRenderOptions() {
+    if (!isSearchActive()) return { highlightTerms: null, highlightGenres: null, isUnsubscribed: null };
+    const terms = DramaSearch.parseQuery(state.search.query);
+    const subscribed = new Set(state.dramas.map(d => d && d.id));
+    return {
+      highlightTerms: terms,
+      highlightGenres: DramaSearch.genresMatchedByZh(terms),
+      isUnsubscribed: drama => !subscribed.has(drama.id)
+    };
+  }
+
+  /** 结果条与空状态文案跟着搜索态切换。 */
+  function renderSearchChrome(count) {
+    const searching = isSearchActive();
+    const { resultBar, resultText } = elements.search;
+    resultBar.classList.toggle('hidden', !searching);
+    if (searching) {
+      resultText.textContent = `搜索“${state.search.query}” · 共 ${count.toLocaleString()} 部`;
+      resultText.title = '全库搜索：标题、简介、标签与题材，中英文均可；多个词用空格隔开，须全部命中';
+    }
+    const { title, desc, defaults } = elements.emptyText;
+    title.textContent = searching ? '没有找到匹配的条目' : defaults.title;
+    desc.textContent = searching
+      ? `全库没有同时包含「${DramaSearch.parseQuery(state.search.query).join('」「')}」的条目，换个词试试`
+      : defaults.desc;
+    elements.buttons.goScrape.classList.toggle('hidden', searching);
   }
 
   // 订阅 URL 清单单一真源在 src/shared/subscription-config.js（与后台同一份，按尾斜杠归一去重；v1.7.0 收拢）

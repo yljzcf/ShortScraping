@@ -15,7 +15,15 @@
       <!-- 分组折叠标签条：内容由 shared/site-tabs.js 按 site-registry.js 的
            SITE_GROUPS 动态渲染（同一时间只展开一组），不要在这里手写按钮 -->
       <div class="category-tabs" id="categoryTabs" role="tablist" aria-label="站点分类"></div>
+      <!-- 搜索条（v1.8.2）：点放大镜后顶替标签条（.header.is-searching），回车 / 「搜索」出结果，
+           Esc / × 取消；结果态下保留在头部显示当前词，可改词再搜 -->
+      <div class="search-bar" id="searchBar" role="search">
+        <input type="search" id="searchInput" class="search-input" placeholder="搜标题、简介、标签（中英文均可）" aria-label="搜索全库" autocomplete="off" spellcheck="false">
+        <button type="button" id="btnSearchSubmit" class="search-submit">搜索</button>
+        <button type="button" id="btnSearchCancel" class="btn-icon search-cancel" title="取消（Esc）" aria-label="取消搜索" data-icon="x"></button>
+      </div>
       <div class="header-actions">
+        <button id="btnSearch" class="btn-icon" title="搜索全库：标题、简介、标签，中英文均可" aria-label="搜索" data-icon="search"></button>
         <button id="btnTranslateAll" class="btn-icon" title="全部翻译：检查所有待翻译条目并开始翻译" aria-label="全部翻译" data-icon="language"></button>
         <button id="btnSettings" class="btn-icon" title="设置" aria-label="设置" data-icon="settings"></button>
       </div>
@@ -44,14 +52,20 @@
 
     <!-- 内容区域 -->
     <main class="content">
+      <!-- 搜索结果条（v1.8.2）：只在结果态显示，「关闭搜索」回到站点时间线 -->
+      <div id="searchResultBar" class="search-result-bar hidden">
+        <span id="searchResultText" class="search-result-text"></span>
+        <button type="button" id="btnSearchClose" class="search-close">关闭搜索</button>
+      </div>
+
       <!-- 时间线（由 shared/timeline-render.js 动态生成） -->
       <div class="timeline-container"></div>
 
       <!-- 空状态 -->
       <div id="emptyState" class="empty-state hidden">
         <div class="empty-icon" data-icon="tv" aria-hidden="true"></div>
-        <h3>暂无监控数据</h3>
-        <p>该分类下还没有数据，请先访问对应榜单页面并点击抓取按钮</p>
+        <h3 id="emptyTitle">暂无监控数据</h3>
+        <p id="emptyDesc">该分类下还没有数据，请先访问对应榜单页面并点击抓取按钮</p>
         <button id="btnGoScrape" class="btn-primary">前往榜单页面</button>
       </div>
 
@@ -98,6 +112,8 @@
   <script src="../shared/schedule-config.js"></script>
   <script src="../shared/translate-config.js"></script>
   <script src="../shared/timeline-render.js"></script>
+  <!-- 搜索匹配判据（纯函数，v1.8.2） -->
+  <script src="../shared/drama-search.js"></script>
   <script src="../shared/qrcode.js"></script>
   <script src="popup.js"></script>
 </body>

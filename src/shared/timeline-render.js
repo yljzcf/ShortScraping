@@ -21,6 +21,11 @@
     onOpenUrl: null,
     // 封面菜单「搜 X」（v1.7.3）：(dramaId) => Promise，弹窗注入（交给后台查找并开页）；共享页不传
     onOpenPlatform: null,
+    // 弹窗搜索（v1.8.2）：命中词高亮（DramaSearch.parseQuery 的结果）与「已退订」标记，共享页不传
+    highlightTerms: null,
+    // 经中文对照命中的英文题材（小写数组），对应的题材标签整枚标亮
+    highlightGenres: null,
+    isUnsubscribed: null,
     assetsBase: '../../assets/icons'
   };
 
@@ -262,6 +267,23 @@
     return escapeHtml(text).replace(/"/g, '&quot;');
   }
 
+  const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  /**
+   * 转义并把命中词包进 <mark class="search-hit">（v1.8.2 弹窗搜索）。没有词时等同 escapeHtml。
+   * 按原文不区分大小写找词，切段后逐段转义——不在转义后的 HTML 上替换，免得词命中实体（&amp;）。
+   */
+  function highlightHtml(text, terms) {
+    const raw = String(text == null ? '' : text);
+    const list = (terms || []).filter(Boolean);
+    if (!raw || list.length === 0) return escapeHtml(raw);
+    // 长词优先，重叠时整段高亮长的那个
+    const pattern = new RegExp(`(${[...list].sort((a, b) => b.length - a.length).map(escapeRegExp).join('|')})`, 'gi');
+    return raw.split(pattern).map((part, i) => (i % 2 === 1
+      ? `<mark class="search-hit">${escapeHtml(part)}</mark>`
+      : escapeHtml(part))).join('');
+  }
+
   /**
    * 获取卡片显示标签。兼容旧数据没有 tags 字段的情况。
    */
@@ -304,6 +326,14 @@
     card.className = `drama-card ${drama.status === 'new' ? 'status-new' : ''} ${drama.source === 'steam' ? 'card-landscape' : ''}`;
     card.dataset.id = drama.id;
 
+    const terms = Array.isArray(options.highlightTerms) ? options.highlightTerms : null;
+    const mark = text => highlightHtml(text, terms);
+    const genreHits = new Set(Array.isArray(options.highlightGenres) ? options.highlightGenres : []);
+    const markGenre = g => (genreHits.has(g.toLowerCase())
+      ? `<mark class="search-hit">${escapeHtml(g)}</mark>`
+      : mark(g));
+    const unsubscribed = typeof options.isUnsubscribed === 'function' && options.isUnsubscribed(drama);
+
     const titleDisplay = titleDisplayOf(drama);
     const { main: titleMain, sub: titleSub } = titlePartsOf(drama);
 
@@ -333,23 +363,24 @@
           <div class="card-main">
             <div class="card-title">
               <div class="card-title-row">
-                <div class="card-title-text" title="${escapeAttribute(titleDisplay)}">${escapeHtml(titleMain)}</div>
+                <div class="card-title-text" title="${escapeAttribute(titleDisplay)}">${mark(titleMain)}</div>
                 ${drama.status === 'new' ? '<span class="status-chip">待翻译</span>' : ''}
+                ${unsubscribed ? '<span class="status-chip chip-unsubscribed" title="所属订阅已退订，弹窗平时不显示这部">已退订</span>' : ''}
               </div>
-              ${titleSub ? `<div class="card-title-sub" title="${escapeAttribute(titleSub)}">${escapeHtml(titleSub)}</div>` : ''}
+              ${titleSub ? `<div class="card-title-sub" title="${escapeAttribute(titleSub)}">${mark(titleSub)}</div>` : ''}
             </div>
             <div class="card-description">
-              ${descZh ? `<div class="card-desc-zh${descEn ? '' : ' desc-zh-only'}">${escapeHtml(descZh)}</div>` : ''}
-              ${descEn ? `<div class="card-desc-en${descZh ? '' : ' desc-en-only'}">${escapeHtml(descEn)}</div>` : ''}
+              ${descZh ? `<div class="card-desc-zh${descEn ? '' : ' desc-zh-only'}">${mark(descZh)}</div>` : ''}
+              ${descEn ? `<div class="card-desc-en${descZh ? '' : ' desc-en-only'}">${mark(descEn)}</div>` : ''}
               ${!descZh && !descEn ? '<div class="card-desc-empty">暂无简介</div>' : ''}
             </div>
           </div>
         </div>
         <div class="card-footer">
           <div class="card-tags-left">
-            ${getDisplayTags(drama).map(tag => `<span class="tag tag-source">${escapeHtml(tag)}</span>`).join('')}
+            ${getDisplayTags(drama).map(tag => `<span class="tag tag-source">${mark(tag)}</span>`).join('')}
           </div>
-          ${genreChips.length ? `<div class="card-tags-right" title="${escapeAttribute(drama.genres.join(', '))}">${genreChips.map(g => `<span class="tag tag-genre">${escapeHtml(g)}</span>`).join('')}</div>` : ''}
+          ${genreChips.length ? `<div class="card-tags-right" title="${escapeAttribute(drama.genres.join(', '))}">${genreChips.map(g => `<span class="tag tag-genre">${markGenre(g)}</span>`).join('')}</div>` : ''}
         </div>
       </div>
     `;
@@ -580,6 +611,7 @@
     adjustCardDescription,
     getDisplayTags,
     getDisplayGenres,
+    highlightHtml,
     posterMenuItems,
     closePosterMenu,
     formatRelativeTime,

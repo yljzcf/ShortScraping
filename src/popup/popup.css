@@ -77,6 +77,119 @@ body {
   color: var(--danger);
 }
 
+/* 搜索（v1.8.2）：点放大镜后 .header 加 is-searching，搜索条顶替站点标签条占满左侧；
+   放大镜自己藏起来，翻译 / 设置照常在右边。结果态（有当前词）也保持这个形态 */
+.search-bar {
+  display: none;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.header.is-searching .search-bar {
+  display: flex;
+}
+
+.header.is-searching .category-tabs,
+.header.is-searching #btnSearch {
+  display: none;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.search-input:focus {
+  border-color: var(--accent-line);
+}
+
+/* 自带的清除叉和我们的 × 重复，去掉 */
+.search-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+.search-submit,
+.search-close {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.search-close {
+  height: 26px;
+  padding: 0 10px;
+}
+
+.search-submit:hover,
+.search-close:hover {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+/* 取消用的 × 是普通灰色，不是全部翻译失败那种红叉 */
+.btn-icon.search-cancel .icon-x {
+  color: inherit;
+}
+
+/* 结果条：内容区顶部「“词” · 共 N 部」与「关闭搜索」 */
+.search-result-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 6px 6px 6px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+.search-result-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 卡片里的命中词（timeline-render.js highlightHtml） */
+.search-hit {
+  color: inherit;
+  background: color-mix(in srgb, var(--warning) 32%, transparent);
+  border-radius: 2px;
+}
+
+/* 已退订订阅留下的条目：搜全库时才会出现 */
+.status-chip.chip-unsubscribed {
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+}
+
 /* 状态栏：左侧同步服务胶囊，右侧版本胶囊 */
 .status-bar {
   position: relative; /* 临时提示条的定位锚点 */
@@ -606,6 +719,8 @@ body {
 .category-tab:focus-visible,
 .tab-group-chip:focus-visible,
 .btn-icon:focus-visible,
+.search-submit:focus-visible,
+.search-close:focus-visible,
 .sync-inline-btn:focus-visible,
 .lan-qr-url:focus-visible,
 .scrape-alert:focus-visible,

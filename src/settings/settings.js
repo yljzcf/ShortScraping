@@ -11,6 +11,8 @@
   // 写回配置与健康检查的期限（连正文一起算，FetchUtil）：写回以前没有期限，服务接了连接却不应答时，
   // 「保存」（含退订前的文件写回预检）会一直转（v1.7.0）
   const SYNC_CONFIG_TIMEOUT_MS = 5000;
+  // 多维表格「测试连接」要经同步服务去外网换令牌、读整表 uid，几千行要好几页，给足时间
+  const BITABLE_TEST_TIMEOUT_MS = 60000;
   const SYNC_HEALTH_TIMEOUT_MS = 1500;
   const SUBSCRIPTION_CATALOG_FILE = 'config/tag.example.json';
   // 「本地配置领先于文件」标记 { tag?, trans?, lark?, cron? }，与后台 loadConfigFromJsonFiles 共用（见 configAheadPatch）
@@ -79,6 +81,7 @@
       openLarkFromLark: document.getElementById('btnOpenLarkFromLark'),
       larkTestSend: document.getElementById('btnLarkTestSend'),
       larkBotTestSend: document.getElementById('btnLarkBotTestSend'),
+      larkBitableTest: document.getElementById('btnLarkBitableTest'),
       checkSync: document.getElementById('btnCheckSync')
     };
 
@@ -108,7 +111,12 @@
       botEnabled: document.getElementById('larkBotEnabled'),
       botHint: document.getElementById('larkBotHint'),
       feishuAppId: document.getElementById('larkFeishuAppId'),
-      feishuAppSecret: document.getElementById('larkFeishuAppSecret')
+      feishuAppSecret: document.getElementById('larkFeishuAppSecret'),
+      bitableUrl: document.getElementById('larkBitableUrl'),
+      bitableAppId: document.getElementById('larkBitableAppId'),
+      bitableAppSecret: document.getElementById('larkBitableAppSecret'),
+      bitableEnabled: document.getElementById('larkBitableEnabled'),
+      bitableHint: document.getElementById('larkBitableHint')
     };
     elements.scheduleForm = {
       mode: document.getElementById('scheduleModeSelect'),
@@ -173,8 +181,12 @@
     bindClick(elements.buttons.openLarkFromLark, () => openConfigFile('config/lark.json'));
     bindClick(elements.buttons.larkTestSend, handleLarkTestSend);
     bindClick(elements.buttons.larkBotTestSend, handleLarkBotTestSend);
+    bindClick(elements.buttons.larkBitableTest, handleLarkBitableTest);
     if (elements.larkForm?.botEnabled) {
       elements.larkForm.botEnabled.addEventListener('change', refreshBotHint);
+    }
+    if (elements.larkForm?.bitableEnabled) {
+      elements.larkForm.bitableEnabled.addEventListener('change', refreshBitableHint);
     }
     bindClick(elements.buttons.checkSync, checkSyncServiceStatus);
 
@@ -744,7 +756,12 @@
     if (form.botEnabled) form.botEnabled.checked = config.botEnabled;
     if (form.feishuAppId) form.feishuAppId.value = config.feishuAppId;
     if (form.feishuAppSecret) form.feishuAppSecret.value = config.feishuAppSecret;
+    if (form.bitableUrl) form.bitableUrl.value = config.bitableUrl;
+    if (form.bitableAppId) form.bitableAppId.value = config.bitableAppId;
+    if (form.bitableAppSecret) form.bitableAppSecret.value = config.bitableAppSecret;
+    if (form.bitableEnabled) form.bitableEnabled.checked = config.bitableEnabled;
     refreshBotHint();
+    refreshBitableHint();
   }
 
   function readLarkConfigFromForm() {
@@ -756,8 +773,76 @@
       botEnabled: form.botEnabled ? form.botEnabled.checked : false,
       // 飞书自建应用凭据：只用于上传封面拿 img_key，不是第二条推送通道
       feishuAppId: form.feishuAppId ? form.feishuAppId.value.trim() : '',
-      feishuAppSecret: form.feishuAppSecret ? form.feishuAppSecret.value.trim() : ''
+      feishuAppSecret: form.feishuAppSecret ? form.feishuAppSecret.value.trim() : '',
+      bitableUrl: form.bitableUrl ? form.bitableUrl.value.trim() : '',
+      bitableAppId: form.bitableAppId ? form.bitableAppId.value.trim() : '',
+      bitableAppSecret: form.bitableAppSecret ? form.bitableAppSecret.value.trim() : '',
+      bitableEnabled: form.bitableEnabled ? form.bitableEnabled.checked : false,
+      // 列名映射没有表单，只在 config/lark.json 里手改：保存时原样带上，不能被表单清掉
+      bitableFields: state.larkConfig?.bitableFields
     };
+  }
+
+  /** 回显多维表格同步状态：读同步服务 /health 的 bitableSync（服务没开就只说开关状态） */
+  async function refreshBitableHint() {
+    const hint = elements.larkForm?.bitableHint;
+    if (!hint) return;
+    if (!elements.larkForm.bitableEnabled?.checked) {
+      hint.textContent = '当前未开启；填好表格链接（凭据可留空，用 lark-cli 登录身份）、点「测试连接」通过后再开启并保存。';
+      return;
+    }
+    try {
+      const response = await FetchUtil.fetchWithDeadline(`${SYNC_BASE_URL}/health`, {}, { timeoutMs: SYNC_CONFIG_TIMEOUT_MS });
+      const status = (await response.json())?.bitableSync;
+      if (!status?.enabled) {
+        hint.textContent = '已勾选，保存后由同步服务开始自动同步。';
+      } else if (!status.ready) {
+        hint.textContent = `已开启，但配置不完整（${(status.missing || []).join('、')}），不会同步。`;
+      } else if (status.lastError) {
+        hint.textContent = `上次同步失败（${formatLocalStamp(status.lastRunAt)}）：${status.lastError}——5 分钟后自动重试。`;
+      } else if (status.lastOkAt) {
+        const missing = status.missingColumns?.length ? `；表里没有这些列，已跳过：${status.missingColumns.join('、')}` : '';
+        const who = status.mode === 'app' ? '应用身份' : 'lark-cli 登录身份';
+        hint.textContent = `上次同步 ${formatLocalStamp(status.lastOkAt)}（${who}）：追加 ${status.lastAdded ?? 0} 条，表内 ${status.rowCount ?? '?'} 行${missing}。`;
+      } else {
+        hint.textContent = '已开启，等同步服务跑第一轮（扩展下次推送时间线时，或服务启动后约 15 秒）。';
+      }
+    } catch (e) {
+      hint.textContent = '已勾选；同步服务没在运行，看不到同步状态（服务启动后才会同步）。';
+    }
+  }
+
+  /**
+   * 测试连接：把表单草稿（不落库）交给同步服务，用真实写表的同一套函数只读检查
+   * 凭据、表格、列名，并报告按当前时间线会追加多少条。不写表。
+   */
+  async function handleLarkBitableTest() {
+    const draft = Lark.normalizeConfig(readLarkConfigFromForm());
+    const btn = elements.buttons.larkBitableTest;
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = '测试中…';
+    try {
+      const response = await FetchUtil.fetchWithDeadline(`${SYNC_BASE_URL}/lark/bitable/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ larkConfig: draft })
+      }, { timeoutMs: BITABLE_TEST_TIMEOUT_MS, timeoutMessage: `同步服务 ${BITABLE_TEST_TIMEOUT_MS / 1000} 秒内无响应` });
+      let result = null;
+      try { result = await response.json(); } catch (e) { /* 下面按 HTTP 码报 */ }
+      if (!response.ok || !result?.ok) throw new Error(result?.error || `HTTP ${response.status}`);
+      const who = result.mode === 'app' ? '应用身份' : 'lark-cli 登录身份';
+      const parts = [`连接成功（${who}）：表内 ${result.rowCount} 行，按当前时间线会追加 ${result.pendingCount} 条`];
+      if (result.missingColumns?.length) parts.push(`表里没有这些列，会跳过：${result.missingColumns.join('、')}`);
+      if (!result.contentTags) parts.push('本机没有类型标签体系文件，「内容标签」列不填');
+      showStatus(parts.join('；'), true);
+    } catch (e) {
+      const offline = /Failed to fetch|无响应/.test(e.message);
+      showStatus(`多维表格测试失败：${offline ? '同步服务没在运行（测试要经同步服务）' : e.message}`, false);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
   }
 
   /** 回显当前水位线：让用户一眼看出「从什么时候起的新内容才会被推」。 */
@@ -1703,7 +1788,8 @@
   }
 
   function getLarkText(config) {
-    return Lark.configReadiness(config).ok ? '已配置 Webhook' : '未配置';
+    const base = Lark.configReadiness(config).ok ? '已配置 Webhook' : '未配置';
+    return Lark.normalizeConfig(config).bitableEnabled ? `${base}，表格自动同步已开` : base;
   }
 
   function openConfigFile(fileName) {

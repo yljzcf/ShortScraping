@@ -16,6 +16,8 @@ import './bootstrap.cjs';
 //   W 组：订阅归属判定委托 SubscriptionConfig.dramasUnderUrls，popup.html 按依赖顺序加载它
 //   V 组：「抓到 0 条」告警（lastScrapeWarnings，v1.7.0 审查 M2）——底栏后缀、悬停明细、只算仍订阅的 URL、
 //         整轮全失败优先；onChanged 只刷底栏；手动刷新的三种提示；v1.7.4 的 blocked / failed 文案与 detail（V9-V12）
+//   S 组：搜索（v1.8.2）——放大镜展开 / Esc 与失焦收起、回车出结果并写 popupSearch、搜全库标「已退订」、
+//         输入法选字回车不提交、重开弹窗直接恢复结果态、改了一半的词先退回再关闭、onChanged 跟上、零结果文案
 // 用法：node tests/unit-popup-ui.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,6 +32,7 @@ const SiteTabs = require(path.join(root, 'src/shared/site-tabs.js'));
 const SubscriptionConfig = require(path.join(root, 'src/shared/subscription-config.js'));
 const UrlMatch = require(path.join(root, 'src/shared/url-match.js'));
 const ScheduleConfig = require(path.join(root, 'src/shared/schedule-config.js'));
+const DramaSearch = require(path.join(root, 'src/shared/drama-search.js'));
 
 const results = [];
 const check = (name, pass, detail = '') => results.push({ name, pass, detail });
@@ -100,7 +103,8 @@ async function popupFixture({ stored = {} } = {}) {
           storageGets.push(list);
           return Object.fromEntries(list.filter(k => k in store).map(k => [k, structuredClone(store[k])]));
         },
-        async set(obj) { Object.assign(store, structuredClone(obj)); }
+        async set(obj) { Object.assign(store, structuredClone(obj)); },
+        async remove(keys) { for (const k of [].concat(keys)) delete store[k]; }
       },
       onChanged: { addListener(fn) { onChanged = fn; } }
     },
@@ -109,6 +113,7 @@ async function popupFixture({ stored = {} } = {}) {
 
   const tabRenders = [];
   let timelineRenders = 0;
+  let lastRender = null;
   const timers = new Map();
   let seq = 0;
   const context = vm.createContext({
@@ -121,11 +126,12 @@ async function popupFixture({ stored = {} } = {}) {
     SubscriptionConfig,
     UrlMatch,
     ScheduleConfig,
+    DramaSearch,
     SiteTabs: { ...SiteTabs, render: (container, layout, opts) => { tabRenders.push({ layout, opts }); } },
     TimelineRender: {
       CATEGORY_SOURCES: SiteRegistry.CATEGORY_SOURCES,
       dramaSource: d => d.source,
-      renderTimeline: () => { timelineRenders++; return true; },
+      renderTimeline: (container, dramas, opts) => { timelineRenders++; lastRender = { dramas, opts }; return dramas.length > 0; },
       formatRelativeTime: iso => `REL(${iso})`
     },
     QrCode: { drawToCanvas() {} },
@@ -157,6 +163,7 @@ async function popupFixture({ stored = {} } = {}) {
   return {
     fx, byId, store, messages, pendingScrapes, tabsCreated, storageGets, tabRenders, toasts, settle, flushTimers,
     timelineRenders: () => timelineRenders,
+    lastRender: () => lastRender,
     fireChange: changes => onChanged(changes, 'local'),
     // v1.8.0 起「抓取于 …」不常驻底栏：打开时弹提示，异常时底栏留警告图标。文案 / 明细 / 级别由 lastUpdateSummary 给出
     summary: () => fx.lastUpdateSummary(),
@@ -453,6 +460,110 @@ const baseStore = (extra = {}) => ({
     at('../shared/url-match.js') >= 0 && at('../shared/url-match.js') < at('../shared/subscription-config.js')
     && at('../shared/subscription-config.js') < at('popup.js'),
     JSON.stringify([at('../shared/url-match.js'), at('../shared/subscription-config.js'), at('popup.js')]));
+}
+
+// ============ S 组：搜索（v1.8.2） ============
+const OLD_LIST = 'https://www.imdb.com/chart/old-list/';   // 已退订的订阅
+const searchStore = (extra = {}) => baseStore({
+  dramas: [
+    { id: 'a', source: 'imdb', sourceListUrl: IMDB, title: 'Payback', genres: ['Revenge'], status: 'trans', scrapedAt: T0 },
+    { id: 'b', source: 'imdb', sourceListUrl: OLD_LIST, title: 'Old', titleZh: '复仇之路', status: 'trans', scrapedAt: T1 },
+    { id: 'c', source: 'reelshort', sourceListUrl: REELSHORT, title: 'Sweet CEO', genres: ['Romance'], status: 'trans', scrapedAt: T2 }
+  ],
+  ...extra
+});
+const key = (h, k, extra = {}) => {
+  for (const fn of h.byId.searchInput.listeners.keydown || []) fn({ key: k, preventDefault() {}, ...extra });
+};
+const searching = h => h.fx.elements.header.classes.has('is-searching');
+const ids = h => h.lastRender().dramas.map(d => d.id).join(',');
+{
+  const h = await popupFixture({ stored: searchStore() });
+  const rendersBefore = h.timelineRenders();
+  check('S0 前提：打开时显示站点时间线（只含订阅内条目）、头部没有搜索态',
+    !searching(h) && ids(h) === 'a' && h.lastRender().opts.source === 'imdb' && h.byId.searchResultBar.classes.has('hidden'), ids(h));
+
+  h.byId.btnSearch.click();
+  check('S1 点放大镜：头部进入搜索态（CSS 收起标签条），内容区不动、不写 popupSearch',
+    searching(h) && h.fx.state.search.editing && h.timelineRenders() === rendersBefore && !('popupSearch' in h.store), '');
+
+  key(h, 'Escape');
+  check('S2 输入框空着按 Esc：收起搜索条，标签条回来', !searching(h) && !h.fx.state.search.editing, '');
+
+  h.byId.btnSearch.click();
+  h.byId.searchInput.value = '';
+  for (const fn of h.byId.searchInput.listeners.blur || []) fn();
+  check('S2b 还没搜过、输入框空着就失焦：同样收起', !searching(h), '');
+
+  h.byId.btnSearch.click();
+  h.byId.searchInput.value = ' 复仇 ';
+  key(h, 'Enter', { isComposing: true });
+  check('S3 输入法选字的回车不提交', h.fx.state.search.query === '' && !('popupSearch' in h.store), h.fx.state.search.query);
+
+  key(h, 'Enter');
+  await h.settle();
+  const opts = h.lastRender().opts;
+  check('S4 回车提交：搜全库（含已退订订阅的 b，题材对照让 Revenge 命中「复仇」），词去掉首尾空白后保留',
+    ids(h) === 'a,b' && h.fx.state.search.query === '复仇' && JSON.stringify(h.store.popupSearch) === '{"query":"复仇"}', ids(h));
+  check('S4b 结果卡片：source 记作 search、命中词高亮、经对照命中的题材 revenge 标亮、只有已退订的 b 标「已退订」',
+    opts.source === 'search' && JSON.stringify(opts.highlightTerms) === '["复仇"]'
+      && opts.isUnsubscribed({ id: 'b' }) === true && opts.isUnsubscribed({ id: 'a' }) === false
+      && opts.highlightGenres.includes('revenge'), JSON.stringify(opts.highlightTerms));
+  check('S4c 结果条显示词与条数，头部保持搜索态',
+    !h.byId.searchResultBar.classes.has('hidden') && h.byId.searchResultText.textContent === '搜索“复仇” · 共 2 部' && searching(h),
+    h.byId.searchResultText.textContent);
+
+  h.fireChange({ dramas: { newValue: [...searchStore().dramas, { id: 'd', source: 'imdb', sourceListUrl: IMDB, description: 'A revenge story 复仇', scrapedAt: T2 }] } });
+  h.flushTimers();
+  check('S5 结果态下 storage 有新卡：去抖重画后结果跟上', ids(h) === 'a,b,d', ids(h));
+
+  h.byId.searchInput.value = '半截';
+  key(h, 'Escape');
+  check('S6 结果态改了一半的词按 Esc：先退回当前词，结果不动、不关闭',
+    h.byId.searchInput.value === '复仇' && h.fx.state.search.query === '复仇' && searching(h) && 'popupSearch' in h.store, h.byId.searchInput.value);
+
+  key(h, 'Escape');
+  await h.settle();
+  check('S7 词没改再按 Esc：关闭搜索，清掉 popupSearch，回到站点时间线',
+    !searching(h) && h.fx.state.search.query === '' && !('popupSearch' in h.store)
+      && h.lastRender().opts.source === 'imdb' && h.lastRender().opts.highlightTerms === null
+      && h.byId.searchResultBar.classes.has('hidden'), ids(h));
+}
+{
+  const h = await popupFixture({ stored: searchStore({ popupSearch: { query: 'ceo' } }) });
+  check('S8 关了弹窗再打开：首帧直接是上次的搜索结果，输入框带回原词',
+    h.timelineRenders() === 1 && h.lastRender().opts.source === 'search' && ids(h) === 'c'
+      && searching(h) && h.byId.searchInput.value === 'ceo', `${h.timelineRenders()} ${ids(h)}`);
+
+  h.byId.btnSearchClose.click();
+  await h.settle();
+  check('S9 点「关闭搜索」：回到站点、popupSearch 清掉', !searching(h) && !('popupSearch' in h.store) && ids(h) === 'a', ids(h));
+}
+{
+  const h = await popupFixture({ stored: searchStore() });
+  h.byId.btnSearch.click();
+  h.byId.searchInput.value = 'nothing-matches';
+  h.byId.btnSearchSubmit.click();
+  await h.settle();
+  check('S10 零结果：空状态显示且换成搜索文案，隐藏「前往榜单页面」',
+    !h.byId.emptyState.classes.has('hidden') && h.byId.emptyTitle.textContent === '没有找到匹配的条目'
+      && h.byId.emptyDesc.textContent.includes('nothing-matches') && h.byId.btnGoScrape.classes.has('hidden'),
+    h.byId.emptyDesc.textContent);
+
+  h.byId.searchInput.value = '';
+  h.byId.btnSearchSubmit.click();
+  await h.settle();
+  check('S11 结果态清空输入框再按搜索：等同关闭搜索，「前往榜单页面」回来',
+    !searching(h) && !('popupSearch' in h.store) && !h.byId.btnGoScrape.classes.has('hidden'), '');
+}
+{
+  const html = fs.readFileSync(path.join(root, 'src/popup/popup.html'), 'utf8');
+  const at = needle => html.indexOf(needle);
+  check('S12 popup.html：放大镜排在全部翻译与设置左边，搜索条与标签条同在头部',
+    at('id="btnSearch"') > at('class="header-actions"') && at('id="btnSearch"') < at('id="btnTranslateAll"')
+      && at('id="searchBar"') > at('id="categoryTabs"') && at('id="searchBar"') < at('class="header-actions"'), '');
+  check('S13 popup.html 先载 drama-search.js 再载 popup.js',
+    at('src="../shared/drama-search.js"') > 0 && at('src="../shared/drama-search.js"') < at('src="popup.js"'), '');
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

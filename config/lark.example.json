@@ -4,5 +4,24 @@
   "botEnabled": false,
   "feishuAppId": "",
   "feishuAppSecret": "",
-  "requestTimeoutSec": 15
+  "requestTimeoutSec": 15,
+  "bitableEnabled": false,
+  "bitableUrl": "https://xxxx.larksuite.com/base/xxxxxxxxxxxxxxxxxxxxxxxxxxx?table=tblxxxxxxxxxxxxxx",
+  "bitableAppId": "",
+  "bitableAppSecret": "",
+  "bitableFields": {
+    "uid": "uid",
+    "title": "title0",
+    "description": "des0",
+    "genres": "tag0",
+    "titleZh": "标题",
+    "descriptionZh": "简介",
+    "platform": "平台",
+    "tags": "来源标签",
+    "contentTags": "内容标签",
+    "poster": "海报链接",
+    "url": "跳转链接",
+    "scrapedAt": "抓取时间",
+    "playUrl": "IMDB跳转播放"
+  }
 }
