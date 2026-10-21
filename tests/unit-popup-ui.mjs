@@ -18,6 +18,8 @@ import './bootstrap.cjs';
 //         整轮全失败优先；onChanged 只刷底栏；手动刷新的三种提示；v1.7.4 的 blocked / failed 文案与 detail（V9-V12）
 //   S 组：搜索（v1.8.2）——放大镜展开 / Esc 与失焦收起、回车出结果并写 popupSearch、搜全库标「已退订」、
 //         输入法选字回车不提交、重开弹窗直接恢复结果态、改了一半的词先退回再关闭、onChanged 跟上、零结果文案
+//   P 组：卡片纸飞机（v1.8.4）——只有配了多维表格工作流 webhook（http/https）才把推送回调交给卡片渲染；
+//         设置页清空 / 填上 webhook 时跟着重画，判定没变不重画
 // 用法：node tests/unit-popup-ui.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -564,6 +566,34 @@ const ids = h => h.lastRender().dramas.map(d => d.id).join(',');
       && at('id="searchBar"') > at('id="categoryTabs"') && at('id="searchBar"') < at('class="header-actions"'), '');
   check('S13 popup.html 先载 drama-search.js 再载 popup.js',
     at('src="../shared/drama-search.js"') > 0 && at('src="../shared/drama-search.js"') < at('src="popup.js"'), '');
+}
+
+// ============ P 组：卡片纸飞机按 webhook 配置显示（v1.8.4） ============
+{
+  const h = await popupFixture({ stored: baseStore() });
+  check('P1 没有 larkConfig：不给卡片推送回调（纸飞机不渲染），打开时一并读 larkConfig',
+    h.lastRender()?.opts.onLarkPush === undefined && h.storageGets.some(keys => keys.includes('larkConfig')), JSON.stringify(h.storageGets));
+}
+{
+  const h = await popupFixture({ stored: baseStore({ larkConfig: { webhookUrl: '  https://x.larksuite.com/base/workflow/webhook/event/abc  ' } }) });
+  check('P2 配了 http(s) 的 webhook：给推送回调', typeof h.lastRender()?.opts.onLarkPush === 'function', '');
+
+  const before = h.timelineRenders();
+  h.fireChange({ larkConfig: { newValue: { webhookUrl: 'https://x/other', botEnabled: true } } });
+  check('P3 改了 larkConfig 但判定没变（换了地址、动了别的字段）：不重画', h.flushTimers() === 0 && h.timelineRenders() === before,
+    `renders ${before}→${h.timelineRenders()}`);
+
+  h.fireChange({ larkConfig: { newValue: { webhookUrl: '' } } });
+  h.flushTimers();
+  check('P4 设置页清空 webhook：重画一次，纸飞机收起', h.timelineRenders() === before + 1 && h.lastRender()?.opts.onLarkPush === undefined,
+    `renders ${before}→${h.timelineRenders()}`);
+
+  h.fireChange({ larkConfig: { newValue: { webhookUrl: 'ftp://not-http' } } });
+  check('P5 不是 http(s) 的地址照样当没配', h.flushTimers() === 0 && h.lastRender()?.opts.onLarkPush === undefined, '');
+
+  h.fireChange({ larkConfig: { newValue: { webhookUrl: 'http://x/y' } } });
+  h.flushTimers();
+  check('P6 重新填上 webhook：纸飞机回来', typeof h.lastRender()?.opts.onLarkPush === 'function', '');
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

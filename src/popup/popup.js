@@ -32,8 +32,16 @@
     syncServerDir: null,
     // 本地数据已由更新版本升级为新的存储布局（dramasMeta.layout 高于本版本认识的）：后台只读停摆，
     // 状态栏提示升级（见 background.js 前向兼容护栏）
-    dramasLayoutAhead: false
+    dramasLayoutAhead: false,
+    // 配了多维表格工作流 webhook 才显示卡片上的纸飞机（v1.8.4）：没配时点了只会报「未配置」，
+    // 新增内容已由同步服务自动进表（v1.8.3），多数人不再需要单卡推送
+    larkPushReady: false
   };
+
+  // 与 lark.js configReadiness 同一判据（弹窗不加载 lark.js）：webhook 地址必须是 http(s)
+  function larkPushReadyFrom(larkConfig) {
+    return /^https?:\/\//i.test(String(larkConfig?.webhookUrl || '').trim());
+  }
 
   // 本版本认识的 dramas 存储布局，与 background.js 的 DRAMAS_LAYOUT_SUPPORTED 同值：更新版本改用按站点
   // 分片的布局时会写 dramasMeta.layout=2，旧键 dramas 冻结不再更新，后台据此拒写、停推送与翻译
@@ -96,6 +104,15 @@
 
       if (changes.dramasMeta) {
         state.dramasLayoutAhead = isDramasLayoutAhead(changes.dramasMeta.newValue);
+      }
+
+      // 设置页清空 / 填上工作流 webhook：纸飞机跟着收起或出现（只在判定翻转时重画）
+      if (changes.larkConfig) {
+        const ready = larkPushReadyFrom(changes.larkConfig.newValue);
+        if (ready !== state.larkPushReady) {
+          state.larkPushReady = ready;
+          if (!changes.dramas && !changes.urlTags) scheduleRender();
+        }
       }
 
       if (changes.dramas) {
@@ -803,7 +820,7 @@
     showLoading(true);
 
     try {
-      const result = await chrome.storage.local.get(['dramas', 'dramasMeta', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'lastScrapeWarnings', 'syncServerDir', 'siteTabPrefs', 'popupSearch']);
+      const result = await chrome.storage.local.get(['dramas', 'dramasMeta', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'lastScrapeWarnings', 'syncServerDir', 'siteTabPrefs', 'popupSearch', 'larkConfig']);
 
       state.dramasLayoutAhead = isDramasLayoutAhead(result.dramasMeta);
       state.urlTags = result.urlTags || [];
@@ -813,6 +830,7 @@
       state.lastScrapeFailure = result.lastScrapeFailure || null;
       state.lastScrapeWarnings = result.lastScrapeWarnings || null;
       state.syncServerDir = result.syncServerDir || state.syncServerDir;
+      state.larkPushReady = larkPushReadyFrom(result.larkConfig);
 
       // 上次看的站点与分组固定项；首帧之后 activeSource 只由用户操作改写
       const prefs = result.siteTabPrefs || {};
@@ -1439,7 +1457,8 @@
       ...searchRenderOptions(),
       assetsBase: '../../assets/icons',
       onTranslate: translateSingleCard,
-      onLarkPush: pushCardToLark,
+      // 不传回调＝卡片不渲染纸飞机（timeline-render 的双闸门）
+      onLarkPush: state.larkPushReady ? pushCardToLark : undefined,
       onOpenPlatform: searchOnPlatform,
       onOpenUrl: (url) => chrome.tabs.create({ url })
     });
