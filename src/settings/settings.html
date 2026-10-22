@@ -1138,7 +1138,7 @@
             <summary>了解更多：用谁的身份写表、写哪些列、去重与重试</summary>
             <p class="help-text"><strong>默认用 lark-cli 的登录身份：</strong>凭据留空时，同步服务调用本机已登录的 <a href="https://github.com/larksuite/cli" target="_blank" rel="noopener">lark-cli</a>，以你本人的账号写表——只要这个账号能编辑这张表就行，不用另建应用。前提是在终端装好 lark-cli 并运行过 <code>lark-cli auth login --domain all</code>。lark-cli 的登录 7 天不用会过期（同步服务每次写表都会顺带续期，一般不会断）；过期后同步会失败、这里显示原因，重新登录即可，不影响别的功能。</p>
             <p class="help-text"><strong>改用应用身份（可选）：</strong>不想依赖个人登录时，在表格所在租户的开放平台（飞书 <a href="https://open.feishu.cn/app" target="_blank" rel="noopener">open.feishu.cn</a> / Lark <a href="https://open.larksuite.com/app" target="_blank" rel="noopener">open.larksuite.com</a>）创建自建应用，开通 <code>bitable:app</code> 权限（知识库 <code>/wiki/</code> 链接再加 <code>wiki:wiki:readonly</code>）并发布版本，在多维表格右上角「…→ 添加文档应用」把它加进来、给可编辑权限，再把 App ID / Secret 都填上。和上面封面用的应用分开填：封面应用在飞书，表格可能在 Lark，跨云的应用进不了对方租户的表。接口域名按表格链接自动选。</p>
-            <p class="help-text"><strong>写哪些列：</strong>默认列名是 uid、title0、des0、tag0、标题、简介、平台、来源标签、内容标签、海报链接、跳转链接、抓取时间、IMDB跳转播放；表里没有的列跳过（「测试连接」会列出来），每列按表里的字段类型填值（文本、单选、多选、日期、超链接）。改列名或关掉某列：编辑 <code>config/lark.json</code> 的 <code>bitableFields</code>（值为空串＝不写这一列；<code>uid</code> 是去重依据，不能关）。海报附件不直接写，交给表里的「链接转附件」自动化。「内容标签」只在本机有通用类型标签体系文件时才填。</p>
+            <p class="help-text"><strong>写哪些列：</strong>默认列名是 uid、title0、des0、tag0、标题、简介、平台、来源标签、内容标签、海报链接、跳转链接、抓取时间、IMDB跳转播放；表里没有的列跳过（「测试连接」会列出来），每列按表里的字段类型填值（文本、单选、多选、日期、超链接）。改列名或关掉某列：编辑 <code>config/lark.json</code> 的 <code>bitableFields</code>（值为空串＝不写这一列；<code>uid</code> 是去重依据，不能关）。海报附件不直接写，交给表里的「链接转附件」自动化。「内容标签」是站点英文类型按内置的中文类型标签体系对照出来的。</p>
             <p class="help-text"><strong>去重与重试：</strong>只追加<strong>已翻译完</strong>、且表里 uid 列还没有的条目；同步服务另记一份已写入的 uid（<code>db/lark-bitable.json</code>），在表里手删的行不会被加回来。每次扩展推送时间线后在后台跑一轮，不拖慢同步；失败只记日志，5 分钟后自动重试。已进表的行之后在库里有变化（补了类型、改了译文）不会回写。</p>
           </details>
         </div>
@@ -1215,6 +1215,7 @@
   <script src="../shared/schedule-config.js"></script>
   <script src="../shared/translate-config.js"></script>
   <script src="../shared/fetch-util.js"></script>
+  <script src="../shared/genre-taxonomy.js"></script>
   <script src="../shared/lark.js"></script>
   <script src="settings.js"></script>
 </body>

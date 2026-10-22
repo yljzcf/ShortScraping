@@ -181,16 +181,17 @@ check('T4j 共享页静态白名单含 translate-config', serverSrc.includes("'/
 // FetchUtil（lark.js 顶部依赖区），排在它们前面＝设置页加载即白屏、后台 SW 启动即 ReferenceError。只有设置页
 // 与后台加载它，两处加载序都要逐个守（2026-09-17 审计 H4：此前顺序对但零测试；fetch-util 为 v1.7.0 新增）
 {
-  const LARK_DEPS = ['site-registry.js', 'timeline-csv.js', 'translate-config.js', 'fetch-util.js'];
+  // genre-taxonomy 为 v1.8.5 新增（机器人卡片的标签行）
+  const LARK_DEPS = ['site-registry.js', 'timeline-csv.js', 'translate-config.js', 'fetch-util.js', 'genre-taxonomy.js'];
   const settingsHtml = fs.readFileSync(path.join(worktreeRoot, 'src/settings/settings.html'), 'utf8');
   const htmlAt = needle => settingsHtml.indexOf(`src="../shared/${needle}"`);
   const htmlLarkAt = htmlAt('lark.js');
-  check('T4k settings.html 里 site-registry / timeline-csv / translate-config / fetch-util 都排在 lark 之前',
+  check('T4k settings.html 里 site-registry / timeline-csv / translate-config / fetch-util / genre-taxonomy 都排在 lark 之前',
     htmlLarkAt >= 0 && LARK_DEPS.every(n => htmlAt(n) >= 0 && htmlAt(n) < htmlLarkAt),
     `lark=${htmlLarkAt} deps=${JSON.stringify(LARK_DEPS.map(htmlAt))}`);
   const bgAt = needle => bgSrc.indexOf(`importScripts('../shared/${needle}')`);
   const bgLarkAt = bgAt('lark.js');
-  check('T4l 后台 importScripts 里 site-registry / timeline-csv / translate-config / fetch-util 都排在 lark 之前',
+  check('T4l 后台 importScripts 里 site-registry / timeline-csv / translate-config / fetch-util / genre-taxonomy 都排在 lark 之前',
     bgLarkAt >= 0 && LARK_DEPS.every(n => bgAt(n) >= 0 && bgAt(n) < bgLarkAt),
     `lark=${bgLarkAt} deps=${JSON.stringify(LARK_DEPS.map(bgAt))}`);
   // translator.js 同样在求值时取 FetchUtil（与 TranslateConfig 并列），它只由后台加载
@@ -408,6 +409,19 @@ check('T5 lark 不再转手导出 SOURCE_NAMES，source_name 照旧取自注册�
       && SiteRegistry.accentOf('nope') === SiteRegistry.DEFAULT_ACCENT && SiteRegistry.accentOf(undefined) === SiteRegistry.DEFAULT_ACCENT
       && SiteRegistry.accentOf('constructor') === SiteRegistry.DEFAULT_ACCENT,
     JSON.stringify([SiteRegistry.accentOf('imdb'), SiteRegistry.accentOf('nope')]));
+
+  // larkHeader（v1.8.5）：群机器人卡片标题栏的模板色，只能是飞书预设模板名，写错整张卡会被拒收
+  const badHeader = SiteRegistry.SITES.filter(entry => !SiteRegistry.LARK_HEADER_TEMPLATES.includes(entry.larkHeader));
+  check('T10d 每条 SITES 都有合法的 larkHeader（飞书预设模板名）', badHeader.length === 0, JSON.stringify(badHeader.map(e => e.host)));
+  const headersBySite = {};
+  for (const entry of SiteRegistry.SITES) (headersBySite[entry.site] ||= new Set()).add(entry.larkHeader);
+  const splitHeader = Object.entries(headersBySite).filter(([, set]) => set.size > 1).map(([site]) => site);
+  check('T10e 同一 site 键的各条 host 条目 larkHeader 必须一致', splitHeader.length === 0, JSON.stringify(splitHeader));
+  check('T10f larkHeaderOf 取注册表的值，未知站点退回 blue',
+    SiteRegistry.larkHeaderOf('imdb') === 'yellow' && SiteRegistry.larkHeaderOf('dramabox') === 'carmine'
+      && SiteRegistry.larkHeaderOf('nope') === 'blue' && SiteRegistry.larkHeaderOf('constructor') === 'blue'
+      && SiteRegistry.DEFAULT_LARK_HEADER === 'blue',
+    JSON.stringify([SiteRegistry.larkHeaderOf('imdb'), SiteRegistry.larkHeaderOf('nope')]));
 
   // applySiteTheme：写到 <html> 的 --accent 与 data-site；拿不到文档（单测假 DOM、Node）时什么也不做
   const SiteTabs = require(path.join(worktreeRoot, 'src/shared/site-tabs.js'));

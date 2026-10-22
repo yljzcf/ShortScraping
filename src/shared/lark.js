@@ -90,6 +90,16 @@
     ? require('./fetch-util.js')
     : global.FetchUtil;
 
+  // 机器人卡片的标题栏模板色按站点取（v1.8.5），取自站点注册表
+  const larkHeaderOf = (typeof module !== 'undefined' && module.exports)
+    ? require('./site-registry.js').larkHeaderOf
+    : global.SiteRegistry.larkHeaderOf;
+
+  // 中文类型标签体系（v1.8.5，后台 importScripts 与设置页 <script> 都排在本模块之前）：机器人卡片的「标签 / TAGs」两行
+  const GenreTaxonomy = (typeof module !== 'undefined' && module.exports)
+    ? require('./genre-taxonomy.js')
+    : global.GenreTaxonomy;
+
   /** 列名映射归一：只认 DEFAULT_BITABLE_FIELDS 里的键，值 trim；缺的键用默认列名，显式空串保留（＝关掉这一列） */
   function normalizeBitableFields(raw) {
     const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
@@ -550,11 +560,13 @@
    * （飞书租户上传 → Lark 国际版群里照样显示）。故 buildBotCard 接受可选 imgKey：
    * 拿到了就带图，拿不到就照旧发无图卡。unit-lark-bot C8/I 组守着。
    *
-   * 版式（2026-09-12 用户定稿）：简介 → 来源/类别 → 按钮 → **封面图**。
+   * 版式（v1.8.5，2026-10-22 用户定）：来源 → 简介 → 标签（中文）/ TAGs（英文） → 按钮 → **封面图**，
+   * 标题栏按站点换模板色。之前（2026-09-12 定稿）是简介 → 来源/类别 → 按钮 → 图、标题栏一律蓝色。
    * 图满宽原样、不裁不缩（用户在满宽/60%靠左/60%居中/左图右文/裁横版五选一后定），
    * 位置恒在最底（初版在最上方，中间试过「文字之后、按钮之前」，都是看过实卡后改的）。
    */
-  const BOT_SUMMARY_LIMIT = 240;
+  // 简介上限：2026-09-12 三轮验收 160 → 240 → 200 → 240，2026-10-22 用户改回 200（v1.8.5）
+  const BOT_SUMMARY_LIMIT = 200;
 
   function clipText(value, limit) {
     const text = asText(value).replace(/\s+/g, ' ');
@@ -580,7 +592,9 @@
     const d = drama || {};
     const imgKey = asText(options && options.imgKey);
     const tags = (Array.isArray(d.tags) ? d.tags : []).map(asText).filter(Boolean);
-    const genres = (Array.isArray(d.genres) ? d.genres : []).map(asText).filter(Boolean);
+    // 中文标签按体系对照（没归类的英文标签不出中文）；英文原样，只滤掉 ReelShort 混进来的演员名
+    const zhTags = GenreTaxonomy.zhTagsOf(d.genres);
+    const genres = GenreTaxonomy.displayGenres(d.genres);
     // 只出一段简介，中文优先（2026-09-12 用户定：去掉原先那段斜体英文原文）。
     // 中文缺失时回退英文而不是留空——机器人只在翻译完成后才推，理论上都有中文，
     // 但半成品收口（MAX_PARTIAL_TRANSLATE_ATTEMPTS 用尽）的卡可能没有，不能给张空卡。
@@ -592,19 +606,20 @@
     // （中文开发商的 Steam 英文档名本身就是中文）时也只留一个，不写成「X（X）」
     const heading = composeTitle(d) || '（无标题）';
 
+    // 每段是一个独立 markdown 元素，天然与上下文隔开一行；标签段的两行要贴在一起，放进同一个元素。
+    // tags 自带平台名，不再另外拼 SOURCE_NAMES，否则「NetShort · NetShort」重复。
+    // 冒号必须放在 ** 外面：v2 的 markdown 走严格 CommonMark，`**来源：**RoyalRoad` 里闭合 ** 前是
+    // 标点「：」、后面紧跟字母，右侧界定符判定不通过 → 不当作加粗结束 → 星号原样漏在卡片上（v1 的
+    // lark_md 是飞书自家宽松解析器，同样写法没问题，切 v2 后才暴露）。`**来源**：` 闭合 ** 前是汉字，
+    // 怎么接都合法。unit-lark-bot C6f 守着。
     const elements = [];
+    if (tags.length) elements.push({ tag: 'markdown', content: `**来源**：${tags.join(' / ')}` });
     if (summary) elements.push({ tag: 'markdown', content: summary });
 
-    // 来源与类别合成一块：独立元素天然与上文隔开一行，两行本身要贴在一起
-    // （tags 自带平台名，不再另外拼 SOURCE_NAMES，否则「NetShort · NetShort」重复）
-    // 闭合的 ** 后面**必须留一个空格**：v2 的 markdown 走严格 CommonMark，而
-    // `**来源**RoyalRoad` 里闭合 ** 前是标点「：」、后面紧跟字母，右侧界定符
-    // 判定不通过 → 不当作加粗结束 → 星号原样漏在卡片上（v1 的 lark_md 是飞书
-    // 自家宽松解析器，同样写法没问题，切 v2 后才暴露）。unit-lark-bot C6f 守着。
-    const meta = [];
-    if (tags.length) meta.push(`**来源** ${tags.join(' / ')}`);
-    if (genres.length) meta.push(`**类别** ${genres.join(' / ')}`);
-    if (meta.length) elements.push({ tag: 'markdown', content: meta.join('\n') });
+    const labels = [];
+    if (zhTags.length) labels.push(`**标签**：${zhTags.join(' / ')}`);
+    if (genres.length) labels.push(`**TAGs**: ${genres.join(' / ')}`);
+    if (labels.length) elements.push({ tag: 'markdown', content: labels.join('\n') });
 
     // 按钮靠右只有这一种走法（2026-09-12 逐个实测）：v1 的 column 不收 action
     // （`action components are not allowed in the column`）、v2 的 button 不认
@@ -637,7 +652,8 @@
         // action+actions[] → 直接 button + behaviors。
         schema: '2.0',
         config: { wide_screen_mode: true },
-        header: { template: 'blue', title: { tag: 'plain_text', content: heading } },
+        // 标题栏模板色按站点取（v1.8.5）：模板同时决定底色和标题文字色，没法分开设
+        header: { template: larkHeaderOf(d.source), title: { tag: 'plain_text', content: heading } },
         body: { elements }
       }
     };

@@ -834,7 +834,6 @@
       const who = result.mode === 'app' ? '应用身份' : 'lark-cli 登录身份';
       const parts = [`连接成功（${who}）：表内 ${result.rowCount} 行，按当前时间线会追加 ${result.pendingCount} 条`];
       if (result.missingColumns?.length) parts.push(`表里没有这些列，会跳过：${result.missingColumns.join('、')}`);
-      if (!result.contentTags) parts.push('本机没有类型标签体系文件，「内容标签」列不填');
       showStatus(parts.join('；'), true);
     } catch (e) {
       const offline = /Failed to fetch|无响应/.test(e.message);

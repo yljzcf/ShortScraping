@@ -42,37 +42,39 @@
   // accent（v1.8.0）：站点主题色，弹窗 / 共享页切到该站时整个面板按它染色（site-tabs.js applySiteTheme，
   // 派生规则在 timeline-cards.css :root）。取自各站 logo 的主色；Steam 的 logo 是深海军蓝、AppleTV 是灰，
   // 在深底上没有强调效果，分别改用 Steam 商店的亮蓝与银白。同键多条（DramaBox）色值必须一致
+  // larkHeader（v1.8.5）：群机器人卡片标题栏的模板色（lark.js buildBotCard）。飞书标题栏只认预设模板名，
+  // 不收任意色值，模板同时决定底色和标题文字色；按 accent 取最接近的一个，十几个站点分不完，近色站点会撞色
   const SITES = [
-    { site: 'imdb', name: 'IMDB', host: 'imdb.com', match: 'suffix', path: ['/search/title*', '/find*'], accent: '#F5C518' },
-    { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*', accent: '#E50914' },
-    { site: 'appletv', name: 'AppleTV', host: 'tv.apple.com', match: 'exact', path: '/us/collection/most-popular-now/*', accent: '#D4D4D8' },
+    { site: 'imdb', name: 'IMDB', host: 'imdb.com', match: 'suffix', path: ['/search/title*', '/find*'], accent: '#F5C518', larkHeader: 'yellow' },
+    { site: 'netflix', name: 'Netflix', host: 'netflix.com', match: 'suffix', path: '/tudum/top10*', accent: '#E50914', larkHeader: 'red' },
+    { site: 'appletv', name: 'AppleTV', host: 'tv.apple.com', match: 'exact', path: '/us/collection/most-popular-now/*', accent: '#D4D4D8', larkHeader: 'grey' },
     // Higgsfield（v1.7.2）：整站是用户可能天天在用的 AI 生成工具，只注入订阅页 /community/originals
     // （理由同上面的 manifest-overbroad-injection）；末尾的 * 连查询串一起匹配，?list=<板块> 照样命中。
     // exact：www 会 301 到裸域，订阅页只在裸域上
-    { site: 'higgsfield', name: 'Higgsfield', host: 'higgsfield.ai', match: 'exact', path: '/community/originals*', accent: '#D1FE17' },
-    { site: 'steam', name: 'Steam', host: 'store.steampowered.com', match: 'exact', path: ['/category/*', '/tags/*'], accent: '#66C0F4' },
-    { site: 'mydrama', name: 'MyDrama', host: 'my-drama.com', match: 'suffix', accent: '#6678FF' },
-    { site: 'reelshort', name: 'ReelShort', host: 'reelshort.com', match: 'suffix', accent: '#FC2849' },
-    { site: 'dramashorts', name: 'DramaShorts', host: 'dramashorts.io', match: 'suffix', accent: '#EC13AB' },
-    { site: 'netshort', name: 'NetShort', host: 'netshort.com', match: 'suffix', accent: '#EA276D' },
+    { site: 'higgsfield', name: 'Higgsfield', host: 'higgsfield.ai', match: 'exact', path: '/community/originals*', accent: '#D1FE17', larkHeader: 'green' },
+    { site: 'steam', name: 'Steam', host: 'store.steampowered.com', match: 'exact', path: ['/category/*', '/tags/*'], accent: '#66C0F4', larkHeader: 'wathet' },
+    { site: 'mydrama', name: 'MyDrama', host: 'my-drama.com', match: 'suffix', accent: '#6678FF', larkHeader: 'indigo' },
+    { site: 'reelshort', name: 'ReelShort', host: 'reelshort.com', match: 'suffix', accent: '#FC2849', larkHeader: 'red' },
+    { site: 'dramashorts', name: 'DramaShorts', host: 'dramashorts.io', match: 'suffix', accent: '#EC13AB', larkHeader: 'violet' },
+    { site: 'netshort', name: 'NetShort', host: 'netshort.com', match: 'suffix', accent: '#EA276D', larkHeader: 'carmine' },
     // 不加 path：Chrome 匹配模式的路径段连查询串一起匹配，'/' 匹配不到首页订阅 '/?list=…'，
     // 留默认 /* 与其余短剧站一致（非首页路径由 adapter.matches 闸住，只是不挂浮动按钮）
-    { site: 'flickreels', name: 'FlickReels', host: 'flickreels.net', match: 'suffix', accent: '#FFE200' },
+    { site: 'flickreels', name: 'FlickReels', host: 'flickreels.net', match: 'suffix', accent: '#FFE200', larkHeader: 'yellow' },
     // 三站同上：首页/榜单页订阅都可能带查询串，path 一律留默认 /*
     // shortmax 的站点键取品牌名（站点 og:site_name 与用户标签都是 ShortMax），host 才是 shorttv.live
-    { site: 'goodshort', name: 'GoodShort', host: 'goodshort.com', match: 'suffix', accent: '#F42D3B' },
-    { site: 'shortical', name: 'Shortical', host: 'shortical.com', match: 'suffix', accent: '#952CD5' },
-    { site: 'shortmax', name: 'ShortMax', host: 'shorttv.live', match: 'suffix', accent: '#F66210' },
+    { site: 'goodshort', name: 'GoodShort', host: 'goodshort.com', match: 'suffix', accent: '#F42D3B', larkHeader: 'red' },
+    { site: 'shortical', name: 'Shortical', host: 'shortical.com', match: 'suffix', accent: '#952CD5', larkHeader: 'purple' },
+    { site: 'shortmax', name: 'ShortMax', host: 'shorttv.live', match: 'suffix', accent: '#F66210', larkHeader: 'orange' },
     // DramaBox 一个站点键挂两个域名（v1.6.11）：同一套 Next.js 代码的两次构建、共用
     // 封面 CDN 与同一套 bookId，但两站的板块内容各自独立编排（四个目标板块 72 个位置
     // 实测只 62 部不重复），故两站都抓、合并成一个来源。两个 host 互不为后缀
     // （'www.dramaboxdb.com'.endsWith('dramabox.com') 为 false），条目顺序不影响匹配。
-    { site: 'dramabox', name: 'DramaBox', host: 'dramabox.com', match: 'suffix', accent: '#FC0150' },
-    { site: 'dramabox', name: 'DramaBox', host: 'dramaboxdb.com', match: 'suffix', accent: '#FC0150' },
-    { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix', path: '/fictions/*', accent: '#FECA4F' },
+    { site: 'dramabox', name: 'DramaBox', host: 'dramabox.com', match: 'suffix', accent: '#FC0150', larkHeader: 'carmine' },
+    { site: 'dramabox', name: 'DramaBox', host: 'dramaboxdb.com', match: 'suffix', accent: '#FC0150', larkHeader: 'carmine' },
+    { site: 'royalroad', name: 'RoyalRoad', host: 'royalroad.com', match: 'suffix', path: '/fictions/*', accent: '#FECA4F', larkHeader: 'orange' },
     // 同 FlickReels：首页订阅带 ?list=，Chrome 匹配模式的路径段连查询串一起匹配，
     // '/' 匹配不到 '/?list=…'，故 path 留默认 /*（非订阅页由 adapter.matches 闸住）
-    { site: 'pinedrama', name: 'PinesDramas', host: 'pinedrama.com', match: 'suffix', accent: '#14B8A6' }
+    { site: 'pinedrama', name: 'PinesDramas', host: 'pinedrama.com', match: 'suffix', accent: '#14B8A6', larkHeader: 'turquoise' }
   ];
 
   // 弹窗/共享页头部的折叠分组（2026-09-12 用户定）。数组顺序即展示顺序：
@@ -118,6 +120,19 @@
 
   function accentOf(site) {
     return Object.prototype.hasOwnProperty.call(SITE_ACCENTS, site) ? SITE_ACCENTS[site] : DEFAULT_ACCENT;
+  }
+
+  // 飞书卡片标题栏的预设模板（schema 2.0 header.template 的全部取值）；未知站点用 blue（v1.8.5 前全部站点都是它）
+  const LARK_HEADER_TEMPLATES = Object.freeze(['blue', 'wathet', 'turquoise', 'green', 'yellow', 'orange', 'red',
+    'carmine', 'violet', 'purple', 'indigo', 'grey', 'default']);
+  const DEFAULT_LARK_HEADER = 'blue';
+  const SITE_LARK_HEADERS = {};
+  for (const entry of SITES) {
+    SITE_LARK_HEADERS[entry.site] = entry.larkHeader;
+  }
+
+  function larkHeaderOf(site) {
+    return Object.prototype.hasOwnProperty.call(SITE_LARK_HEADERS, site) ? SITE_LARK_HEADERS[site] : DEFAULT_LARK_HEADER;
   }
 
   function siteOfHostname(hostname) {
@@ -288,6 +303,7 @@
 
   const api = {
     SITES, SITE_GROUPS, DEFAULT_GROUP, CATEGORY_SOURCES, SOURCE_NAMES, DEFAULT_ACCENT, accentOf,
+    LARK_HEADER_TEMPLATES, DEFAULT_LARK_HEADER, larkHeaderOf,
     groupOfSite, siteOfHostname, siteOfUrl, siteOfDrama, isInjectableUrl, contentScriptMatches,
     IMDB_COMPANY_SITES, PLATFORM_SEARCH_PAGES, imdbPlatformOf, platformSearchQuery, platformSearchUrl, isPlatformUrl,
     FORCE_ENGLISH_DOMAINS, FORCE_ENGLISH_ACCEPT_LANGUAGE, isForceEnglishUrl

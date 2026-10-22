@@ -13,6 +13,7 @@ importScripts('../shared/translate-config.js');
 importScripts('../shared/fetch-util.js'); // 带期限的 fetch（期限连正文），须先于 translator.js / lark.js
 importScripts('../shared/platform-link.js'); // IMDb 条目「搜平台」的解析与判定（v1.7.3），须在 site-registry / scrape-rules 之后
 importScripts('../shared/translator.js');
+importScripts('../shared/genre-taxonomy.js'); // 中文类型标签体系（v1.8.5），须先于 lark.js（群机器人卡片的标签行）
 importScripts('../shared/lark.js');
 
 // 运行状态。抓取走串行队列：手动单站刷新与定时全量并发触发时排队执行，

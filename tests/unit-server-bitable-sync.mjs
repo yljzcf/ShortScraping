@@ -9,7 +9,8 @@ import { startIsolatedServer, card, freePort, DEFAULT_TAGS } from './server-fixt
 //   S5 表里手删的行不会被加回来（同步服务另记已写入的 uid）
 //   S6 写表失败：/sync 照常 200、/health 报错因，到点自动重试补上
 //   S7 重启后靠状态文件不重写；同内容的补推不读表
-//   S8 本机有类型标签体系文件时才填「内容标签」，按体系维度排序
+//   S8 「内容标签」按内置的中文类型标签体系（src/shared/genre-taxonomy.js，v1.8.5）填，按体系维度排序
+//   S12 还没归进体系的英文标签：/health 报个数和样例，新出现时日志记一行（v1.8.5）
 //   S9 「测试连接」路由：配置不全 400、正常只读不写、飞书报错 502 带原因
 //   S10 lark.json 坏了按未启用处理，/sync 不受影响
 //   S11 默认身份（没填凭据）走 lark-cli：服务按 SHORTSCRAPING_LARK_CLI 找到 node 脚本、用自己的 node 跑，
@@ -137,7 +138,7 @@ try {
       check('S2c 状态落盘：已写入 uid、上次追加条数、无错误',
         show(state.syncedIds.sort()) === show(['a1', 'a2']) && state.lastAdded === 2 && state.lastError === null && state.target === 'wiki:WikiTok/tblAAA', show(state));
       check('S2d /health 回显：就绪、上次追加 2 条、表内 2 行、缺的列（IMDB跳转播放）',
-        h.enabled && h.ready && h.lastAdded === 2 && h.rowCount === 2 && show(h.missingColumns) === show(['IMDB跳转播放']) && h.contentTags === false
+        h.enabled && h.ready && h.lastAdded === 2 && h.rowCount === 2 && show(h.missingColumns) === show(['IMDB跳转播放'])
         && !('syncedIds' in h), show(h));
       check('S2e 用了 wiki 换 app_token 后的表地址', api.calls.some(c => c.path === '/open-apis/bitable/v1/apps/AppTok/tables/tblAAA/records/batch_create'), '');
 
@@ -166,15 +167,16 @@ try {
       check('S6b 到点自动重试补上，错误清掉', uids().includes('c1') && ho.lastError === null, show({ uids: uids(), ho }));
 
       // S8
-      const tagsDir = server.tree.p('docs/genre-taxonomy');
-      fs.mkdirSync(tagsDir, { recursive: true });
-      fs.writeFileSync(path.join(tagsDir, 'content-tags.json'), JSON.stringify({
-        order: ['女频', '爱情', '复仇'], mapping: { revenge: ['复仇'], romance: ['爱情'], female: ['女频'] }
-      }));
       await server.postSync([trans('a1'), trans('n1'), trans('b1'), trans('c1'), trans('d1', { genres: ['Revenge', 'Romance', 'Female', 'Unknown'] })]);
       await until(() => uids().includes('d1'));
       const d1 = api.rows.find(x => x.fields.uid === 'd1')?.fields;
-      check('S8 有体系文件时填「内容标签」，按体系顺序排、认不出的不填', show(d1?.内容标签) === show(['女频', '爱情', '复仇']), show(d1));
+      check('S8 按内置体系填「内容标签」，按体系维度排、认不出的不填', show(d1?.内容标签) === show(['女频', '爱情', '复仇']), show(d1));
+
+      // S12（d1 带着体系里没有的 Unknown）
+      const gt = (await server.health()).genreTaxonomy;
+      check('S12a /health 报还没归类的英文标签：个数与样例（带挂片数）',
+        gt?.unmapped === 1 && show(gt.sample) === show([{ genre: 'Unknown', count: 1 }]), show(gt));
+      check('S12b 新出现时日志记一行', /中文类型标签体系有 1 个英文标签待归类：Unknown（1 部）/.test(server.output), '');
 
       // S7
       const before = batchCalls();
@@ -197,8 +199,8 @@ try {
         missing.status === 400 && show(missing.body.missing) === show(['bitableUrl', 'bitableAppSecret']), show(missing));
       const writesBefore = batchCalls();
       const ok = await server.post('/lark/bitable/test', { larkConfig: { ...LARK, bitableEnabled: false } }, {}, { timeoutMs: 5000 });
-      check('S9b 正常：200，报行数 / 待追加 / 缺的列 / 有体系文件；开关关着也能测；不写表',
-        ok.status === 200 && ok.body.rowCount === api.rows.length && ok.body.pendingCount === 0 && ok.body.contentTags === true
+      check('S9b 正常：200，报行数 / 待追加 / 缺的列；开关关着也能测；不写表',
+        ok.status === 200 && ok.body.rowCount === api.rows.length && ok.body.pendingCount === 0
         && show(ok.body.missingColumns) === show(['IMDB跳转播放']) && batchCalls() === writesBefore, show(ok));
       api.failFields = true;
       const bad = await server.post('/lark/bitable/test', { larkConfig: LARK }, {}, { timeoutMs: 5000 });

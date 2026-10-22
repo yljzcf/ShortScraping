@@ -31,6 +31,7 @@ const TimelineCsv = require('../src/shared/timeline-csv.js');
 const ScheduleConfig = require('../src/shared/schedule-config.js');
 const TranslateConfig = require('../src/shared/translate-config.js');
 const SiteRegistry = require('../src/shared/site-registry.js');
+const GenreTaxonomy = require('../src/shared/genre-taxonomy.js');
 
 // 每行日志带本地时间（v1.7.4）：launchd 与 🔄 接替实例都把 stdout / stderr 追加进同一份 sync.log，
 // 以前没有时间戳，重启、骤降告警是什么时候发生的、谁先谁后都看不出来。只加前缀，原有文案不变
@@ -114,6 +115,21 @@ function commitSnapshotContent(dramas, serialized) {
   latestDramas = dramas;
   latestSerialized = serialized;
   contentHash = sha1Hex(serialized);
+  refreshUnmappedGenres(dramas);
+}
+
+// 新标签统计（v1.8.5）：库里还没归进中文类型标签体系的英文 genres（GenreTaxonomy.unmappedGenres），
+// /health 报出来；出现本进程没报过的新词时记一行日志（启动时有积压也记一次）。归类在维护者本地的体系脚本里做
+let unmappedGenres = [];
+const loggedUnmappedGenres = new Set();
+
+function refreshUnmappedGenres(dramas) {
+  unmappedGenres = GenreTaxonomy.unmappedGenres(dramas);
+  const fresh = unmappedGenres.filter(entry => !loggedUnmappedGenres.has(entry.genre.toLowerCase()));
+  if (fresh.length === 0) return;
+  for (const entry of fresh) loggedUnmappedGenres.add(entry.genre.toLowerCase());
+  console.log(`[ShortScraping Sync] 中文类型标签体系有 ${fresh.length} 个英文标签待归类：`
+    + fresh.map(entry => `${entry.genre}（${entry.count} 部）`).join('、'));
 }
 
 // 磁盘上的 CSV 与快照文件都已知与内存快照一致：CSV 签名相同且两份文件都还在。任一份运行期间被手删，
@@ -841,12 +857,11 @@ function readKnownItems() {
  * 不影响同步本身（同 backupBeforeOverwrite 的姿态）。
  * - 配置每轮重新读盘（同 readTagConfig）：设置页保存或手改 lark.json 立即生效；文件坏了按未启用处理。
  * - 已写入的 uid 记在 db/lark-bitable.json（换了表就重新计）：表里手删的行不会被加回来。
- * - 「内容标签」列只在本机有 docs/genre-taxonomy/content-tags.json 时才填（体系只留本地，2026-10-21 用户定）。
+ * - 「内容标签」列按 src/shared/genre-taxonomy.js 对照（v1.8.5 起体系随代码发布；之前只在本机有体系文件时才填）。
  * - 身份默认走本机已登录的 lark-cli（没填 App ID / Secret 时，2026-10-21 用户定）：由这里起进程，
  *   lark-bitable.js 只拿到 runLarkCli 这个函数。
  */
 const BITABLE_STATE_PATH = path.join(DB_DIR, 'lark-bitable.json');
-const CONTENT_TAGS_PATH = path.join(PROJECT_DIR, 'docs', 'genre-taxonomy', 'content-tags.json');
 const BITABLE_DEBOUNCE_MS = Number(process.env.SHORTSCRAPING_BITABLE_DEBOUNCE_MS) || 3000;
 const BITABLE_STARTUP_DELAY_MS = Number(process.env.SHORTSCRAPING_BITABLE_STARTUP_MS) || 15000;
 const BITABLE_RETRY_MS = Number(process.env.SHORTSCRAPING_BITABLE_RETRY_MS) || 5 * 60 * 1000;
@@ -919,7 +934,6 @@ function runLarkCli(args, { input, timeoutMs = 60000 } = {}) {
     child.stdin.end(input === undefined ? '' : input);
   });
 }
-let contentTagsCache = null; // { mtimeMs, fn }
 
 /** 读 config/lark.json 并归一；文件不在或坏了返回 null（坏文件告警，但不拒绝任何请求） */
 function readLarkConfigFile() {
@@ -955,36 +969,6 @@ function bitableTargetKey(config) {
   return target ? `${target.kind}:${target.token}/${target.tableId}` : '';
 }
 
-/** genres → 中文内容标签（按体系维度排序）；本机没有体系文件时返回 null（不填这一列） */
-function loadContentTagsFor() {
-  let stat;
-  try {
-    stat = fs.statSync(CONTENT_TAGS_PATH);
-  } catch (error) {
-    contentTagsCache = null;
-    return null;
-  }
-  if (contentTagsCache && contentTagsCache.mtimeMs === stat.mtimeMs) return contentTagsCache.fn;
-  try {
-    const raw = parseJsonText(fs.readFileSync(CONTENT_TAGS_PATH, 'utf8'));
-    const rank = new Map((Array.isArray(raw.order) ? raw.order : []).map((tag, i) => [tag, i]));
-    const mapping = raw.mapping && typeof raw.mapping === 'object' ? raw.mapping : {};
-    const fn = genres => {
-      const tags = new Set();
-      for (const genre of genres) {
-        for (const tag of mapping[String(genre).trim().toLowerCase()] || []) tags.add(tag);
-      }
-      return [...tags].sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity));
-    };
-    contentTagsCache = { mtimeMs: stat.mtimeMs, fn };
-    return fn;
-  } catch (error) {
-    console.warn('[ShortScraping Sync] 读取内容标签体系失败，本轮不填「内容标签」列:', error.message);
-    contentTagsCache = null;
-    return null;
-  }
-}
-
 /** 排一轮同步（防抖）；未启用时什么都不做，连定时器都不挂 */
 function scheduleBitableSync(delayMs = BITABLE_DEBOUNCE_MS) {
   const config = readLarkConfigFile();
@@ -1018,7 +1002,7 @@ async function runBitableSync() {
     const result = await LarkBitable.syncOnce(ctx, {
       dramas: latestDramas,
       syncedIds: synced,
-      contentTagsFor: loadContentTagsFor()
+      contentTagsFor: GenreTaxonomy.zhTagsOf
     });
     for (const id of result.existingIds) synced.add(id);
     for (const id of result.addedIds) synced.add(id);
@@ -1063,7 +1047,6 @@ function bitableHealth() {
     missing: readiness.missing,
     mode: LarkBitable.authMode(config),
     running: bitableRuntime.running,
-    contentTags: fs.existsSync(CONTENT_TAGS_PATH),
     lastRunAt: sameTarget ? state.lastRunAt || null : null,
     lastOkAt: sameTarget ? state.lastOkAt || null : null,
     lastError: sameTarget ? state.lastError || null : null,
@@ -1157,6 +1140,8 @@ async function handleRequest(req, res) {
       body.tagConfigMissing = !fs.existsSync(TAG_CONFIG_PATH);
       // 多维表格自动同步状态（v1.8.3）：设置页回显上次同步结果
       body.bitableSync = bitableHealth();
+      // 还没归进中文类型标签体系的英文标签（v1.8.5）：个数 + 挂片最多的前 10 个
+      body.genreTaxonomy = { unmapped: unmappedGenres.length, sample: unmappedGenres.slice(0, 10) };
     }
     return sendJson(res, 200, body);
   }
@@ -1407,7 +1392,7 @@ async function handleRequest(req, res) {
       const state = readBitableState();
       const synced = new Set(state.target === bitableTargetKey(draft) && Array.isArray(state.syncedIds) ? state.syncedIds : []);
       const result = await LarkBitable.testConnection(ctx, { dramas: latestDramas, syncedIds: synced });
-      return sendJson(res, 200, { ok: true, ...result, contentTags: fs.existsSync(CONTENT_TAGS_PATH) });
+      return sendJson(res, 200, { ok: true, ...result });
     } catch (error) {
       if (error instanceof LarkBitable.BitableError) return sendJson(res, 502, { ok: false, error: error.message, code: error.code ?? null });
       return sendRouteError(res, '测试多维表格连接失败', error);
