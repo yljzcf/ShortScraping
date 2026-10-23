@@ -1,4 +1,4 @@
-// 测试用的极小 DOM 模型（v1.6.9 起给 Shortical / ShortMax 两套适配器用）。
+// 测试用的极小 DOM 模型（v1.6.9 起给 Shortical / ShortMax 两套适配器用，之后 DramaBox / PinesDramas / My Drama 首页也用）。
 //
 // 本仓库零依赖，既有适配器单测都是手写桩；但 Shortical 读实时 DOM、ShortMax 读
 // DOMParser 解出的文档，用的是**真正的选择器**（类、属性、后代组合），用「正则抠一段」
@@ -96,6 +96,10 @@ class FakeElement {
   querySelector(selector) {
     return this.querySelectorAll(selector)[0] || null;
   }
+
+  matches(selector) {
+    return parseSelector(selector).some(chain => matchesChain(this, chain));
+  }
 }
 
 /** el('div', { class: 'card' }, [child, ...], '文本') —— 文本是本节点自己的，子节点各自带各自的。 */
@@ -103,13 +107,14 @@ export const el = (tagName, attrs = {}, children = [], text = '') => new FakeEle
 
 /**
  * 把一棵元素树包成 content.js 能当 document 用的对象：补上抓取按钮那套
- * getElementById / createElement / body，其余选择器直落到树上。
+ * createElement / body，其余选择器直落到树上。getElementById 按 id 属性在树里查
+ * （My Drama 首页按板块锚点 id 定位，v1.8.6）；抓取按钮的 id 不在树里，照旧得到 null。
  */
 export function documentFrom(root) {
   const fakeElement = () => ({ style: {}, disabled: false, innerHTML: '', addEventListener() {}, querySelector() { return null; } });
   return {
     root,
-    getElementById() { return null; },
+    getElementById: id => [root, ...root.descendants()].find(node => node.attrs.id === id) || null,
     createElement() { return fakeElement(); },
     body: { appendChild() {} },
     querySelector: sel => root.querySelector(sel),

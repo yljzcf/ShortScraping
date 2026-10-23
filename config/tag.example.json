@@ -73,11 +73,15 @@
   },
   {
     "url": "https://my-drama.com/",
-    "tags": ["MyDrama", "最流行"]
+    "tags": ["MyDrama", "TopPicks"]
   },
   {
-    "url": "https://my-drama.com/?list=best_choices",
-    "tags": ["MyDrama", "最佳选择"]
+    "url": "https://my-drama.com/?list=banner",
+    "tags": ["MyDrama", "Banner"]
+  },
+  {
+    "url": "https://my-drama.com/?list=my_drama_exclusives",
+    "tags": ["MyDrama", "Exclusives"]
   },
   {
     "url": "https://fandom.my-drama.com/?list=trending",

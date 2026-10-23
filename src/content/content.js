@@ -474,10 +474,11 @@
 
   /**
    * My Drama 适配器，覆盖两个入口、同一去重键空间（弹窗同属 mydrama 分类）：
-   * - 主站首页（Next.js SSR + hydrate）：按订阅 URL 的约定参数 ?list=<板块锚点id>
-   *   选板块（无参数默认 most_trending「最流行」，如 best_choices「最佳选择」；
+   * - 主站首页（Next.js App Router）：按订阅 URL 的约定参数 ?list=<板块锚点id>
+   *   选板块（无参数默认 top_picks_in_country「Top Picks」，另如 banner、my_drama_exclusives；
    *   Next.js 忽略未知参数照常渲染）；板块以语言无关锚点 id 定位（板块标题文字随
-   *   浏览器语言变化），SSR 只直出轮播首屏几条，hydrate 后 DOM 才有全部条目，需轮询等待。
+   *   浏览器语言变化）。2026-10 改版后各板块卡片写法不一，统一按 /video/ 链接取、按 UUID
+   *   去重（waitForMyDramaItems），SSR 已直出全部卡片。
    * - fandom 子域（fandom.my-drama.com，WordPress SSR）：订阅 URL 带 ?list=trending
    *   抓导航菜单 Most Trending，否则抓首页文章流；列表项只有标题/链接（文章流多张横版图），
    *   剧目文章页里有回主站的 /video/<UUID> 链接，详情阶段把去重键映射回 md+UUID 与主站合并。
@@ -499,11 +500,13 @@
       return sectionId ? await waitForMyDramaItems(sectionId) : [];
     },
     extractId(item) {
-      const link = item.matches('a[href]') ? item : item.querySelector('.wp-block-post-title a, a[href]');
+      // 主站 banner 条目是幻灯片容器（见 myDramaCardOf），里面先找播放页链接
+      const link = item.matches('a[href]') ? item
+        : (item.querySelector('.wp-block-post-title a') || item.querySelector('a[href*="/video/"]') || item.querySelector('a[href]'));
       const href = link ? (link.getAttribute('href') || '') : '';
       // 主站条目 id 是 UUID，加 md 前缀与 tt/纯数字/rr 的全局去重键约定保持一致
-      const vid = href.match(/\/video\/([0-9a-f-]{36})/);
-      if (vid) return `md${vid[1]}`;
+      const vid = myDramaVideoId(href);
+      if (vid) return `md${vid}`;
       // fandom 列表项没有 UUID，先用 mdf-+slug 临时键（md+UUID 的 f 后必是连续 hex，
       // 带连字符的 mdf- 不会与之歧义）；详情页找到主站链接后改写为 md+UUID
       const slug = href.match(/fandom\.my-drama\.com\/([^/?#]+)\/?/);
@@ -1494,26 +1497,65 @@
   }
 
   /**
-   * 等 My Drama 首页 hydrate 完成再取「最流行」条目：SSR 只直出首屏几条，
-   * 轮询到条目数非 0 且连续两次不再变化即认为轮播已填满，最长约 8 秒（pollUntilStable）。
+   * 取 My Drama 首页某板块的条目（2026-10 改版后）：各板块卡片的 data-testid 各不相同，
+   * 统一取板块内指向 /video/<UUID> 的链接，按 UUID 去重、保留首次出现的顺序——「独家」轮播
+   * 为无缝循环把每张卡复制了三份，banner 另有一套桌面版 hero 的重复链接，都靠去重收拢；
+   * 每条再换成卡片容器（myDramaCardOf）。SSR 已直出全部卡片，仍套 pollUntilStable
+   * （条目数非 0 且连续两次不变，最长约 8 秒）兜住 hydrate 前后的差异。
+   * 板块用 getElementById 定位：锚点 id 来自订阅 URL，数字开头的（如 ?list=7days）拼成
+   * #7days 是非法选择器，querySelectorAll 会抛 SyntaxError 让整页抓取失败。
    */
   async function waitForMyDramaItems(sectionId) {
-    const query = () => Array.from(
-      // 锚点 id 来自订阅 URL：数字开头的（如 ?list=7days）直拼成 #7days 是非法选择器，
-      // querySelectorAll 会抛 SyntaxError 让整页抓取失败，须转义
-      document.querySelectorAll(`#${CSS.escape(sectionId)} [data-testid="series-section-item"]`)
-    );
-    return pollUntilStable(query, items => items.length);
+    const query = () => {
+      const section = document.getElementById(sectionId);
+      if (!section) return [];
+      const seen = new Set();
+      const items = [];
+      for (const link of Array.from(section.querySelectorAll('a[href*="/video/"]'))) {
+        const vid = myDramaVideoId(link.getAttribute('href'));
+        if (!vid || seen.has(vid)) continue;
+        seen.add(vid);
+        items.push(myDramaCardOf(link, vid, section));
+      }
+      return items;
+    };
+    const items = await pollUntilStable(query, list => list.length);
+    if (!items.length && !document.getElementById(sectionId)) {
+      console.warn(`[ShortScraping] My Drama 首页没有 #${sectionId} 板块（页面可能改版），本页跳过`);
+    }
+    return items;
+  }
+
+  /** href 里的播放页 UUID（兼容 /zh/video/<UUID>?from=home 这类带语言前缀和参数的写法）；没有返回 null。 */
+  function myDramaVideoId(href) {
+    const match = String(href || '').match(/\/video\/([0-9a-f-]{36})/);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * 链接对应的卡片容器：多数板块的链接本身就包着封面，直接用链接；banner 幻灯片里封面图、
+   * 标题和「开始观看」按钮是兄弟节点，按钮里没有图——往上找最近一个含 img 的祖先（不出板块），
+   * 且其中的 /video/ 链接都指向同一部片才用它。找不到就用链接本身，标题与封面由详情页补。
+   */
+  function myDramaCardOf(link, vid, section) {
+    if (link.querySelector('img')) return link;
+    for (let node = link.parentElement; node && node !== section; node = node.parentElement) {
+      if (!node.querySelector('img')) continue;
+      const sameShow = Array.from(node.querySelectorAll('a[href*="/video/"]'))
+        .every(a => myDramaVideoId(a.getAttribute('href')) === vid);
+      return sameShow ? node : link;
+    }
+    return link;
   }
 
   /**
    * 主站订阅 URL 用约定参数 ?list=<板块锚点id> 选板块（同 fandom ?list=trending
-   * 范式）；无参数默认「最流行」，参数值归一后为空返回 null（调用方跳过本页，见
-   * readListParam）。锚点 id 语言无关，新板块无需改代码，订阅 URL 带上对应锚点即可
-   * （如 ?list=best_choices）。
+   * 范式）；无参数默认 Top Picks（top_picks_in_country，按出口 IP 判国家），参数值归一后
+   * 为空返回 null（调用方跳过本页，见 readListParam）。锚点 id 语言无关，新板块无需改代码，
+   * 订阅 URL 带上对应锚点即可（如 ?list=banner、?list=my_drama_exclusives）。
    */
   function getMyDramaSectionId() {
-    return readListParam('most_trending');
+    return readListParam('top_picks_in_country');
   }
 
   /**
@@ -1533,16 +1575,40 @@
   /**
    * 封面 URL 形如 https://static.my-drama.com/convert/<英文名 URL 编码>/<lang>/.../cover.webp，
    * 从中还原英文原名；结构对不上返回空串。空格有 %20 与 +（clear 无字版封面）两种编码，
-   * 先把 + 还原为空格再 decode。
+   * 先把 + 还原为空格再 decode；撇号、冒号在目录名里写成 _sq_、_cl_，decode 后换回来。
+   * 目录名不一定等于官方名（Club of Desire 实为 The Club of Desire），只作兜底，
+   * 列表优先用卡片 alt、详情优先用 JSON-LD 的剧名（extractMyDramaSeriesName）。
    */
   function extractMyDramaEnglishTitle(posterUrl) {
     const match = (posterUrl || '').match(/\/convert\/([^/]+)\//);
     if (!match) return '';
     try {
-      return decodeURIComponent(match[1].replace(/\+/g, ' ')).trim();
+      return decodeURIComponent(match[1].replace(/\+/g, ' '))
+        .replace(/_sq_/g, '\'').replace(/_cl_/g, ':').trim();
     } catch (e) {
       return '';
     }
+  }
+
+  /**
+   * My Drama 播放页 JSON-LD 里的剧名：TVEpisode 节点的 partOfSeries（TVSeries 对象取 name，
+   * 也兼容直接给字符串）。取不到返回空串。
+   */
+  function extractMyDramaSeriesName(doc) {
+    for (const node of jsonLdNodes(doc)) {
+      const series = node && node.partOfSeries;
+      const name = typeof series === 'string' ? series : (series && series.name);
+      if (typeof name === 'string' && name.trim()) return name.trim();
+    }
+    return '';
+  }
+
+  /** 播放页标题剥掉站点后缀「 | My Drama」（或「 — My Drama」）与集数「 - Episode N」，剩下的是剧名。 */
+  function stripMyDramaTitleSuffix(text) {
+    return String(text || '')
+      .replace(/\s*[|—–]\s*My Drama\s*$/i, '')
+      .replace(/\s+[-—–]\s+Episode\s+\d+\s*$/i, '')
+      .trim();
   }
 
   /**
@@ -1556,9 +1622,10 @@
   }
 
   /**
-   * 从 My Drama「最流行」轮播条目提取基础信息。
-   * 列表 h3 标题会随界面语言本地化，英文原名优先从封面 URL 还原、h3 兜底；
-   * h3 为平台自带中文名时直接存 titleZh。悬停层简介覆盖率低，主要靠详情页补。
+   * 从 My Drama 首页板块条目提取基础信息（2026-10 改版后的卡片）。
+   * 卡上没有标题文字和简介，片名只在封面 img 的 alt 与链接的 aria-label 里（Top Picks 的
+   * aria-label 带「1. 」名次前缀，所以先取 alt）。my-drama.com 固定英文后片名就是英文；
+   * 遇到中文页时片名存 titleZh，英文名从封面 URL 还原。简介与 genres 都由详情页补。
    * url 由去重键推出规范播放页，不读条目的 href：extractId 兼容「条目本身不是锚点、链接在
    * 子 a 上」的写法，这里以前却只读 item 自己的 href——取不到时 new URL('', origin) 不抛错、
    * 得到首页，整个板块会以首页链接加首页文案入库（审查 mydrama-href-null-homepage-url）。
@@ -1570,24 +1637,22 @@
       return null;
     }
 
-    // 部分板块（如「最佳选择」）条目的第一个 <img> 是板块共用背景图占位，
-    // 真封面是后面的 /convert/ 竖版海报——优先取它，取不到再退回第一个 img
+    // 条目里若有别的图（改版前「最佳选择」的板块共用背景图），真封面是 /convert/ 竖版海报——
+    // 优先取它，取不到再退回第一个 img
     const img = item.querySelector('img[src*="/convert/"]') || item.querySelector('img');
-    const poster = img ? (img.currentSrc || img.src || '') : '';
+    const poster = img ? (img.currentSrc || img.src || img.getAttribute('src') || '') : '';
 
-    const h3 = item.querySelector('h3');
-    const listTitle = h3 ? h3.textContent.trim() : '';
-    const title = extractMyDramaEnglishTitle(poster) || listTitle;
-    const titleZh = (listTitle && listTitle !== title && TranslateConfig.hasChineseChars(listTitle)) ? listTitle : '';
+    const link = item.matches('a[href]') ? item : item.querySelector('a[href*="/video/"]');
+    const alt = img ? (img.getAttribute('alt') || '').trim() : '';
+    const ariaLabel = link ? (link.getAttribute('aria-label') || '').replace(/^\d+\.\s+/, '').trim() : '';
+    const listTitle = alt || ariaLabel;
+    const listIsZh = TranslateConfig.hasChineseChars(listTitle);
+    const title = listIsZh
+      ? (extractMyDramaEnglishTitle(poster) || listTitle)
+      : (listTitle || extractMyDramaEnglishTitle(poster));
+    const titleZh = (listIsZh && listTitle !== title) ? listTitle : '';
 
-    // 悬停层唯一的 <p> 是简介；不用 extractParagraphText，它在 p 为空时会兜底返回整卡文本
-    const descP = item.querySelector('p');
-    const hoverDesc = descP ? descP.textContent.trim() : '';
-
-    // 列表无类型字段，genres 由详情页 JSON-LD 补采（fetchMyDramaDetail）
-    const drama = createDramaCard('mydrama', mdId, index, tags, { title: title || mdId, titleZh, poster, url });
-    applyMyDramaDescription(drama, hoverDesc);
-    return drama;
+    return createDramaCard('mydrama', mdId, index, tags, { title: title || mdId, titleZh, poster, url });
   }
 
   /**
@@ -1614,6 +1679,8 @@
    * （对齐 Steam 官方中文范式）；任何失败都保留列表页数据。
    * v1.7.4 起 My Drama 的请求固定英文（SiteRegistry.FORCE_ENGLISH_DOMAINS）：英文页的 og:description
    * 是不带模板前缀的纯正文，中文名与简介改由 AI 翻译补；上面按语言分流的写法保留，遇到中文页照样能用。
+   * v1.8.6 起英文名以 JSON-LD 的 partOfSeries 为准、og:title 剥后缀兜底（封面目录名会把撇号写成
+   * _sq_，也和官方名有出入）。
    */
   async function fetchMyDramaDetail(drama) {
     if (!drama.url) return drama;
@@ -1638,20 +1705,26 @@
         applyMyDramaDescription(drama, body);
       }
 
-      // 详情页 og:image 是真实封面（/convert/<英文名>/ 路径，CDN host 不定）。
-      // 部分板块（如「最佳选择」）列表条目的第一个 <img> 是板块共用背景图占位，
-      // 既不是封面、也还原不出英文名：列表封面缺 /convert/ 结构时用 og:image 替换，
-      // 并二次尝试还原英文原名（原 h3 中文名移入 titleZh）。「最流行」条目列表封面
-      // 本就是 /convert/ 结构且英文名已还原，此段对其为无操作。
+      // 详情页 og:image 是真实封面（多为 /convert/<英文名>/ 路径，CDN host 不定，也有
+      // /backfill_covers/ 路径）。列表条目缺 /convert/ 封面时（banner 按钮取不到图、改版前
+      // 「最佳选择」的板块共用背景图）用 og:image 替换。
       const ogImage = doc.querySelector('meta[property="og:image"]');
       const cover = ogImage ? (ogImage.getAttribute('content') || '').trim() : '';
-      if (cover) {
-        if (!(drama.poster || '').includes('/convert/')) drama.poster = cover;
-        const english = extractMyDramaEnglishTitle(cover);
-        if (english && drama.title !== english) {
-          if (!drama.titleZh && TranslateConfig.hasChineseChars(drama.title)) drama.titleZh = drama.title;
-          drama.title = english;
-        }
+      if (cover && !(drama.poster || '').includes('/convert/')) drama.poster = cover;
+
+      // 英文原名：JSON-LD 里 TVEpisode 的 partOfSeries 是干净的剧名，优先用它；其次是剥掉
+      // 「 - Episode N | My Drama」后缀的 og:title——浏览器拿到的完整页 og:title 带这段后缀，
+      // 只有不带 cookie 的请求拿到的精简页才是纯剧名。中文页两者都是中文，退回从 og:image 还原。
+      // 与列表名不同就换成它（列表的中文名移入 titleZh）。
+      const ogTitle = doc.querySelector('meta[property="og:title"]');
+      const officialTitle = extractMyDramaSeriesName(doc)
+        || stripMyDramaTitleSuffix(ogTitle ? ogTitle.getAttribute('content') : '');
+      const english = (officialTitle && !TranslateConfig.hasChineseChars(officialTitle))
+        ? officialTitle
+        : extractMyDramaEnglishTitle(cover);
+      if (english && drama.title !== english) {
+        if (!drama.titleZh && TranslateConfig.hasChineseChars(drama.title)) drama.titleZh = drama.title;
+        drama.title = english;
       }
 
       // 内容类型标签：SSR 直出的 JSON-LD（@graph 内 VideoObject.genre 英文原值，
@@ -3607,22 +3680,29 @@
    * ld+json 块，取第一个 genre 清洗后非空的节点；坏 JSON 块跳过。
    */
   function extractJsonLdGenres(doc) {
+    for (const node of jsonLdNodes(doc)) {
+      const g = node && node.genre;
+      if (!g) continue;
+      const genres = cleanGenres(Array.isArray(g) ? g : [g]);
+      if (genres.length) return genres;
+    }
+    return [];
+  }
+
+  /** 详情页全部 ld+json 块的节点按出现顺序铺平（@graph 图谱展开）；坏 JSON 块跳过。 */
+  function jsonLdNodes(doc) {
+    const nodes = [];
     for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
       try {
         const ld = JSON.parse(script.textContent || '');
-        const roots = Array.isArray(ld) ? ld : [ld];
-        const nodes = roots.flatMap(n => (n && Array.isArray(n['@graph'])) ? [n, ...n['@graph']] : [n]);
-        for (const node of nodes) {
-          const g = node && node.genre;
-          if (!g) continue;
-          const genres = cleanGenres(Array.isArray(g) ? g : [g]);
-          if (genres.length) return genres;
+        for (const n of (Array.isArray(ld) ? ld : [ld])) {
+          nodes.push(...((n && Array.isArray(n['@graph'])) ? [n, ...n['@graph']] : [n]));
         }
       } catch (e) {
         // 单块坏数据跳过，继续找下一块
       }
     }
-    return [];
+    return nodes;
   }
 
   /**

@@ -27,7 +27,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 | IMDB | 榜单/搜索页（`/search/title`、`/find`）；订阅地址不写日期，抓取时按「只看近多少天」补上发行日期条件（v1.7.0，见「IMDb 滚动日期窗口」）；站点对新会话先给一张几秒内自动通过的人机验证页，扩展会等它通过后再读列表（v1.7.5，见「底部状态栏」） | 列表 DOM + 详情页补简介与类型标签 | `tt` 编号 |
 | Steam | 内容中心 `/category/<name>`、`/tags/<语言>/<标签名>` | 官方动态查询接口取列表 + `appdetails` 补英文详情 | appId |
 | RoyalRoad | 榜单页 `/fictions/*` | 服务端渲染列表自带全文简介与标签，详情页只核对完整简介 | `rr`+数字 id |
-| My Drama | 主站首页板块（`?list=<板块锚点>`）与 fandom 子域文章流/Trending 菜单 | Next.js SSR + hydrate 轮询 / WordPress SSR | `md`+UUID |
+| My Drama | 主站首页板块（`?list=<板块锚点>`，无参数为 Top Picks；如 `banner` / `my_drama_exclusives`，v1.8.6）与 fandom 子域文章流/Trending 菜单 | 首页 SSR 读板块内的播放页链接 + 详情页补简介、类型标签与官方英文名 / WordPress SSR | `md`+UUID |
 | ReelShort | 主站首页 TOP 板块与 `/fandom/` 文章流 | 页内 `__NEXT_DATA__` SSR 数据直出 / WordPress SSR | `rs`+book_id |
 | DramaShorts | `/top-movies` 榜单与首页板块（`?list=<板块id>`） | 页内 `__NEXT_DATA__` 直出，无需请求详情页 | `ds`+UUID |
 | NetShort | 首页板块（`?list=<板块名>`，如 `trending_now` / `exclusive_originals`） | 页内 RSC flight 数据直出，无需请求详情页 | `ns`+shortPlayId |
@@ -46,6 +46,7 @@ Chrome 浏览器插件：按你订阅的 URL 定时监控 IMDB、Steam、RoyalRo
 - **Steam**：成人专属/受限作品（接口 `success=false`）自动跳过；官方中文简介与英文不同时直接作为翻译结果。
 - **My Drama / ReelShort / ShortMax 的 fandom 入口**：文章条目通过文中回主站的链接换取主站 id，与主站条目全局去重；换不到 id 的条目本轮不入库，待文章补上回链后下轮抓取自动重试。同一部剧只留一张卡，标签先到先得——已被主站板块抓到的剧不会再追加 `fandom` 标签。
 - **My Drama 固定英文页**（v1.7.4）：中文偏好的浏览器打开主站会被站点 307 到 `/zh` 语言版，而订阅与适配器只认 `/`，整条订阅每轮抓 0 条（中文偏好下播放页的简介也是空的）。扩展用一条 declarativeNetRequest 规则把 `my-drama.com`（含子域）请求的 `Accept-Language` 固定为英文，你自己在 Chrome 里浏览 My Drama 也会是英文页；中文名与简介改由翻译线补。地区（如「Top Picks In <国家>」板块）由出口 IP 决定、代码改不了，要美国区内容请让 `my-drama.com` 走美国节点
+- **My Drama 首页改版**（v1.8.6）：2026-10 站点首页改版，原来的「最流行」（`most_trending`）与「最佳选择」（`best_choices`）板块都没了，旧订阅每轮抓 0 条。现在不带 `?list=` 的首页订阅抓 **Top Picks**（`top_picks_in_country`，带 1~8 名次；国家按出口 IP 判，cookie 和网址参数都改不了，2026-10-23 实测美国与日本出口的榜单完全相同），规则目录另新增 `?list=banner`（首页大图轮播）与 `?list=my_drama_exclusives`（My Drama 独家），「最佳选择」那条已从目录删除——还勾着它的，到设置页取消勾选（它名下的历史卡片会进回收站，可导出恢复）。首页其他板块（`more_series`、`watch_for_free`、`obsession_every_genre` 等）也可以照 `?list=<板块 id>` 自己写进 `config/tag.json`。卡上只有封面和片名，简介与类型标签照旧取播放页；片名以播放页结构化数据里的剧名为准（站点封面路径里的目录名会把撇号、冒号写成 `_sq_`、`_cl_`，也常和官方名对不上；播放页的分享标题带「 - Episode 1 | My Drama」，不直接用）
 - **DramaShorts**：首页板块 id 支持 `top_trending`（默认）/ `popular_now` / `audience_favorite`；板块内容每次请求轮换属站点自身行为，多轮定时抓取会逐步累积。规则目录当前未内置 `audience_favorite`（该板块为大池随机采样、单次重合度低），需要时可手动写入 `config/tag.json`。
 - **Apple TV**：榜单即 Apple TV+ 自家的 Top 10，两条订阅分别对应剧集榜与电影榜（标签 `Apple, TV, US` / `Apple, Movie, US`）。榜单页本身不含简介，简介与内容类型标签由后台无 cookie 代理取作品详情页补齐，与你的 Apple TV+ 登录状态无关；某条详情取不到时该作品本轮不入库，下轮榜单复现时自动重来（避免留下永远补不上简介的卡）。内容脚本只注入这两个榜单页，不进 Apple TV 的播放/浏览页。**若抓取成片失败**：先检查本机代理/VPN 是否把 tv.apple.com 的 HTTP/3(QUIC) 流量分流到了非 Apple 边缘节点——那条路会一律返回 404，关闭 QUIC 或调整分流规则即可。
 - **Netflix**：内容脚本只注入 `/tudum/top10*` 栏目页，不进 Netflix 播放/浏览页；同一作品同时上全球榜与美国榜时按作品全局去重、先到先得（订阅顺序全球榜在前，美国榜实际记录「上美国榜但未上全球榜」的作品）；标签约定 `Global`（英语榜）/ `Global-nE`（非英语榜）/ `US`；每周名次与观看量不入库，只记录首次进榜时间。内容类型标签取自作品 `/title/` 页 Netflix 自身分类（如 Thrillers / Dramas / Comedies，英文原值），由后台无 cookie 代理抓取，与你的 Netflix 登录状态无关；单次抓取失败的作品会在下轮榜单复现时自动补上。
@@ -351,7 +352,7 @@ ShortScraping/
 
 ## 验证与升级
 
-使用 Node.js 22 或更新版本运行 `npm test`（当前 80 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
+使用 Node.js 22 或更新版本运行 `npm test`（当前 81 套，以 `tests/unit-*.mjs` 实际数量为准），无需安装第三方依赖。测试使用模拟的 Chrome API 和独立的服务目录，不读写用户的配置和数据。`tests/unit-audit-regressions.mjs` 覆盖调度、导入、清理、计数、CSV 与设置页异步状态，`tests/unit-server-safety.mjs` 覆盖服务来源校验、请求异常和持久化保护。
 
 测试基建（v1.6.20，用户侧无变化）：新写的测试一律用下面的共用夹具，不再每个套件各抄一份桩。
 

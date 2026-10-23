@@ -143,9 +143,6 @@ const baseDocument = (overrides = {}) => ({
   ...overrides
 });
 const loc = href => { const u = new URL(href); return { href, hostname: u.hostname, pathname: u.pathname, search: u.search, origin: u.origin }; };
-// Node 没有 CSS.escape（浏览器内容脚本里恒有）：规范的最小子集
-const cssEscape = value => String(value).replace(/[^A-Za-z0-9_\u0080-\uFFFF-]/g, ch => `\\${ch}`)
-  .replace(/^(-?)(\d)/, (_, dash, digit) => `${dash}\\3${digit} `);
 
 async function runScenario({ href, subscription = href, document = baseDocument(), fetch: fetchStub, domParser, deadline = 15000 }) {
   const store = { dramas: [] };
@@ -167,10 +164,14 @@ async function runScenario({ href, subscription = href, document = baseDocument(
     }
   };
   globalThis.window = { location: loc(href) };
-  globalThis.CSS = { escape: cssEscape };
-  // 记录适配器查过哪些选择器：「没去查默认板块」本身就是断言对象
+  // 记录适配器查过哪些选择器与 id（getElementById 记成 #id）：「没去查默认板块」本身就是断言对象
   const qsa = document.querySelectorAll;
-  globalThis.document = { ...document, querySelectorAll: sel => { queried.push(sel); return qsa(sel); } };
+  const byId = document.getElementById;
+  globalThis.document = {
+    ...document,
+    querySelectorAll: sel => { queried.push(sel); return qsa(sel); },
+    getElementById: id => { queried.push(`#${id}`); return byId(id); }
+  };
   globalThis.fetch = fetchStub || (async () => { throw new TypeError('unit stub: no network'); });
   globalThis.DOMParser = domParser || class { parseFromString() { return baseDocument(); } };
 
@@ -206,23 +207,26 @@ const warnedAbout = (from, text) => warnings.slice(from).some(w => w.includes(te
 
 // ---------- L1：My Drama 主站 ----------
 const MD_UUID = 'a36a7fe3-0e89-45ff-a409-f75093c5144f';
+// 2026-10 改版后的卡片：链接本身包着封面，片名在 img alt 里
+const mdPosterImg = { src: '', getAttribute: n => (n === 'alt' ? 'Wild silence' : null) };
 const mdItem = uuid => ({
   matches: sel => sel === 'a[href]',
-  getAttribute: n => n === 'href' ? `https://my-drama.com/video/${uuid}` : null,
-  querySelector: sel => sel === 'h3' ? { textContent: 'Wild silence' } : null
+  getAttribute: n => n === 'href' ? `/video/${uuid}?from=home` : null,
+  querySelector: sel => (sel === 'img' || sel === 'img[src*="/convert/"]') ? mdPosterImg : null
 });
-const DEFAULT_MD = '#most_trending [data-testid="series-section-item"]';
+const mdSection = uuids => ({ querySelectorAll: sel => (sel === 'a[href*="/video/"]' ? uuids.map(mdItem) : []) });
+const DEFAULT_MD = '#top_picks_in_country';
 const mdDocument = baseDocument({
   querySelectorAll: sel => {
-    // 模拟浏览器：数字开头的 #id 是非法选择器
+    // 模拟浏览器：数字开头的 #id 是非法选择器（板块改用 getElementById 定位后不该再走到这里）
     if (/^#\d/.test(sel)) throw new SyntaxError(`'${sel}' is not a valid selector`);
-    if (sel === DEFAULT_MD || sel === '#\\37 days [data-testid="series-section-item"]') return [mdItem(MD_UUID)];
     return [];
-  }
+  },
+  getElementById: id => (id === 'top_picks_in_country' || id === '7days') ? mdSection([MD_UUID]) : null
 });
 {
   const { saved, queried } = await runScenario({ href: 'https://my-drama.com/', document: mdDocument });
-  check('L1a My Drama 无 ?list= → 默认 most_trending（夹具自检）', saved.length === 1 && queried.includes(DEFAULT_MD), show(queried));
+  check('L1a My Drama 无 ?list= → 默认 top_picks_in_country（夹具自检）', saved.length === 1 && queried.includes(DEFAULT_MD), show(queried));
 }
 {
   const mark = warnings.length;
@@ -232,9 +236,9 @@ const mdDocument = baseDocument({
   check('L1c 同上：打出点名坏值的中文告警', warnedAbout(mark, '"!!!"') && warnedAbout(mark, '不退回默认板块'), show(warnings.slice(mark)));
 }
 {
-  const { response, queried } = await runScenario({ href: 'https://my-drama.com/?list=7days', document: mdDocument });
-  check('L1d My Drama 数字开头的锚点 id 经 CSS.escape（修复前 querySelectorAll 抛 SyntaxError、整页失败）',
-    response?.success === true && queried.includes('#\\37 days [data-testid="series-section-item"]'), show({ response, queried }));
+  const { response, queried, saved } = await runScenario({ href: 'https://my-drama.com/?list=7days', document: mdDocument });
+  check('L1d My Drama 数字开头的锚点 id 用 getElementById 定位（拼 #7days 选择器会抛 SyntaxError、整页失败）',
+    response?.success === true && queried.includes('#7days') && saved.length === 1, show({ response, queried, saved: saved.length }));
 }
 {
   // v1.7.4 固定英文页：同源取 My Drama 播放页显式带英文 Accept-Language（后台 declarativeNetRequest 规则之外再保险一层）
@@ -386,7 +390,7 @@ check('L5 content.js 不再有 /^[a-z0-9_-]+$/.test(list) ? list : 默认 的静
   // 审查原场景：只订 my-drama.com/，用户在 /?list=best_choices 上点按钮，那个板块的卡以前会带着
   // 首页订阅的标签与 sourceListUrl 入库（订阅外清理也清不掉）
   const bestDocument = baseDocument({
-    querySelectorAll: sel => (sel === '#best_choices [data-testid="series-section-item"]' || sel === DEFAULT_MD ? [mdItem(MD_UUID)] : [])
+    getElementById: id => (id === 'best_choices' || id === 'top_picks_in_country' ? mdSection([MD_UUID]) : null)
   });
   const { saved, response } = await runScenario({ href: 'https://my-drama.com/?list=best_choices', subscription: 'https://my-drama.com/', document: bestDocument });
   check('U20 只订首页时 /?list=best_choices 页 → 0 条（不再挂到首页订阅名下）',
@@ -408,35 +412,46 @@ check('L5 content.js 不再有 /^[a-z0-9_-]+$/.test(list) ? list : 默认 的静
 
 // ---------- H：My Drama 条目本身不是锚点（链接在子 a 上）→ url 取规范播放页，不落到首页 ----------
 {
+  // banner 幻灯片的形态：板块里找到的「开始观看」按钮不含图，往上取到含封面的幻灯片 div 当条目
   const fetched = [];
-  const anchor = { getAttribute: n => (n === 'href' ? `/video/${MD_UUID}?from=list` : null) };
+  const anchor = {
+    getAttribute: n => (n === 'href' ? `/video/${MD_UUID}?from=list` : null),
+    querySelector: () => null
+  };
   const divItem = {
     matches: () => false,                       // 条目是外层 div
     getAttribute: () => null,                   // div 自己没有 href
     querySelector: sel => {
-      if (sel === '.wp-block-post-title a, a[href]') return anchor;
-      if (sel === 'h3') return { textContent: 'Wild silence' };
+      if (sel === 'a[href*="/video/"]') return anchor;
+      if (sel === 'img' || sel === 'img[src*="/convert/"]') return mdPosterImg;
       return null;
-    }
+    },
+    querySelectorAll: sel => (sel === 'a[href*="/video/"]' ? [anchor] : [])
   };
+  const section = { querySelectorAll: sel => (sel === 'a[href*="/video/"]' ? [anchor] : []) };
+  anchor.parentElement = divItem;
+  divItem.parentElement = section;
   const { saved, response } = await runScenario({
     href: 'https://my-drama.com/',
-    document: baseDocument({ querySelectorAll: sel => (sel === DEFAULT_MD ? [divItem] : []) }),
+    document: baseDocument({ getElementById: id => (id === 'top_picks_in_country' ? section : null) }),
     fetch: async url => { fetched.push(url); return new Response('<html></html>', { status: 200 }); }
   });
   check('H1 条目是 div、链接在子 a 上 → url 是规范播放页 /video/<UUID>（不是首页）',
-    response?.success === true && saved[0]?.itemId === `md${MD_UUID}` && saved[0]?.url === `https://my-drama.com/video/${MD_UUID}`,
-    show(saved.map(d => [d.itemId, d.url])));
+    response?.success === true && saved[0]?.itemId === `md${MD_UUID}` && saved[0]?.url === `https://my-drama.com/video/${MD_UUID}`
+      && saved[0]?.title === 'Wild silence',
+    show(saved.map(d => [d.itemId, d.url, d.title])));
   check('H2 详情请求发往播放页，不去取首页（首页 og:description 会被当成简介）',
     show(fetched) === show([`https://my-drama.com/video/${MD_UUID}`]), show(fetched));
 }
 {
   // 去重键不是 md+UUID（hex 位数对、连字符位置不对）→ 推不出规范播放页，跳过该条
   const oddItem = { ...mdItem(MD_UUID), getAttribute: n => (n === 'href' ? 'https://my-drama.com/video/a36a7fe30e89-45ff-a409-f75093c5144f-' : null) };
-  const { saved, response } = await runScenario({
-    href: 'https://my-drama.com/', document: baseDocument({ querySelectorAll: sel => (sel === DEFAULT_MD ? [oddItem] : []) })
+  const { saved, response, queried } = await runScenario({
+    href: 'https://my-drama.com/',
+    document: baseDocument({ getElementById: id => (id === 'top_picks_in_country' ? { querySelectorAll: () => [oddItem] } : null) })
   });
-  check('H3 去重键不是 md+UUID → 该条跳过（零入库、不报错）', response?.success === true && saved.length === 0, show(saved.map(d => d.url)));
+  check('H3 去重键不是 md+UUID → 该条跳过（零入库、不报错）',
+    response?.success === true && saved.length === 0 && queried.includes(DEFAULT_MD), show({ urls: saved.map(d => d.url), queried }));
 }
 
 // ---------- B：抓取按钮只建节点、改文案，样式全交给 content.css ----------

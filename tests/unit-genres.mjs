@@ -67,9 +67,6 @@ async function runScenario({ location, subscription, document, fetch, domParser,
     }
   };
   globalThis.window = { location };
-  // Node 没有 CSS.escape（浏览器内容脚本里恒有；My Drama 板块锚点选择器要用）：规范的最小子集
-  globalThis.CSS = { escape: value => String(value).replace(/[^A-Za-z0-9_\u0080-\uFFFF-]/g, ch => `\\${ch}`)
-    .replace(/^(-?)(\d)/, (_, dash, digit) => `${dash}\\3${digit} `) };
   globalThis.document = document;
   globalThis.fetch = fetch || (async () => ({ ok: false }));
   globalThis.DOMParser = domParser || class { parseFromString() { return baseDocument(); } };
@@ -414,14 +411,24 @@ const MD_UUID2 = 'b47b8fe4-1f9a-46ff-b51a-086194d6255f';
 const MD_GENRES = ['Betrayal', 'Dark Romance', 'Mystery', 'Revenge', 'Runaway Bride'];
 const MD_POSTER = 'https://static.my-drama.com/convert/Wild%20silence/en/2026-03-06%2009:00:05/cover.webp';
 // 列表条目桩：条目自身即 a[href]（extractId 走 item.matches 分支）
-const mdItem = (uuid, poster, zhTitle) => ({
-  matches: (sel) => sel === 'a[href]',
-  getAttribute: (n) => n === 'href' ? `https://my-drama.com/video/${uuid}?from=cover` : null,
-  querySelector: (sel) => {
-    if (sel === 'img[src*="/convert/"]') return { src: poster };
-    if (sel === 'h3') return { textContent: zhTitle };
-    return null; // 无悬停 <p> 简介，走详情页补
-  }
+// 2026-10 改版后的卡片：链接包着封面，片名在 img alt（这里模拟中文页，alt 是平台中文名）
+const mdItem = (uuid, poster, zhTitle) => {
+  const img = { src: poster, getAttribute: (n) => (n === 'alt' ? zhTitle : null) };
+  return {
+    matches: (sel) => sel === 'a[href]',
+    getAttribute: (n) => n === 'href' ? `https://my-drama.com/video/${uuid}?from=cover` : null,
+    querySelector: (sel) => {
+      if (sel === 'img') return img;
+      if (sel === 'img[src*="/convert/"]') return poster ? img : null;
+      return null; // 卡上无简介，走详情页补
+    }
+  };
+};
+// 首页板块桩：getElementById 命中默认板块 top_picks_in_country 时返回这些条目
+const mdHome = (items) => ({
+  getElementById: (id) => id === 'top_picks_in_country'
+    ? { querySelectorAll: (sel) => sel === 'a[href*="/video/"]' ? items : [] }
+    : null
 });
 // 详情页桩：og 元信息 + 单个 ld+json 块（@graph 数组，genre 不在首节点——覆盖图谱遍历）
 const mdDetailDoc = () => baseDocument({
@@ -443,10 +450,7 @@ const mdSubscription = { urlPattern: 'https://my-drama.com/', tags: ['MyDrama', 
 const { saved: mdSaved } = await runScenario({
   location: mdLocation,
   subscription: mdSubscription,
-  document: baseDocument({
-    querySelectorAll: (sel) => sel === '#most_trending [data-testid="series-section-item"]'
-      ? [mdItem(MD_UUID, MD_POSTER, '荒野的沉默')] : []
-  }),
+  document: baseDocument(mdHome([mdItem(MD_UUID, MD_POSTER, '荒野的沉默')])),
   fetch: async (url) => url.includes(`/video/${MD_UUID}`)
     ? { ok: true, url, text: async () => 'MD-DETAIL-A' }
     : { ok: false, url },
@@ -471,10 +475,7 @@ const backfillMd = await runScenario({
     { id: 'old-md-a', itemId: `md${MD_UUID}`, title: 'Wild silence', tags: ['MyDrama'], source: 'mydrama', status: 'trans' },
     { id: 'old-md-b', itemId: `md${MD_UUID2}`, title: 'Other Drama', tags: ['MyDrama'], source: 'mydrama', status: 'trans', genres: ['Old'] }
   ],
-  document: baseDocument({
-    querySelectorAll: (sel) => sel === '#most_trending [data-testid="series-section-item"]'
-      ? [mdItem(MD_UUID, MD_POSTER, '荒野的沉默'), mdItem(MD_UUID2, '', '别的剧')] : []
-  }),
+  document: baseDocument(mdHome([mdItem(MD_UUID, MD_POSTER, '荒野的沉默'), mdItem(MD_UUID2, '', '别的剧')])),
   fetch: async (url) => {
     if (url.includes('/video/')) {
       mdDetailFetches++;
@@ -491,26 +492,6 @@ check('M3 MyDrama 存量回填经详情提交 genres',
     && eq(backfillMd.saveCalls[0]?.genres, MD_GENRES),
   JSON.stringify(backfillMd.saveCalls.map(d => ({ itemId: d.itemId, genres: d.genres }))));
 check('M4 已有 genres 的 MyDrama 存量条目零详情请求', mdDetailFetches === 1, `detailFetches=${mdDetailFetches}`);
-
-// ---------- 场景 9b：同一轮里重复出现的新卡（详情没给 genres）不走回填 ----------
-// v1.6.19 起存量快照改为后台给的 itemId → hasGenres，本轮新存的卡也记进去；若按「缺 genres」记，
-// 同轮后到的重复条目会被当成缺 genres 的存量，再发一次详情请求（与改走消息之前「零请求」不一致）
-let mdDupFetches = 0;
-const dupMd = await runScenario({
-  location: mdLocation,
-  subscription: mdSubscription,
-  document: baseDocument({
-    querySelectorAll: (sel) => sel === '#most_trending [data-testid="series-section-item"]'
-      ? [mdItem(MD_UUID2, '', '别的剧'), mdItem(MD_UUID2, '', '别的剧')] : []
-  }),
-  fetch: async (url) => {
-    if (url.includes('/video/')) mdDupFetches++;
-    return { ok: true, url, text: async () => 'MD-NO-GENRES' };
-  }
-});
-check('M4b 同轮重复出现的新卡（无 genres）只入库一次、详情只请求一次，不再走回填',
-  dupMd.saveCalls.length === 1 && mdDupFetches === 1,
-  `saveCalls=${dupMd.saveCalls.length} detailFetches=${mdDupFetches}`);
 
 // ---------- 场景 10（v1.5.5）：fandom 首见条目映射当时经后台代理补采 genres ----------
 // fandom 子域 content script 直连主站被页面 CORS 拦（/video/ 响应无 ACAO 头），
@@ -619,6 +600,30 @@ const fandomM7 = await runScenario({
 check('M7 代理失败/空壳页 → 两条目照常入库、genres 空',
   fandomM7.saved.length === 2 && fandomM7.saved.every(d => eq(d.genres, [])) && fandomM7.proxyCalls.length === 2,
   JSON.stringify({ saved: fandomM7.saved.map(d => ({ id: d.itemId, g: d.genres })), proxyCalls: fandomM7.proxyCalls.length }));
+
+// ---------- 场景 9b：同一轮里重复出现的新卡（详情没给 genres）不走回填 ----------
+// v1.6.19 起存量快照改为后台给的 itemId → hasGenres，本轮新存的卡也记进去；若按「缺 genres」记，
+// 同轮后到的重复条目会被当成缺 genres 的存量，再发一次详情请求（与改走消息之前「零请求」不一致）。
+// 主站首页板块 v1.8.6 起先按 UUID 去重、重复卡到不了这一步，改用 fandom Most Trending 菜单里
+// 两条直链同一部主站剧的形态（菜单不去重，两条都以 md+UUID 进 scrapePage）。
+const dupMenuAnchor = fandomAnchor('ignored', '⬤ Other Drama');
+dupMenuAnchor.href = `https://my-drama.com/video/${MD_UUID2}`;
+dupMenuAnchor.getAttribute = (n) => n === 'href' ? `https://my-drama.com/video/${MD_UUID2}` : null;
+const dupMenuItem = { matches: () => false, querySelector: (sel) => sel === 'a[href]' ? dupMenuAnchor : null };
+const dupMd = await runScenario({
+  location: { href: 'https://fandom.my-drama.com/?list=trending', hostname: 'fandom.my-drama.com', pathname: '/', search: '?list=trending', origin: 'https://fandom.my-drama.com' },
+  subscription: { urlPattern: 'https://fandom.my-drama.com/?list=trending', tags: ['MyDrama', 'fandom', 'Trending'] },
+  document: baseDocument({
+    querySelectorAll: (sel) => sel === '#modal-2-content .wp-block-navigation-submenu' ? [{
+      querySelector: (s) => s === '.wp-block-navigation-item__label' ? { textContent: 'Most Trending' } : null,
+      querySelectorAll: (s) => s === '.wp-block-navigation__submenu-container .wp-block-navigation-link' ? [dupMenuItem, dupMenuItem] : []
+    }] : []
+  }),
+  proxy: (url) => url === `https://my-drama.com/video/${MD_UUID2}` ? { success: true, html: 'MD-NO-GENRES' } : { success: false }
+});
+check('M4b 同轮重复出现的新卡（无 genres）只入库一次、详情只请求一次，不再走回填',
+  dupMd.saveCalls.length === 1 && dupMd.proxyCalls.length === 1,
+  `saveCalls=${dupMd.saveCalls.length} proxyCalls=${dupMd.proxyCalls.length}`);
 
 // ---------- 场景 13（v1.5.5）：fandom 菜单直链主站条目——存量回填跨域改走代理（此前 CORS 静默失败） ----------
 let videoDirectFetches = 0;
