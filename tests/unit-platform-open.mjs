@@ -4,13 +4,15 @@ import './bootstrap.cjs';
 //     查找失败 → 开搜索结果页、不记；网页端没有搜索页的平台没找到 → notFound 并带平台页 fallbackUrl、
 //     后台不开页（v1.8.7，弹窗先复制片名再开）；ShortMax / NetShort 不联网只看库内同名卡；记下过的直开
 //     零请求；请求不带 cookie、固定英文；同卡连点单飞；站点地图缓存；只读护栏下照开不写；
-//     micro-drama 卡按入库时记下的出品公司认平台（v1.8.7）。
+//     micro-drama 卡按入库时记下的出品公司认平台（v1.8.7）；联网前先看库里平台自己抓到过的同名卡，
+//     唯一同名就直接用、零请求（v1.8.9）。
 //   S 内容脚本入库带来的 playUrl 一律丢弃（被攻破的页面不能给卡片塞跳转地址）；imdbCompanies 只给
 //     IMDb 卡留合法的 co 编号，去重命中不回补（v1.8.7）。
 //   B 飞书群卡片「搜 X」：推送前解析、唯一同名直达并记下、查不到退回搜索页链接或平台页（v1.8.7），
 //     任何失败都照常推送；重试沿用记下的地址；测试发送与真实推送同口径。
 //   R 推送后复查（v1.8.7）：翻译闹钟每轮对没有搜索页的平台、还没记下播放页的 IMDb 卡再判一次（v1.8.8 起
-//     不限入库时间，旧卡也补），一轮查到的一次整表写完；本生命周期没碰过表时不查（不为它整表读一遍）。
+//     旧卡也补；v1.8.9 起 30 天以前的旧卡每 6 小时才带上一次），一轮查到的一次整表写完；本生命周期没碰过
+//     表时不查（不为它整表读一遍）。
 // 纯逻辑（解析器 / 判定 / 菜单项 / 卡片排版）见 unit-platform-link.mjs。
 // 用法：node tests/unit-platform-open.mjs
 import { background, card } from './background-fixture.mjs';
@@ -34,6 +36,7 @@ const SUBS = {
   micro: 'https://www.imdb.com/search/title/?interests=in0000310',
   nsList: 'https://netshort.com/?list=trending_now',
   smList: 'https://www.shorttv.live/?list=most_popular',
+  rsList: 'https://www.reelshort.com/',
   netflix: 'https://www.netflix.com/tudum/top10'
 };
 const TAG_FILE = Object.entries(SUBS).map(([key, url]) => ({ url, tags: ['IMDB', key] }));
@@ -251,6 +254,26 @@ async function drive(bg, steps = 12, ms = 1000) {
     show({ known, other, tabs: h.tabs() }));
 }
 
+{
+  const title = 'Silicon God Strikes Back';
+  const own = card('rs70', { source: 'reelshort', title, sourceListUrl: SUBS.rsList, url: RS_PLAY });
+  const h = await makeBg({ dramas: [imdbCard('tt70', 'reelshort', title), own], pages: { [rsSearch(title)]: rsPage([RS_BOOK]) } });
+  const resp = await h.open('id_tt70');
+  await h.bg.flush();
+  check('H15 库里有平台自己抓到的唯一同名卡：直接开它的地址并记下，零平台请求（v1.8.9）',
+    resp?.success && resp.kind === 'play' && show(h.tabs()) === show([RS_PLAY]) && h.stored('id_tt70') === RS_PLAY && h.requests.length === 0,
+    show({ resp, tabs: h.tabs(), requests: h.requests.map(r => r.url) }));
+}
+{
+  const title = 'Silicon God Strikes Back';
+  const twins = ['a', 'b'].map(k => card(`rs7${k}`, { source: 'reelshort', title, sourceListUrl: SUBS.rsList, url: `https://www.reelshort.com/episodes/episode-1-x-${k}` }));
+  const other = card('rs7c', { source: 'reelshort', title: 'Another Drama', sourceListUrl: SUBS.rsList, url: 'https://www.reelshort.com/episodes/episode-1-y' });
+  const h = await makeBg({ dramas: [imdbCard('tt71', 'reelshort', title), imdbCard('tt72', 'reelshort', title), ...twins, other], pages: { [rsSearch(title)]: rsPage([RS_BOOK]) } });
+  await h.open('id_tt71');
+  check('H15b 库里没有同名卡或同名卡不止一张：照旧去平台上找', h.tabs()[0] === RS_PLAY && h.requests.length === 1,
+    show({ tabs: h.tabs(), requests: h.requests.map(r => r.url) }));
+}
+
 // ---------- S 内容脚本入库带来的 playUrl 丢弃 ----------
 {
   const h = await makeBg();
@@ -380,6 +403,8 @@ async function drive(bg, steps = 12, ms = 1000) {
     && show(h.requests.map(r => r.url)) === show([MD_SITEMAP]) && h.tabs().length === 0,
     show({ stored: ['id_tt30', 'id_tt31', 'id_tt32', 'id_tt35'].map(h.stored), requests: h.requests.map(r => r.url) }));
   check('R1b 一轮查到的几部一次整表写完，不是一部写一次', writes() - writesBefore === 1, `writes=${writes() - writesBefore}`);
+  check('R1c 带上了旧卡就记下这一次的时刻', h.bg.data.platformRecheckState?.oldCheckedAt === '2026-09-05T00:00:00.000Z',
+    show(h.bg.data.platformRecheckState));
 }
 {
   const recent = '2026-09-04T00:00:00.000Z';
@@ -401,6 +426,42 @@ async function drive(bg, steps = 12, ms = 1000) {
     show({ stored: h.stored('id_tt50'), requests: h.requests.map(r => r.url) }));
 }
 
+{
+  // 夹具时钟 2026-09-05T00:00Z；上次查旧卡在 2 小时前
+  const h = await makeBg({
+    dramas: [imdbCard('tt60', 'mydrama', 'His Dark Kiss', { savedAt: '2026-09-04T00:00:00.000Z' }),
+      imdbCard('tt61', 'mydrama', 'Claimed by the Crown', { savedAt: '2026-07-20T00:00:00.000Z', scrapedAt: '2026-07-20T00:00:00.000Z' })],
+    pages: { [MD_SITEMAP]: MD_XML },
+    data: { platformRecheckState: { oldCheckedAt: '2026-09-04T22:00:00.000Z' } }
+  });
+  const CROWN = 'https://my-drama.com/video/432a3003-9b2c-496e-9205-8ada4d497ff5';
+  await h.bg.context.recheckPlatformPlayUrls();
+  await h.bg.flush();
+  check('R5 距上次查旧卡不到 6 小时：只查近 30 天的新卡，旧卡不带、时刻不改',
+    h.stored('id_tt60') === 'https://my-drama.com/video/b6973579-f9b6-429c-8cc5-bad184a58236' && h.stored('id_tt61') === undefined
+    && h.bg.data.platformRecheckState?.oldCheckedAt === '2026-09-04T22:00:00.000Z', show({ old: h.stored('id_tt61'), state: h.bg.data.platformRecheckState }));
+  h.bg.setTime(Date.parse('2026-09-05T03:59:00.000Z'));
+  await h.bg.context.recheckPlatformPlayUrls();
+  await h.bg.flush();
+  const stillSkipped = h.stored('id_tt61') === undefined;
+  h.bg.setTime(Date.parse('2026-09-05T04:00:00.000Z'));
+  await h.bg.context.recheckPlatformPlayUrls();
+  await h.bg.flush();
+  check('R5b 满 6 小时才带上旧卡（差 1 分钟仍不带），查完记下新的时刻',
+    stillSkipped && h.stored('id_tt61') === CROWN && h.bg.data.platformRecheckState?.oldCheckedAt === '2026-09-05T04:00:00.000Z',
+    show({ stillSkipped, old: h.stored('id_tt61'), state: h.bg.data.platformRecheckState }));
+}
+{
+  const h = await makeBg({
+    dramas: [imdbCard('tt62', 'mydrama', 'Claimed by the Crown', { savedAt: '2026-07-20T00:00:00.000Z', scrapedAt: '2026-07-20T00:00:00.000Z' })],
+    pages: { [MD_SITEMAP]: MD_XML },
+    data: { platformRecheckState: { oldCheckedAt: '2026-12-31T00:00:00.000Z' } }
+  });
+  await h.bg.context.recheckPlatformPlayUrls();
+  await h.bg.flush();
+  check('R5c 记下的时刻在未来（改过系统时钟）：当作到期，旧卡照查', h.stored('id_tt62') === 'https://my-drama.com/video/432a3003-9b2c-496e-9205-8ada4d497ff5',
+    show(h.bg.data.platformRecheckState));
+}
 {
   const h = await makeBg({ dramas: [imdbCard('tt51', 'mydrama', 'His Dark Kiss', { savedAt: '2026-09-04T00:00:00.000Z' })], pages: { [MD_SITEMAP]: MD_XML } });
   h.bg.run('dramasCache = null');   // 模拟冷唤醒：本生命周期还没碰过表

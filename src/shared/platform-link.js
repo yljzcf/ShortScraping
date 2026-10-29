@@ -9,7 +9,8 @@
  *
  * 判定规则（2026-09-28 用户定）：候选里与片名「完全同名」（比对键相同）的恰好 1 部 → 播放页；
  * 2 部及以上 → 交给调用方开搜索结果页，不替用户挑；0 部同样开搜索结果页。网页端没有搜索页的
- * 平台（MyDrama / Shortical / NetShort）由调用方按「没找到」处理。
+ * 平台（MyDrama / Shortical / NetShort）由调用方按「没找到」处理（v1.8.7 起退到平台页）。
+ * 联网前调用方先用 localCandidates 看库里平台自己的榜单抓到过的同名卡（v1.8.9），唯一同名就不联网。
  *
  * 各站取数方式（2026-09-28 逐站实测，抽样命中：ReelShort 12/12、DramaBox 10/12、GoodShort 7/8、
  * MyDrama 11/12、Shortical 12/12）：
@@ -22,7 +23,7 @@
  *   mydrama     站点地图 sitemap-series.xml 的 /series/<slug>-<UUID>；该 UUID 就是播放页 /video/<UUID>
  *   shortical   站点地图 sitemaps/series.xml（ScrapeRules.parseShorticalSitemap 的规范 slug）
  *   shortmax / netshort 不联网：ShortMax 搜一次约 15 秒且常搜不到，NetShort 网页端只有加密接口；
- *               两家只看库里平台自己的榜单抓到过的同名卡（localCandidates）
+ *               两家只看库里平台自己的榜单抓到过的同名卡（localCandidates；v1.8.9 起各站联网前都先看它）
  *
  * 加载方式：后台 importScripts（排在 site-registry.js / scrape-rules.js 之后）；Node 测试 require。
  */
