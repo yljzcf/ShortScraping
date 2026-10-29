@@ -18,6 +18,8 @@
     // 搜索（v1.8.2）：query 是已提交的词，非空＝结果态（内容区显示搜索结果，跨弹窗开关经
     // storage 键 popupSearch 保留，用户点关闭才清）；editing＝头部输入框展开但还没提交
     search: { editing: false, query: '' },
+    // 卡片显示语言（v1.8.12）：'zh' | 'en'，头部「中 / EN」按钮切换，经 storage 键 popupLang 跨弹窗开关保留
+    lang: 'zh',
     urlTags: [],
     lastScrape: null,
     // 后台写的「最近一轮全部失败」{ at, failed, total, error }；有 URL 成功时后台同一次写清成 null
@@ -145,6 +147,7 @@
 
     elements.buttons = {
       search: document.getElementById('btnSearch'),
+      lang: document.getElementById('btnLang'),
       translateAll: document.getElementById('btnTranslateAll'),
       settings: document.getElementById('btnSettings'),
       goScrape: document.getElementById('btnGoScrape')
@@ -231,6 +234,7 @@
 
   function bindEvents() {
     bindSearchEvents();
+    elements.buttons.lang.addEventListener('click', toggleLang);
     elements.buttons.translateAll.addEventListener('click', translateAllData);
     elements.buttons.settings.addEventListener('click', openSettings);
     bindActivatable(elements.syncService.container, checkSyncServiceStatus);
@@ -820,7 +824,7 @@
     showLoading(true);
 
     try {
-      const result = await chrome.storage.local.get(['dramas', 'dramasMeta', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'lastScrapeWarnings', 'syncServerDir', 'siteTabPrefs', 'popupSearch', 'larkConfig']);
+      const result = await chrome.storage.local.get(['dramas', 'dramasMeta', 'urlTags', 'lastScrape', 'lastScrapeFailure', 'lastScrapeWarnings', 'syncServerDir', 'siteTabPrefs', 'popupSearch', 'popupLang', 'larkConfig']);
 
       state.dramasLayoutAhead = isDramasLayoutAhead(result.dramasMeta);
       state.urlTags = result.urlTags || [];
@@ -841,6 +845,12 @@
       if (!searchRestored) {
         searchRestored = true;
         restoreSearch(result.popupSearch);
+      }
+      // 显示语言同样只在首帧读一次，之后只由按钮改（订阅变化重读数据时不回读，免得盖掉刚点的）
+      if (!langRestored) {
+        langRestored = true;
+        state.lang = TimelineRender.normalizeLang(result.popupLang);
+        syncLangButton();
       }
 
       renderNow(); // 弹窗打开首帧不经去抖
@@ -1461,6 +1471,7 @@
     const hasData = TimelineRender.renderTimeline(elements.containers.timeline, visible, {
       source: searching ? 'search' : (state.activeSource || 'imdb'),
       readOnly: false,
+      lang: state.lang,
       ...searchRenderOptions(),
       assetsBase: '../../assets/icons',
       onTranslate: translateSingleCard,
@@ -1474,6 +1485,31 @@
     renderSearchChrome(visible.length);
     elements.states.empty.classList.toggle('hidden', hasData);
     restoreScroll();
+  }
+
+  // —— 显示语言（v1.8.12）：头部「中 / EN」切换卡片的标题、简介、内容标签只显示中文或英文，默认中文 ——
+  let langRestored = false;
+
+  function syncLangButton() {
+    const label = TimelineRender.LANG_LABELS[state.lang];
+    elements.buttons.lang.textContent = label.text;
+    elements.buttons.lang.title = label.title;
+  }
+
+  function toggleLang() {
+    state.lang = state.lang === 'zh' ? 'en' : 'zh';
+    syncLangButton();
+    persistLang();
+    renderNow();
+  }
+
+  /** 写失败只影响下次打开，不打断当前浏览。 */
+  async function persistLang() {
+    try {
+      await chrome.storage.local.set({ popupLang: state.lang });
+    } catch (e) {
+      console.warn('[ShortScraping] 保存显示语言失败:', e);
+    }
   }
 
   // —— 搜索（v1.8.2）：头部放大镜 → 输入框顶替标签条 → 提交后内容区换成全库搜索结果。

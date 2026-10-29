@@ -4,6 +4,7 @@
  * 只读浏览：首次拉取 /api/timeline 渲染，之后由 /api/events（SSE）通知刷新；
  * 页面回到前台时补拉一次，兜底断线期间漏掉的更新。渲染复用共享模块
  * TimelineRender（readOnly 模式，无任何操作按钮；封面点击在新标签页打开原站）。
+ * 头部「中 / EN」切换卡片显示语言（v1.8.12），与弹窗同一套规则，选择记在本浏览器。
  *
  * 三个入口（打开页面、SSE 版本通告、回到前台）都经 requestTimeline 拉取（v1.6.21）：
  * 同一时间只有一个拉取在途；在途期间 SSE 通告的新版本只记一笔，拉完若已渲染的还不是那个版本
@@ -17,6 +18,8 @@
   const state = {
     dramas: [],
     activeSource: null,
+    // 卡片显示语言（v1.8.12）：'zh' | 'en'，头部「中 / EN」切换，记在本浏览器的 localStorage
+    lang: 'zh',
     version: -1,
     etag: null // 上次渲染所用响应的 ETag（服务端 W/"<内容指纹>-<版本>"）
   };
@@ -34,8 +37,13 @@
     elements.statsTotal = document.getElementById('statsTotal');
     elements.statsLastUpdate = document.getElementById('statsLastUpdate');
     elements.liveDot = document.getElementById('liveDot');
+    elements.langButton = document.getElementById('btnLang');
     // 标签条内容由 SiteTabs 动态渲染（分组折叠），这里只缓存容器
     elements.categoryTabs = document.getElementById('categoryTabs');
+
+    state.lang = readLang();
+    syncLangButton();
+    elements.langButton.addEventListener('click', toggleLang);
 
     // 回到前台：断线期间可能漏了 SSE 通告，版本未知，空闲就拉一次（多半是 304）；在途则复用那次拉取
     document.addEventListener('visibilitychange', () => {
@@ -101,6 +109,35 @@
     }
   }
 
+  // 显示语言记在本浏览器（每台手机各记各的）。无痕窗口、禁用站点数据时 localStorage 读写会抛错，
+  // 那就每次都从中文开始，页面照常可用
+  const LANG_STORAGE_KEY = 'shareLang';
+
+  function readLang() {
+    try {
+      return TimelineRender.normalizeLang(localStorage.getItem(LANG_STORAGE_KEY));
+    } catch (e) {
+      return 'zh';
+    }
+  }
+
+  function syncLangButton() {
+    const label = TimelineRender.LANG_LABELS[state.lang];
+    elements.langButton.textContent = label.text;
+    elements.langButton.title = label.title;
+  }
+
+  function toggleLang() {
+    state.lang = state.lang === 'zh' ? 'en' : 'zh';
+    syncLangButton();
+    try {
+      localStorage.setItem(LANG_STORAGE_KEY, state.lang);
+    } catch (e) {
+      // 存不下只影响刷新后的默认值
+    }
+    render();
+  }
+
   function setActiveSource(source) {
     if (!TimelineRender.CATEGORY_SOURCES.includes(source)) return;
     state.activeSource = source;
@@ -128,6 +165,7 @@
     const hasData = TimelineRender.renderTimeline(elements.container, visible, {
       source: state.activeSource,
       readOnly: true,
+      lang: state.lang,
       assetsBase: '/assets/icons',
       onOpenUrl: (url) => window.open(url, '_blank', 'noopener')
     });

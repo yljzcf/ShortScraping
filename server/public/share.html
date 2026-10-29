@@ -12,12 +12,14 @@
 </head>
 <body>
   <div class="app">
-    <!-- 头部：站点切换（只读浏览，无刷新/翻译/设置按钮） -->
+    <!-- 头部：站点切换与显示语言（只读浏览，无刷新/翻译/设置按钮） -->
     <header class="header">
       <!-- 分组折叠标签条：内容由 shared/site-tabs.js 按 site-registry.js 的
            SITE_GROUPS 动态渲染（同一时间只展开一组），不要在这里手写按钮 -->
       <div class="category-tabs" id="categoryTabs" role="tablist" aria-label="站点分类"></div>
       <div class="header-actions">
+        <!-- 显示语言（v1.8.12）：文字与悬停提示由 share.js 按当前语言填（TimelineRender.LANG_LABELS） -->
+        <button id="btnLang" class="btn-lang" type="button" aria-label="切换显示语言（中文 / 英文）">中</button>
         <span class="live-dot" id="liveDot" role="img" title="实时连接状态" aria-label="实时连接状态"></span>
       </div>
     </header>
@@ -53,6 +55,8 @@
   <script src="/shared/site-tabs.js"></script>
   <!-- timeline-render 的标题文案取自 translate-config.titleDisplay，须排在它之前 -->
   <script src="/shared/translate-config.js"></script>
+  <!-- 中文类型标签体系（v1.8.12）：卡片的中文标签用它，须排在 timeline-render 之前 -->
+  <script src="/shared/genre-taxonomy.js"></script>
   <script src="/shared/timeline-render.js"></script>
   <script src="/public/share.js"></script>
 </body>

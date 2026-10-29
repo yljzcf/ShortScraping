@@ -449,8 +449,8 @@ body {
   color: var(--accent-text);
 }
 
-/* 标题第一行给右上角两枚按钮让位：按钮带 24+4+24 = 52px、距卡片右缘 8px，即占到右缘内 60px；
-   标题行右缘在卡片内边距 12px 处，重叠 48px，再留 6px 间隙 */
+/* 标题行给右上角两枚按钮让位（长标题折成两行时两行都让）：按钮带 24+4+24 = 52px、距卡片右缘 8px，
+   即占到右缘内 60px；标题行右缘在卡片内边距 12px 处，重叠 48px，再留 6px 间隙 */
 .card-title-row {
   padding-right: 54px;
 }
@@ -507,13 +507,9 @@ body {
   margin-top: auto;
 }
 
-/* 单语简介的窄卡放宽行数，用内容填充等高拉伸的空间，避免简介下方大段空白 */
-.timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-desc-en.desc-en-only {
+/* 窄卡放宽简介行数，用内容填充等高拉伸的空间，避免简介下方大段空白 */
+.timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-desc {
   -webkit-line-clamp: 6;
-}
-
-.timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-desc-zh.desc-zh-only {
-  -webkit-line-clamp: 5;
 }
 
 /* 双列窄卡 + 竖版封面：标题行让到右上按钮带下方整行显示。

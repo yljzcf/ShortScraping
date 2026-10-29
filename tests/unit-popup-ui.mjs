@@ -22,6 +22,8 @@ import './bootstrap.cjs';
 //         设置页清空 / 填上 webhook 时跟着重画，判定没变不重画
 //   O 组：IMDb 卡「搜 X」没找到（v1.8.7）——后台给了平台页就先复制片名、再开平台页、不弹提示；
 //         没给（或不是 http(s)）只提示并复制片名
+//   Y 组：头部「中 / EN」显示语言（v1.8.12）——默认中文、点击切换并立即重画、写 popupLang、
+//         重开弹窗沿用、订阅变化重读数据不回读旧值；按钮排在放大镜与全部翻译之间，genre-taxonomy 先于渲染与搜索加载
 // 用法：node tests/unit-popup-ui.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -137,6 +139,8 @@ async function popupFixture({ stored = {}, reply = null } = {}) {
     TimelineRender: {
       CATEGORY_SOURCES: SiteRegistry.CATEGORY_SOURCES,
       dramaSource: d => d.source,
+      LANG_LABELS: { zh: { text: '中', title: '当前中文' }, en: { text: 'EN', title: '当前英文' } },
+      normalizeLang: lang => (lang === 'en' ? 'en' : 'zh'),
       renderTimeline: (container, dramas, opts) => { timelineRenders++; lastRender = { dramas, opts }; return dramas.length > 0; },
       formatRelativeTime: iso => `REL(${iso})`
     },
@@ -619,6 +623,49 @@ const ids = h => h.lastRender().dramas.map(d => d.id).join(',');
     h2.tabsCreated.length === 0 && h2.toasts.some(t => t.message === 'MyDrama 上没找到同名剧，已复制片名'), JSON.stringify(h2.toasts));
   const h3 = await run('javascript:alert(1)');
   check('O3 平台页不是 http(s)：当没给，不开页', h3.tabsCreated.length === 0 && h3.toasts.length === 1, JSON.stringify({ tabs: h3.tabsCreated, toasts: h3.toasts }));
+}
+
+// ---------- Y 组：显示语言（v1.8.12） ----------
+{
+  const h = await popupFixture({ stored: baseStore() });
+  const lang = () => h.lastRender().opts.lang;
+  check('Y1 首帧默认中文：按钮显示「中」，渲染传 lang:zh，打开时一并读 popupLang',
+    lang() === 'zh' && h.byId.btnLang.textContent === '中' && h.byId.btnLang.title === '当前中文'
+      && h.storageGets.some(keys => keys.includes('popupLang')), JSON.stringify(h.lastRender().opts.lang));
+
+  const before = h.timelineRenders();
+  h.byId.btnLang.click();
+  await h.settle();
+  check('Y2 点击切到英文：按钮换成「EN」、不经去抖立即重画一次、写入 popupLang',
+    lang() === 'en' && h.byId.btnLang.textContent === 'EN' && h.timelineRenders() === before + 1 && h.store.popupLang === 'en',
+    JSON.stringify({ lang: lang(), renders: h.timelineRenders() - before, stored: h.store.popupLang }));
+
+  // 设置页改订阅：popup.js 走 loadData 重读数据，此时存储里已是 en，但不能回读覆盖
+  h.store.popupLang = 'zh';
+  h.fireChange({ urlTags: { newValue: baseStore().urlTags } });
+  await h.settle();
+  check('Y3 订阅变化重读数据：显示语言不回读存储（只认首帧和按钮）', lang() === 'en' && h.byId.btnLang.textContent === 'EN', lang());
+
+  h.byId.btnLang.click();
+  await h.settle();
+  check('Y4 再点一次切回中文', lang() === 'zh' && h.store.popupLang === 'zh', lang());
+}
+{
+  const h = await popupFixture({ stored: baseStore({ popupLang: 'en' }) });
+  check('Y5 关了弹窗再打开：首帧就是上次的英文，只画一次', h.timelineRenders() === 1 && h.lastRender().opts.lang === 'en'
+    && h.byId.btnLang.textContent === 'EN', `${h.timelineRenders()} ${h.lastRender().opts.lang}`);
+  const odd = await popupFixture({ stored: baseStore({ popupLang: 'ja' }) });
+  check('Y6 存的值不认识：当中文', odd.lastRender().opts.lang === 'zh', odd.lastRender().opts.lang);
+}
+{
+  const html = fs.readFileSync(path.join(root, 'src/popup/popup.html'), 'utf8');
+  const at = needle => html.indexOf(needle);
+  check('Y7 popup.html：语言按钮排在放大镜与全部翻译之间',
+    at('id="btnSearch"') < at('id="btnLang"') && at('id="btnLang"') < at('id="btnTranslateAll"'), '');
+  check('Y8 popup.html：genre-taxonomy.js 先于 timeline-render.js 与 drama-search.js 加载',
+    at('src="../shared/genre-taxonomy.js"') > 0
+      && at('src="../shared/genre-taxonomy.js"') < at('src="../shared/timeline-render.js"')
+      && at('src="../shared/genre-taxonomy.js"') < at('src="../shared/drama-search.js"'), '');
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

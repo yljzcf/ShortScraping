@@ -24,6 +24,8 @@
       </div>
       <div class="header-actions">
         <button id="btnSearch" class="btn-icon" title="搜索全库：标题、简介、标签，中英文均可" aria-label="搜索" data-icon="search"></button>
+        <!-- 显示语言（v1.8.12）：文字与悬停提示由 popup.js 按当前语言填（TimelineRender.LANG_LABELS） -->
+        <button id="btnLang" class="btn-lang" type="button" aria-label="切换显示语言（中文 / 英文）">中</button>
         <button id="btnTranslateAll" class="btn-icon" title="全部翻译：检查所有待翻译条目并开始翻译" aria-label="全部翻译" data-icon="language"></button>
         <button id="btnSettings" class="btn-icon" title="设置" aria-label="设置" data-icon="settings"></button>
       </div>
@@ -111,6 +113,8 @@
   <!-- IMDb 日期窗口天数的默认值与归一（「去抓取」打开 IMDb 订阅页时补日期，与后台同一口径） -->
   <script src="../shared/schedule-config.js"></script>
   <script src="../shared/translate-config.js"></script>
+  <!-- 中文类型标签体系（v1.8.12）：卡片的中文标签与搜索都用它，须排在 timeline-render、drama-search 之前 -->
+  <script src="../shared/genre-taxonomy.js"></script>
   <script src="../shared/timeline-render.js"></script>
   <!-- 搜索匹配判据（纯函数，v1.8.2） -->
   <script src="../shared/drama-search.js"></script>

@@ -658,6 +658,8 @@ const STATIC_ROUTES = {
   '/shared/timeline-cards.css': { file: path.join(SHARED_DIR, 'timeline-cards.css'), type: 'text/css; charset=utf-8' },
   // timeline-render 的标题文案单一真源（v1.6.2）；漏了这条共享页直接白屏
   '/shared/translate-config.js': { file: path.join(SHARED_DIR, 'translate-config.js'), type: 'text/javascript; charset=utf-8' },
+  // 中文类型标签体系（v1.8.12）：卡片中文模式的内容标签；漏了标签会退回英文
+  '/shared/genre-taxonomy.js': { file: path.join(SHARED_DIR, 'genre-taxonomy.js'), type: 'text/javascript; charset=utf-8' },
   // 线条图标（v1.8.0）：空状态占位与卡片按钮都从这里取
   '/shared/icons.js': { file: path.join(SHARED_DIR, 'icons.js'), type: 'text/javascript; charset=utf-8' }
 };

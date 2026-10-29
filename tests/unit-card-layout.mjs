@@ -14,13 +14,17 @@ import './bootstrap.cjs';
 //   D：2026-09-25 审计 E 把两页逐字相同的规则收进 src/shared/timeline-cards.css——三份文件之间
 //      不许再出现重复规则（重复就又回到「改一处漏一处」），两页都要先引入共享文件再引入自己的 css
 //   G：v1.8.0 时间线只按入库日期分组（去掉卡片上方的抓取时刻）；日期标题带今天 / 昨天与星期
-//   T：v1.8.0 标题分主副两行，titleParts 与 titleDisplay 判据同一份
+//   T：v1.8.0 标题分主副两行，titleParts 与 titleDisplay 判据同一份（v1.8.12 起卡片只显示一种语言，
+//      titleDisplay 的「中文（英文）」留给标题悬停提示）
+//   L：v1.8.12 卡片中英切换——cardTextOf 按语言取标题 / 简介 / 内容标签，缺了退回另一种；
+//      中文标签走通用标签体系、英文标签滤掉演员名；双语版式（副标题、两段简介）整段退场
 //
 // 用法：node tests/unit-card-layout.mjs
 import fs from 'node:fs';
 
 const read = rel => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
 (0, eval)(read('../src/shared/site-registry.js'));
+(0, eval)(read('../src/shared/genre-taxonomy.js'));
 (0, eval)(read('../src/shared/timeline-render.js'));
 
 const results = [];
@@ -143,6 +147,65 @@ check('C4 timeline-render 在封面失败时加 poster-fallback 类',
     check(`T1 titleParts ${JSON.stringify(drama)}`,
       parts.main === expected.main && parts.sub === expected.sub && joined === titleDisplay(drama), JSON.stringify(parts));
   }
+}
+
+// ---------- L 组：卡片中英切换（v1.8.12） ----------
+{
+  const { cardTextOf, normalizeLang, LANG_LABELS } = globalThis.TimelineRender;
+  const full = {
+    title: "The Billionaire's Stand-in Bride", titleZh: '亿万富翁的替嫁新娘',
+    description: 'She married him in her sister\'s place.', descriptionZh: '她替姐姐嫁给了他。',
+    genres: ['Substitute Bride', 'Billionaire', 'USA', 'Aaron Russell']
+  };
+  const zh = cardTextOf(full, 'zh');
+  check('L1 中文模式：标题、简介取中文，标签走通用标签体系（按体系顺序、去掉刻意不收的 USA 与演员名）',
+    zh.title === '亿万富翁的替嫁新娘' && zh.desc === '她替姐姐嫁给了他。' && zh.descLang === 'zh'
+      && JSON.stringify(zh.tags) === '["替嫁","霸总"]' && zh.tagsLang === 'zh', JSON.stringify(zh));
+  const en = cardTextOf(full, 'en');
+  check('L2 英文模式：标题、简介取英文，标签是站点原文但滤掉混进 genres 的演员名',
+    en.title === full.title && en.desc === full.description && en.descLang === 'en'
+      && JSON.stringify(en.tags) === '["Substitute Bride","Billionaire","USA"]' && en.tagsLang === 'en', JSON.stringify(en));
+
+  const untranslated = cardTextOf({ title: 'Fresh Drama', description: 'Just scraped.', genres: ['Revenge'], status: 'new' }, 'zh');
+  check('L3 中文模式下未翻译的新卡：标题、简介退回英文（descLang 标 en），标签照样能对出中文',
+    untranslated.title === 'Fresh Drama' && untranslated.desc === 'Just scraped.' && untranslated.descLang === 'en'
+      && JSON.stringify(untranslated.tags) === '["复仇"]', JSON.stringify(untranslated));
+  const unmapped = cardTextOf({ titleZh: '某剧', genres: ['Totally New Tag', 'Aaron Russell'] }, 'zh');
+  check('L4 中文模式下标签一个都对不上体系：退回英文原文（仍滤演员名）',
+    JSON.stringify(unmapped.tags) === '["Totally New Tag"]' && unmapped.tagsLang === 'en', JSON.stringify(unmapped));
+  const zhOnly = cardTextOf({ titleZh: '只有中文', descriptionZh: '只有中文简介', title: '  ' }, 'en');
+  check('L5 英文模式下缺英文：退回中文', zhOnly.title === '只有中文' && zhOnly.desc === '只有中文简介' && zhOnly.descLang === 'zh',
+    JSON.stringify(zhOnly));
+  const empty = cardTextOf({ id: 'x' }, 'zh');
+  check('L6 什么都没有：空串与空标签，不炸', empty.title === '' && empty.desc === '' && empty.tags.length === 0, JSON.stringify(empty));
+  check('L7 语言缺省、不认识的值都当中文；默认选项是中文',
+    normalizeLang(undefined) === 'zh' && normalizeLang('fr') === 'zh' && normalizeLang('en') === 'en'
+      && cardTextOf(full).title === zh.title, '');
+  check('L8 按钮文字显示当前语言（中 / EN），悬停提示说清点了切到哪',
+    LANG_LABELS.zh.text === '中' && LANG_LABELS.en.text === 'EN'
+      && /切换为英文/.test(LANG_LABELS.zh.title) && /切换为中文/.test(LANG_LABELS.en.title), JSON.stringify(LANG_LABELS));
+
+  const renderSrc = read('../src/shared/timeline-render.js');
+  check('L9 双语版式退场：卡片不再画副标题与两段简介，只画一段 .card-desc 并标 lang',
+    !/card-title-sub|card-desc-zh|card-desc-en|desc-zh-only|desc-en-only/.test(renderSrc)
+      && renderSrc.includes('<div class="card-desc" lang="'), '');
+  check('L10 标题悬停提示仍是 titleDisplay（中文（英文）），看得到另一种语言',
+    renderSrc.includes('<div class="card-title-text" title="${escapeAttribute(titleDisplay)}">'), '');
+
+  const allCss = [sharedCss, ...Object.values(CSS)].join('\n');
+  check('L11 三份 CSS 都不再有双语版式的类（副标题、.card-desc-zh / -en、desc-*-only）',
+    !/card-title-sub|card-desc-zh|card-desc-en|desc-zh-only|desc-en-only/.test(allCss), '');
+  const titleText = ruleBody(sharedCss, '.card-title-text') || '';
+  check('L12 标题最多折两行（英文标题长，单行省略太多）', /-webkit-line-clamp:\s*2/.test(titleText) && !/nowrap/.test(titleText), titleText);
+  const desc = ruleBody(sharedCss, '.card-desc') || '';
+  const large = ruleBody(sharedCss, '.card-description.desc-large .card-desc') || '';
+  const ratio = renderSrc.match(/DESC_LARGE_SCALE = (\d+) \/ (\d+);/);
+  check('L13 简介字号与 timeline-render 的放大倍数对得上（12px → desc-large 14px，行高写倍数）',
+    /font-size:\s*12px/.test(desc) && /line-height:\s*1\.\d+;/.test(desc) && /font-size:\s*14px/.test(large)
+      && Boolean(ratio) && ratio[1] === '14' && ratio[2] === '12', `${desc} | ${large} | ${ratio && ratio[0]}`);
+  const btn = ruleBody(sharedCss, '.btn-lang') || '';
+  check('L14 「中 / EN」按钮样式只在共享文件里写一份（两页同一枚）',
+    /width:\s*32px/.test(btn) && Object.values(CSS).every(src => !src.includes('.btn-lang')), btn);
 }
 
 // ---------- D 组：三份 CSS 之间零重复、两页先引共享样式 ----------

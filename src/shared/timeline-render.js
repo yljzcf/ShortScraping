@@ -26,17 +26,26 @@
     // 经中文对照命中的英文题材（小写数组），对应的题材标签整枚标亮
     highlightGenres: null,
     isUnsubscribed: null,
+    // 卡片显示语言（v1.8.12）：'zh' | 'en'，标题、简介、内容标签只显示这一种（缺了退回另一种）
+    lang: 'zh',
     assetsBase: '../../assets/icons'
   };
+
+  // 两页右上角「中 / EN」按钮的文字与悬停提示（按钮显示当前语言）
+  const LANG_LABELS = Object.freeze({
+    zh: Object.freeze({ text: '中', title: '显示语言：中文（点击切换为英文）' }),
+    en: Object.freeze({ text: 'EN', title: '显示语言：英文（点击切换为中文）' })
+  });
+  // 存储里读回来的值不可信（缺省、旧版本、手改），不认识的一律当中文
+  const normalizeLang = lang => (lang === 'en' ? 'en' : 'zh');
 
   // 卡片归哪个站点：单一真源在 SiteRegistry.siteOfDrama（与同步服务同口径，v1.7.0 收拢）
   const dramaSource = drama => global.SiteRegistry.siteOfDrama(drama);
 
   // 标题文案单一真源在 translate-config.js（弹窗/共享页卡片、多维表格 payload、
-  // 群机器人卡片三处共用，见那边 titleDisplay 的注释）。须先加载该模块
+  // 群机器人卡片三处共用，见那边 titleDisplay 的注释）。须先加载该模块。
+  // v1.8.12 起卡片只显示一种语言，「中文（英文）」留给标题的悬停提示
   const titleDisplayOf = global.TranslateConfig.titleDisplay;
-  // 卡片标题分主副两行（v1.8.0），判据与 titleDisplay 同一份
-  const titlePartsOf = global.TranslateConfig.titleParts;
 
   /**
    * 由封面实际尺寸判定卡片是否走横版布局；返回 null＝**不改判**，保留按 source
@@ -317,6 +326,55 @@
   }
 
   /**
+   * 卡片上显示的文字（v1.8.12 中英切换）：标题、简介、内容标签只取一种语言，缺了才退回另一种
+   * ——未翻译的新卡在中文模式照样显示英文，靠「待翻译」小标签区分。
+   * 中文标签按通用标签体系（GenreTaxonomy.zhTagsOf）对照，一个都对不上时退回英文；英文标签滤掉
+   * ReelShort 混进 genres 的演员名。没加载体系（理应不会）时标签照旧显示站点原文。
+   * descLang / tagsLang 是实际显示的语言（退回时与 lang 不同）。
+   */
+  function cardTextOf(drama, lang) {
+    const zhFirst = normalizeLang(lang) === 'zh';
+    const text = value => String(value || '').trim();
+    const pick = (zh, en) => {
+      const [first, second] = zhFirst ? [zh, en] : [en, zh];
+      return first.text || !second.text ? first : second;
+    };
+    const title = pick({ text: text(drama.titleZh) }, { text: text(drama.title) });
+    const desc = pick({ text: text(drama.descriptionZh), lang: 'zh' }, { text: text(drama.description), lang: 'en' });
+
+    const taxonomy = global.GenreTaxonomy;
+    const enTags = taxonomy ? taxonomy.displayGenres(drama.genres) : getDisplayGenres(drama);
+    const zhTags = zhFirst && taxonomy ? taxonomy.zhTagsOf(drama.genres) : [];
+    const tagsLang = zhTags.length ? 'zh' : 'en';
+    return {
+      title: title.text,
+      desc: desc.text,
+      descLang: desc.lang,
+      tags: tagsLang === 'zh' ? zhTags : enTags,
+      tagsLang
+    };
+  }
+
+  /**
+   * 搜索时整枚标亮哪些标签（v1.8.12 起跨语言）：中文标签看挂它的英文原标签，英文标签看它归到的
+   * 中文标签——用哪种语言搜、在哪种模式下看，都看得出这部为什么被搜出来。
+   * terms 为 DramaSearch.parseQuery 的结果（已归一），genreHits 为经 GENRE_ZH 对照命中的英文题材（小写）。
+   * 返回 tag => boolean；不在搜索态时恒为 false。
+   */
+  function tagHitTest(drama, tagsLang, terms, genreHits) {
+    if (!terms.length && !genreHits.size) return () => false;
+    const taxonomy = global.GenreTaxonomy;
+    const zhOf = genre => (taxonomy ? taxonomy.zhTagsOf([genre]) : []);
+    const termHit = value => terms.some(term => String(value).normalize('NFKC').toLowerCase().includes(term));
+    const genreHit = genre => genreHits.has(genre.toLowerCase()) || termHit(genre);
+    if (tagsLang === 'zh') {
+      const hitTags = new Set(getDisplayGenres(drama).filter(genreHit).flatMap(zhOf));
+      return tag => hitTags.has(tag);
+    }
+    return genre => genreHits.has(genre.toLowerCase()) || zhOf(genre).some(termHit);
+  }
+
+  /**
    * 创建剧集卡片。opts.readOnly 为 true 时不渲染翻译按钮（共享页纯浏览）。
    */
   function createDramaCard(drama, opts) {
@@ -329,22 +387,18 @@
 
     const terms = Array.isArray(options.highlightTerms) ? options.highlightTerms : null;
     const mark = text => highlightHtml(text, terms);
-    const genreHits = new Set(Array.isArray(options.highlightGenres) ? options.highlightGenres : []);
-    const markGenre = g => (genreHits.has(g.toLowerCase())
-      ? `<mark class="search-hit">${escapeHtml(g)}</mark>`
-      : mark(g));
     const unsubscribed = typeof options.isUnsubscribed === 'function' && options.isUnsubscribed(drama);
 
+    // 标题、简介、内容标签只显示一种语言（v1.8.12）；悬停标题看「中文（英文）」
+    const text = cardTextOf(drama, options.lang);
     const titleDisplay = titleDisplayOf(drama);
-    const { main: titleMain, sub: titleSub } = titlePartsOf(drama);
-
-    // 简介
-    const descZh = String(drama.descriptionZh || '').trim();
-    const descEn = String(drama.description || '').trim();
 
     // footer 右槽：内容类型标签 chips（v1.5.3 替换原制作公司/作者标签展示；
     // company 字段已于 v1.5.13 从数据模型彻底移除——不再采集、不进 CSV 列）
-    const genreChips = getDisplayGenres(drama);
+    const genreChips = text.tags;
+    const tagHit = tagHitTest(drama, text.tagsLang, terms || [],
+      new Set(Array.isArray(options.highlightGenres) ? options.highlightGenres : []));
+    const markGenre = g => (tagHit(g) ? `<mark class="search-hit">${escapeHtml(g)}</mark>` : mark(g));
 
     // Lark 按钮双闸门：readOnly（共享页）不渲染，未注入回调（调用方未接入）也不渲染
     const showLarkButton = !options.readOnly && typeof options.onLarkPush === 'function';
@@ -364,16 +418,15 @@
           <div class="card-main">
             <div class="card-title">
               <div class="card-title-row">
-                <div class="card-title-text" title="${escapeAttribute(titleDisplay)}">${mark(titleMain)}</div>
+                <div class="card-title-text" title="${escapeAttribute(titleDisplay)}">${mark(text.title)}</div>
                 ${drama.status === 'new' ? '<span class="status-chip">待翻译</span>' : ''}
                 ${unsubscribed ? '<span class="status-chip chip-unsubscribed" title="所属订阅已退订，弹窗平时不显示这部">已退订</span>' : ''}
               </div>
-              ${titleSub ? `<div class="card-title-sub" title="${escapeAttribute(titleSub)}">${mark(titleSub)}</div>` : ''}
             </div>
             <div class="card-description">
-              ${descZh ? `<div class="card-desc-zh${descEn ? '' : ' desc-zh-only'}">${mark(descZh)}</div>` : ''}
-              ${descEn ? `<div class="card-desc-en${descZh ? '' : ' desc-en-only'}">${mark(descEn)}</div>` : ''}
-              ${!descZh && !descEn ? '<div class="card-desc-empty">暂无简介</div>' : ''}
+              ${text.desc
+                ? `<div class="card-desc" lang="${text.descLang === 'zh' ? 'zh-CN' : 'en'}">${mark(text.desc)}</div>`
+                : '<div class="card-desc-empty">暂无简介</div>'}
             </div>
           </div>
         </div>
@@ -381,7 +434,7 @@
           <div class="card-tags-left">
             ${getDisplayTags(drama).map(tag => `<span class="tag tag-source">${mark(tag)}</span>`).join('')}
           </div>
-          ${genreChips.length ? `<div class="card-tags-right" title="${escapeAttribute(drama.genres.join(', '))}">${genreChips.map(g => `<span class="tag tag-genre">${markGenre(g)}</span>`).join('')}</div>` : ''}
+          ${genreChips.length ? `<div class="card-tags-right" title="${escapeAttribute(genreChips.join(text.tagsLang === 'zh' ? '、' : ', '))}">${genreChips.map(g => `<span class="tag tag-genre">${markGenre(g)}</span>`).join('')}</div>` : ''}
         </div>
       </div>
     `;
@@ -454,13 +507,11 @@
   }
 
   /**
-   * 简介动态排版（仅中英双语卡片，单语卡片沿用静态规则）：
-   * - 中文实际超过 3 行：放宽为 4 行中文 + 2 行英文；
-   * - 中文有富余空间不足时：英文行数补齐剩余空间；
-   * - 中英文全文放完仍有大段空白：整体放大字号（desc-large，14px 3中+2英）。
-   * 竖版卡（海报在左）以「简介顶部到海报底边 + 内容区 gap」为固定预算分配整行，
-   * 上半区高度钉死为海报高，文字只填充原有空隙、分割线绝不因文字增行下移；
-   * 横版卡（封面在上，Steam 等高双列）无海报边界，按行数规则分配（合计 7 行封顶）。
+   * 简介动态排版（v1.8.12 起卡片只显示一种语言，简介是单独一段）：
+   * - 竖版卡（海报在左）以「简介顶部到海报底边 + 内容区 gap」为固定预算，行数 = 预算能放下的整行数；
+   * - 全文还占不到预算的一半：放大字号（desc-large，14px）填空白，行数按放大后的行高重算；
+   * - 上半区高度钉死为海报高，文字只填充原有空隙、分割线绝不因文字增行下移；
+   * - 横版卡（封面在上，Steam）没有海报边界，行数走 CSS 静态规则，这里不动。
    * 行数按 scrollHeight / line-height 测量（line-clamp 不影响 scrollHeight），
    * 必须在卡片进入可见 DOM 后调用；测得 0 行（容器不可见）时保持默认样式。
    */
@@ -470,79 +521,49 @@
   // （平移不变量，兄弟卡高度变化只整体平移本卡不改差值）；行数取决于文字列宽，
   // 列宽由容器网格决定、不受兄弟卡样式影响。
 
-  /** 第一段（写）：清掉上一轮动态样式，返回后续两段共用的元素上下文；非双语卡返回 null。 */
+  // timeline-cards.css：.card-desc 12px，desc-large 14px，行高写的是倍数，跟着字号同比放大
+  const DESC_LARGE_SCALE = 14 / 12;
+
+  /** 第一段（写）：清掉上一轮动态样式，返回后续两段共用的元素上下文；没有简介的卡返回 null。 */
   function resetCardDescStyles(card) {
-    const zhEl = card.querySelector('.card-desc-zh');
-    const enEl = card.querySelector('.card-desc-en');
-    if (!zhEl || !enEl) return null;
+    const descEl = card.querySelector('.card-desc');
+    if (!descEl) return null;
 
     const box = card.querySelector('.card-description');
     const cardTop = card.querySelector('.card-top');
     box.classList.remove('desc-large');
-    zhEl.style.removeProperty('-webkit-line-clamp');
-    enEl.style.removeProperty('-webkit-line-clamp');
+    descEl.style.removeProperty('-webkit-line-clamp');
     if (cardTop) cardTop.style.removeProperty('height');
-    return { zhEl, enEl, box, cardTop };
+    return { descEl, box, cardTop };
   }
 
-  /** 第二段（纯读+计算）：测量并产出应用计划；容器不可见（测得 0 行）时返回 null 保持默认样式。 */
+  /** 第二段（纯读+计算）：测量并产出应用计划；横版卡、容器不可见（测得 0 行）时返回 null 保持默认样式。 */
   function measureCardDesc(ctx, card) {
-    const { zhEl, enEl, box, cardTop } = ctx;
-    const countLines = el => {
-      const lineHeight = parseFloat(getComputedStyle(el).lineHeight);
-      return lineHeight > 0 ? Math.round(el.scrollHeight / lineHeight) : 0;
-    };
-
-    const zhLines = countLines(zhEl);
-    const enLines = countLines(enEl);
-    if (zhLines === 0 || enLines === 0) return null;
-
+    const { descEl, box, cardTop } = ctx;
     const poster = card.querySelector('.card-poster');
-    if (!card.classList.contains('card-landscape') && cardTop && poster && poster.offsetHeight > 40) {
-      const zhLh = parseFloat(getComputedStyle(zhEl).lineHeight);
-      const enLh = parseFloat(getComputedStyle(enEl).lineHeight);
-      const zhGap = parseFloat(getComputedStyle(zhEl).marginBottom) || 0;
-      const contentGap = parseFloat(getComputedStyle(cardTop.parentElement).rowGap) || 0;
-      // 文字可下溢到海报底边之下、吃掉内容区 gap，与分割线保持 footer margin 的间距
-      const budget = poster.getBoundingClientRect().bottom - box.getBoundingClientRect().top + contentGap;
-      const fits = (zh, en) => zh * zhLh + zhGap + en * enLh <= budget + 0.5;
+    if (card.classList.contains('card-landscape') || !cardTop || !poster || poster.offsetHeight <= 40) return null;
 
-      let zhShow = zhLines > 3 && fits(4, 2) ? 4 : Math.min(zhLines, 3);
-      while (zhShow > 1 && !fits(zhShow, 1)) zhShow--;
-      const enShow = Math.max(1, Math.floor((budget - zhShow * zhLh - zhGap) / enLh));
+    const lineHeight = parseFloat(getComputedStyle(descEl).lineHeight);
+    const lines = lineHeight > 0 ? Math.round(descEl.scrollHeight / lineHeight) : 0;
+    if (lines === 0) return null;
 
-      const sparse = zhLines <= zhShow && enLines <= enShow &&
-        budget - (zhLines * zhLh + zhGap + enLines * enLh) >= enLh;
-      return { mode: 'portrait', zhShow, enShow, sparse, posterHeight: poster.offsetHeight };
-    }
-
-    return { mode: 'landscape', zhLines, enLines };
+    const contentGap = parseFloat(getComputedStyle(cardTop.parentElement).rowGap) || 0;
+    // 文字可下溢到海报底边之下、吃掉内容区 gap，与分割线保持 footer margin 的间距
+    const budget = poster.getBoundingClientRect().bottom - box.getBoundingClientRect().top + contentGap;
+    const large = lines * lineHeight * 2 <= budget;
+    const showLineHeight = large ? lineHeight * DESC_LARGE_SCALE : lineHeight;
+    const show = Math.max(1, Math.floor((budget + 0.5) / showLineHeight));
+    return { show, large, posterHeight: poster.offsetHeight };
   }
 
   /** 第三段（纯写）：按计划应用样式。 */
   function applyCardDesc(ctx, plan) {
     if (!plan) return;
-    const { zhEl, enEl, box, cardTop } = ctx;
-
-    if (plan.mode === 'portrait') {
-      if (plan.sparse) {
-        box.classList.add('desc-large');
-      } else {
-        if (plan.zhShow !== 3) zhEl.style.setProperty('-webkit-line-clamp', String(plan.zhShow));
-        if (plan.enShow !== 2) enEl.style.setProperty('-webkit-line-clamp', String(plan.enShow));
-      }
-      // 上半区高度钉死为海报高：文字增行只填充空隙，分割线不动
-      cardTop.style.height = `${plan.posterHeight}px`;
-      return;
-    }
-
-    if (plan.zhLines > 3) {
-      zhEl.style.setProperty('-webkit-line-clamp', '4');
-    } else if (plan.zhLines + plan.enLines < 7) {
-      box.classList.add('desc-large');
-    } else if (plan.zhLines < 3) {
-      enEl.style.setProperty('-webkit-line-clamp', String(7 - plan.zhLines));
-    }
+    const { descEl, box, cardTop } = ctx;
+    if (plan.large) box.classList.add('desc-large');
+    descEl.style.setProperty('-webkit-line-clamp', String(plan.show));
+    // 上半区高度钉死为海报高：文字增行只填充空隙，分割线不动
+    cardTop.style.height = `${plan.posterHeight}px`;
   }
 
   /** 单卡入口（海报 load 回调与两端页面沿用，签名不变）＝三段的单卡组合。 */
@@ -603,8 +624,12 @@
 
   global.TimelineRender = {
     CATEGORY_SOURCES,
+    LANG_LABELS,
+    normalizeLang,
     dramaSource,
     titleDisplay: titleDisplayOf,
+    cardTextOf,
+    tagHitTest,
     orientationFromPoster,
     groupByDate,
     renderTimeline,

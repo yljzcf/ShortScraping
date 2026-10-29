@@ -103,13 +103,9 @@ body {
     margin-top: auto;
   }
 
-  /* 单语简介的窄卡放宽行数，用内容填充等高拉伸的空间 */
-  .timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-desc-en.desc-en-only {
+  /* 窄卡放宽简介行数，用内容填充等高拉伸的空间 */
+  .timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-desc {
     -webkit-line-clamp: 6;
-  }
-
-  .timeline-container[data-source="steam"] .drama-card:not(.card-full) .card-desc-zh.desc-zh-only {
-    -webkit-line-clamp: 5;
   }
 
   /* 双列窄卡：底部标签改两行，单行超长时横向滚动，不堆高 */

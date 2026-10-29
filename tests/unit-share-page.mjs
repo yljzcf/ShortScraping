@@ -10,6 +10,8 @@ import './bootstrap.cjs';
 //   P4 回到前台：空闲时拉 1 次、在途时复用；hidden 时不拉。SSE 通告已渲染的版本不拉，坏帧按未知版本拉。
 //   P5 在途拉取失败：通告过的新版本在拉完后补拉 1 次，页面恢复；失败后同一 ETag 的响应也重渲染（状态栏换回统计）。
 //   P6 SSE 被拦（EventSource 从不出帧）时首次拉取照样发生。
+//   L  头部「中 / EN」（v1.8.12）：默认中文、点击切换并重渲染、选择记在 localStorage 的 shareLang、
+//      localStorage 不可用时照常从中文开始；share.html 先载 genre-taxonomy 再载 timeline-render，同步服务白名单放行它。
 // 页面在 vm 里跑真实的 share.js；DOM 用 tests/dom-fixture.mjs 的元素树（share.js 的 querySelector /
 // getElementById 真走选择器），fetch、EventSource、TimelineRender、SiteTabs 为桩。
 // 用法：node tests/unit-share-page.mjs
@@ -34,7 +36,10 @@ function shareDocument() {
     el('div', { class: 'app' }, [
       el('header', { class: 'header' }, [
         el('div', { class: 'category-tabs', id: 'categoryTabs' }),
-        el('div', { class: 'header-actions' }, [el('span', { class: 'live-dot', id: 'liveDot' })])
+        el('div', { class: 'header-actions' }, [
+          el('button', { class: 'btn-lang', id: 'btnLang' }, [], '中'),
+          el('span', { class: 'live-dot', id: 'liveDot' })
+        ])
       ]),
       el('main', { class: 'content' }, [
         el('div', { class: 'timeline-container' }),
@@ -50,6 +55,9 @@ function shareDocument() {
   for (const node of [root, ...root.descendants()]) {
     Object.defineProperty(node, 'textContent', { value: node.ownText, writable: true });
     node.setAttribute = (name, value) => { node.attrs[name] = String(value); };
+    node.listeners = {};
+    node.addEventListener = (type, fn) => { (node.listeners[type] ||= []).push(fn); };
+    node.click = () => { for (const fn of node.listeners.click || []) fn({ type: 'click' }); };
     node.classList = {
       contains: name => String(node.attrs.class || '').split(/\s+/).includes(name),
       toggle(name, force) {
@@ -72,8 +80,18 @@ function shareDocument() {
   };
 }
 
+/** 本浏览器的 localStorage 桩：多次 openPage 传同一个就是「刷新页面」。 */
+function memoryStorage(initial = {}) {
+  const data = { ...initial };
+  return {
+    data,
+    getItem: key => (key in data ? data[key] : null),
+    setItem: (key, value) => { data[key] = String(value); }
+  };
+}
+
 /** 打开一页：跑 share.js、派发 DOMContentLoaded。返回可观测的桩与操纵手柄。 */
-function openPage({ eventSource = true } = {}) {
+function openPage({ eventSource = true, localStorage = memoryStorage() } = {}) {
   const page = { fetches: [], sources: [], renders: [], jsonCalls: 0, cancels: 0, errors: [] };
   const document = shareDocument();
   page.document = document;
@@ -97,10 +115,13 @@ function openPage({ eventSource = true } = {}) {
     console: { log() {}, warn() {}, error: (...args) => page.errors.push(args.map(String).join(' ')) },
     fetch: (url, init) => new Promise((resolve, reject) => page.fetches.push({ url, init, resolve, reject })),
     EventSource: eventSource ? FakeEventSource : class { addEventListener() {} },
+    localStorage,
     TimelineRender: {
       CATEGORY_SOURCES: ['imdb', 'reelshort'],
       dramaSource: drama => (drama.source === 'reelshort' ? 'reelshort' : 'imdb'),
-      renderTimeline: (container, visible, opts) => { page.renders.push({ count: visible.length, source: opts.source }); return visible.length > 0; },
+      LANG_LABELS: { zh: { text: '中', title: '当前中文' }, en: { text: 'EN', title: '当前英文' } },
+      normalizeLang: lang => (lang === 'en' ? 'en' : 'zh'),
+      renderTimeline: (container, visible, opts) => { page.renders.push({ count: visible.length, source: opts.source, lang: opts.lang }); return visible.length > 0; },
       formatRelativeTime: () => '刚刚'
     },
     SiteTabs: {
@@ -285,6 +306,48 @@ function openPage({ eventSource = true } = {}) {
   await page.respond(0, { version: 1 });
   check('P6 EventSource 从不出帧（代理拦掉 SSE）：首次拉取照样发生并渲染', page.fetches.length === 1 && page.renders.length === 1,
     JSON.stringify({ fetches: page.fetches.length, renders: page.renders.length }));
+}
+
+// ---------- L 头部「中 / EN」显示语言（v1.8.12） ----------
+{
+  const storage = memoryStorage();
+  const page = openPage({ localStorage: storage });
+  const button = page.document.getElementById('btnLang');
+  await page.respond(0, { version: 1 });
+  check('L1 默认中文：按钮显示「中」，渲染传 lang:zh', button.textContent === '中' && button.title === '当前中文'
+    && page.renders.at(-1).lang === 'zh', JSON.stringify({ text: button.textContent, renders: page.renders }));
+
+  button.click();
+  check('L2 点击切到英文：按钮换成「EN」、立即重渲染、写入 localStorage 的 shareLang',
+    button.textContent === 'EN' && page.renders.length === 2 && page.renders.at(-1).lang === 'en' && storage.data.shareLang === 'en',
+    JSON.stringify({ text: button.textContent, renders: page.renders, stored: storage.data }));
+
+  const reopened = openPage({ localStorage: storage });
+  await reopened.respond(0, { version: 1 });
+  check('L3 刷新页面：沿用上次的英文', reopened.document.getElementById('btnLang').textContent === 'EN'
+    && reopened.renders.at(-1).lang === 'en', JSON.stringify(reopened.renders));
+
+  const odd = openPage({ localStorage: memoryStorage({ shareLang: 'fr' }) });
+  await odd.respond(0, { version: 1 });
+  check('L4 存的值不认识：当中文', odd.renders.at(-1).lang === 'zh', JSON.stringify(odd.renders));
+
+  const throwing = { getItem() { throw new Error('SecurityError'); }, setItem() { throw new Error('SecurityError'); } };
+  const locked = openPage({ localStorage: throwing });
+  await locked.respond(0, { version: 1 });
+  locked.document.getElementById('btnLang').click();
+  check('L5 localStorage 读写都抛错（无痕 / 禁用站点数据）：从中文开始，照样能切换、页面不报错',
+    locked.renders[0].lang === 'zh' && locked.renders.at(-1).lang === 'en' && locked.errors.length === 0,
+    JSON.stringify({ renders: locked.renders, errors: locked.errors }));
+}
+{
+  const html = fs.readFileSync(path.join(ROOT, 'server/public/share.html'), 'utf8');
+  const at = needle => html.indexOf(needle);
+  check('L6 share.html：语言按钮在头部右侧、状态灯前；先载 genre-taxonomy 再载 timeline-render',
+    at('id="btnLang"') > at('class="header-actions"') && at('id="btnLang"') < at('id="liveDot"')
+      && at('src="/shared/genre-taxonomy.js"') > 0 && at('src="/shared/genre-taxonomy.js"') < at('src="/shared/timeline-render.js"'), '');
+  check('L7 同步服务静态白名单放行 /shared/genre-taxonomy.js（漏了共享页的中文标签会退回英文）',
+    /'\/shared\/genre-taxonomy\.js': \{ file: path\.join\(SHARED_DIR, 'genre-taxonomy\.js'\), type: 'text\/javascript; charset=utf-8' \}/
+      .test(fs.readFileSync(path.join(ROOT, 'server/sync-server.js'), 'utf8')), '');
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

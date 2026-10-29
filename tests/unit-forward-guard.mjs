@@ -206,6 +206,8 @@ async function popupFixture(stored) {
     TimelineRender: {
       CATEGORY_SOURCES: SiteRegistry.CATEGORY_SOURCES,
       dramaSource: d => d.source,
+      LANG_LABELS: { zh: { text: '中', title: '当前中文' }, en: { text: 'EN', title: '当前英文' } },
+      normalizeLang: lang => (lang === 'en' ? 'en' : 'zh'),
       renderTimeline: () => true,
       formatRelativeTime: iso => `REL(${iso})`
     },

@@ -3,7 +3,8 @@
  *
  * - 可搜字段：title / titleZh / description / descriptionZh / tags / genres，
  *   外加 genres 经 GENRE_ZH 对照出的中文同义词（站点的 genres 只有英文，中文搜「复仇」
- *   靠这份对照命中 Revenge）。对照只用于匹配，卡片上仍显示站点原始英文。
+ *   靠这份对照命中 Revenge），以及经中文类型标签体系对照出的中文标签（v1.8.12 起卡片
+ *   中文模式显示的就是它们，看得见的标签都要搜得到）。GENRE_ZH 只用于匹配。
  * - 归一：NFKC（全角字母数字、全角空格转半角）+ 小写；查询按空白切词、全部命中（AND）。
  * - 子串匹配：「总裁」命中「霸道总裁」。各字段之间用不可见分隔符拼接，
  *   词不会跨字段拼凑命中。
@@ -165,6 +166,11 @@
     'first love': '初恋'
   });
 
+  // 中文类型标签体系：弹窗里须先于本文件加载，Node（单测）里直接 require
+  const GenreTaxonomy = (typeof module !== 'undefined' && module.exports)
+    ? require('./genre-taxonomy.js')
+    : global.GenreTaxonomy;
+
   // 字段之间的分隔符：不可见、查询里打不出来，词不会跨字段拼出命中
   const SEP = '\u0001';
 
@@ -185,9 +191,10 @@
   function haystackOf(drama) {
     const genres = stringList(drama.genres);
     const genreZh = genres.map(g => GENRE_ZH[g.toLowerCase()]).filter(Boolean);
+    const zhTags = GenreTaxonomy ? GenreTaxonomy.zhTagsOf(genres) : [];
     return normalize([
       drama.title, drama.titleZh, drama.description, drama.descriptionZh,
-      ...stringList(drama.tags), ...genres, ...genreZh
+      ...stringList(drama.tags), ...genres, ...genreZh, ...zhTags
     ].filter(v => v != null && v !== '').join(SEP));
   }
 
@@ -199,8 +206,8 @@
   }
 
   /**
-   * 经中文对照命中的英文题材（小写）。卡片上题材只显示英文，搜「复仇」时把 Revenge 整枚标亮，
-   * 用户才看得出这部为什么被搜出来。
+   * 经中文对照命中的英文题材（小写）。英文模式下搜「复仇」时把 Revenge 整枚标亮，中文模式下把
+   * Revenge 归到的中文标签整枚标亮（timeline-render tagHitTest），用户才看得出这部为什么被搜出来。
    */
   function genresMatchedByZh(terms) {
     const list = Array.isArray(terms) ? terms : [];
