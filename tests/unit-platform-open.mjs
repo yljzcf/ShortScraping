@@ -9,8 +9,8 @@ import './bootstrap.cjs';
 //     IMDb 卡留合法的 co 编号，去重命中不回补（v1.8.7）。
 //   B 飞书群卡片「搜 X」：推送前解析、唯一同名直达并记下、查不到退回搜索页链接或平台页（v1.8.7），
 //     任何失败都照常推送；重试沿用记下的地址；测试发送与真实推送同口径。
-//   R 推送后复查（v1.8.7）：翻译闹钟每轮对近 30 天、没有搜索页的平台、还没记下播放页的 IMDb 卡再判一次；
-//     本生命周期没碰过表时不查（不为它整表读一遍）。
+//   R 推送后复查（v1.8.7）：翻译闹钟每轮对没有搜索页的平台、还没记下播放页的 IMDb 卡再判一次（v1.8.8 起
+//     不限入库时间，旧卡也补），一轮查到的一次整表写完；本生命周期没碰过表时不查（不为它整表读一遍）。
 // 纯逻辑（解析器 / 判定 / 菜单项 / 卡片排版）见 unit-platform-link.mjs。
 // 用法：node tests/unit-platform-open.mjs
 import { background, card } from './background-fixture.mjs';
@@ -369,13 +369,17 @@ async function drive(bg, steps = 12, ms = 1000) {
     ],
     pages: { [MD_SITEMAP]: MD_XML }
   });
+  const writes = () => h.bg.log.filter(e => e.startsWith('set:') && e.includes('dramas')).length;
+  const writesBefore = writes();
   await h.bg.context.recheckPlatformPlayUrls();
   await h.bg.flush();
-  check('R1 复查：近 30 天、没记下播放页的 MyDrama / NetShort 卡查到就记下；站点地图只取一次；搜索页平台、超过 30 天、已记下的不查',
+  check('R1 复查：没记下播放页的 MyDrama / NetShort 卡查到就记下，旧卡（47 天前）也补（v1.8.8）；站点地图只取一次；搜索页平台、已记下的不查',
     h.stored('id_tt30') === 'https://my-drama.com/video/b6973579-f9b6-429c-8cc5-bad184a58236' && h.stored('id_tt35') === twin.url
-    && h.stored('id_tt31') === undefined && h.stored('id_tt32') === undefined
+    && h.stored('id_tt32') === 'https://my-drama.com/video/432a3003-9b2c-496e-9205-8ada4d497ff5' && h.stored('id_tt31') === undefined
+    && h.stored('id_tt33') === 'https://my-drama.com/video/00000000-0000-0000-0000-000000000000'
     && show(h.requests.map(r => r.url)) === show([MD_SITEMAP]) && h.tabs().length === 0,
     show({ stored: ['id_tt30', 'id_tt31', 'id_tt32', 'id_tt35'].map(h.stored), requests: h.requests.map(r => r.url) }));
+  check('R1b 一轮查到的几部一次整表写完，不是一部写一次', writes() - writesBefore === 1, `writes=${writes() - writesBefore}`);
 }
 {
   const recent = '2026-09-04T00:00:00.000Z';

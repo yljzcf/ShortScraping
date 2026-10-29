@@ -3661,7 +3661,7 @@ async function handleLarkBotTestSend(draftConfig) {
 // 搜索页，用户知情后选择推送时也自动查（量约每天几次到十几次，被拦时退回搜索页链接）。
 // ShortMax（搜一次约 15 秒且常搜不到）与 NetShort（网页端只有加密接口）从不联网，只查库内同名卡。
 // 没有搜索网址的 MyDrama / Shortical / NetShort 没找到时退到平台页（v1.8.7，SiteRegistry.platformLandingUrl），
-// 翻译闹钟每轮还对近 30 天的这几家卡复查一次（recheckPlatformPlayUrls）：平台常常晚几天才上线。
+// 翻译闹钟每轮还对这几家还没记下播放页的卡复查一次（recheckPlatformPlayUrls）：平台常常晚几天才上线。
 
 // 单次取数期限（连正文）：弹窗里用户等着看结果，给 12 秒；推送链路在翻译线里是 await 的，
 // 查不出也要尽快把卡推出去，6 秒即退回搜索页链接
@@ -3747,17 +3747,27 @@ async function resolvePlatformLink(drama, { mode = 'click' } = {}) {
  * 唯一同名剧的播放页记到条目上（playUrl）：之后弹窗、共享页、推送重试直接用，不再搜。
  * 只读护栏下（本地数据已被更新版本升级）静默跳过；卡已被删 / 值没变不写；任何失败只记日志。
  */
-async function rememberPlayUrl(dramaId, url) {
-  if (!dramaId || typeof url !== 'string' || !url) return;
+function rememberPlayUrl(dramaId, url) {
+  return rememberPlayUrls(new Map([[dramaId, url]]));
+}
+
+/** 一批 dramaId → 播放页一次整表写完（复查一轮可能补上几十部，逐张写就是几十次整表写）。口径同上。 */
+async function rememberPlayUrls(urlsById) {
+  const entries = [...urlsById].filter(([id, url]) => id && typeof url === 'string' && url);
+  if (!entries.length) return;
   try {
     await enqueueDramaWrite('记下平台播放页', async () => {
       const current = await getDramasInQueue();
       if (dramasLayoutAhead) return;
-      const index = current.findIndex(d => d.id === dramaId);
-      if (index === -1 || current[index].playUrl === url) return;
-      const next = current.slice();   // copy-on-write：队列缓存数组只读
-      next[index] = { ...current[index], playUrl: url };
-      await writeDramasInQueue(next);
+      const wanted = new Map(entries);
+      let next = null;   // copy-on-write：队列缓存数组只读，有改动才复制
+      current.forEach((drama, index) => {
+        const url = wanted.get(drama.id);
+        if (!url || drama.playUrl === url) return;
+        next = next || current.slice();
+        next[index] = { ...drama, playUrl: url };
+      });
+      if (next) await writeDramasInQueue(next);
     });
   } catch (e) {
     console.warn('[ShortScraping] 平台播放页回写失败（不影响跳转）:', e?.message || e);
@@ -3823,12 +3833,13 @@ async function botPlatformLink(drama, dramas = null) {
 // 推送后复查（v1.8.7）：只复查没有搜索网址、推送时没找到就只能给平台页的几家。搜索页类的平台推送时
 // 已给了搜索结果页，晚上线也搜得到；逐张复查量大，GoodShort / DramaBox 的 robots 也不允许
 const PLATFORM_RECHECK_SITES = Object.freeze(['mydrama', 'shortical', 'netshort']);
-const PLATFORM_RECHECK_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
- * 翻译闹钟每轮顺带跑：近 30 天入库、还没记下播放页的这几家 IMDb 卡再判一次，查到唯一同名就
- * rememberPlayUrl，弹窗、共享页以后直达。群里已发的卡改不了（webhook 机器人不能改消息），多维表格
- * 只追加也不回写。站点地图缓存 30 分钟，一轮每站最多取一次；NetShort 只查库内，不联网。
+ * 翻译闹钟每轮顺带跑：还没记下播放页的这几家 IMDb 卡再判一次，查到唯一同名就 rememberPlayUrl，
+ * 弹窗、共享页以后直达。群里已发的卡改不了（webhook 机器人不能改消息），多维表格只追加也不回写。
+ * 不按入库时间设窗口（v1.8.8，用户要旧卡也补记）：v1.7.3 以前入库、从没点过的旧卡也在内，过了
+ * 很久才上线的也能补上。开销有界：站点地图缓存 30 分钟，一轮每站最多取一次（MyDrama 约 22KB），
+ * 判定只在本地；NetShort 只查库内，不联网。
  * 本生命周期还没碰过表（缓存为空）就不查：冷唤醒、没东西可翻时不为它整表读一遍（v1.6.22 冷启动原则，
  * unit-csv-coldstart T1b）。整点 :45 的抓取到 :50 通常还在跑、或有新卡要翻，表多半已在缓存里。
  * 某站这一轮取数失败就跳过它剩下的卡：失败结果不进缓存，不跳会一张卡请求一次。任何失败只记日志。
@@ -3836,27 +3847,21 @@ const PLATFORM_RECHECK_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 async function recheckPlatformPlayUrls() {
   try {
     if (dramasCache === null) return;
-    const cutoff = Date.now() - PLATFORM_RECHECK_WINDOW_MS;
-    const pending = (await getDramasSnapshot()).filter(drama => {
-      if (!drama || drama.playUrl) return false;
-      if (!PLATFORM_RECHECK_SITES.includes(SiteRegistry.imdbPlatformOf(drama))) return false;
-      const at = Date.parse(drama.savedAt || drama.scrapedAt || '');
-      return Number.isFinite(at) && at >= cutoff;
-    });
+    const pending = (await getDramasSnapshot()).filter(drama =>
+      drama && !drama.playUrl && PLATFORM_RECHECK_SITES.includes(SiteRegistry.imdbPlatformOf(drama)));
     const failedSites = new Set();
-    let found = 0;
+    const found = new Map();
     for (const drama of pending) {
       const site = SiteRegistry.imdbPlatformOf(drama);
       if (failedSites.has(site)) continue;
       const link = await resolvePlatformLink(drama, { mode: 'push' });
       if (!link) continue;
       if (link.reason === 'error') failedSites.add(site);
-      if (link.reason === 'found') {
-        await rememberPlayUrl(drama.id, link.url);
-        found++;
-      }
+      if (link.reason === 'found') found.set(drama.id, link.url);
     }
-    if (found) console.log(`[ShortScraping] 复查平台播放页：新记下 ${found} 部（共查 ${pending.length} 部）`);
+    // 一轮查完再一次写：第一次跑会把从没点过的旧卡一起补上，一次几十部
+    await rememberPlayUrls(found);
+    if (found.size) console.log(`[ShortScraping] 复查平台播放页：新记下 ${found.size} 部（共查 ${pending.length} 部）`);
   } catch (e) {
     console.warn('[ShortScraping] 复查平台播放页失败（不影响抓取 / 翻译）:', e?.message || e);
   }
