@@ -5,7 +5,7 @@ import './bootstrap.cjs';
 //   DramaShorts genre.title 单值 / 无 genre 空数组
 //   NetShort labelList 清洗（trim/去空/去重）
 //   Steam appdetails 英文 genres（坏条目滤除）
-//   IMDB JSON-LD genre 单字符串归一 + 坏 JSON 块跳过
+//   IMDB JSON-LD genre 单字符串归一 + 坏 JSON 块跳过；详情页 Details 区的出品公司（v1.8.7）
 //   MyDrama 详情页 JSON-LD @graph 内 genre 英文数组（简介剥模板/trans 判定不受影响）
 //   AppleTV 详情 About 节 AboutReviewCard.genres 覆盖榜单单值 caption（详情失败则跳过该卡）
 // 每个场景重建 window/document/fetch/DOMParser 并重新 eval content.js
@@ -13,6 +13,7 @@ import './bootstrap.cjs';
 // 用法：node tests/unit-genres.mjs
 import fs from 'node:fs';
 import { scrapeContextReply } from './content-fixture.mjs';
+import { el, documentFrom } from './dom-fixture.mjs';
 
 const contentSrc = fs.readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 const registrySrc = fs.readFileSync(new URL('../src/shared/site-registry.js', import.meta.url), 'utf8');
@@ -348,6 +349,36 @@ const { saved: imdbSaved } = await runScenario({
 });
 check('I1 IMDB JSON-LD 单字符串归一成数组（坏块跳过）',
   eq(imdbSaved[0]?.genres, ['Drama']), JSON.stringify(imdbSaved[0]?.genres));
+
+// ---------- 场景 5b：IMDB 出品公司（v1.8.7）：详情页 Details 区的公司链接，dom-fixture 搭真元素树 ----------
+// 结构取自 2026-10-29 线上 tt43646843：同一家公司常出现两次（ref_=tt_dt_cmpy_1、_2），Details 区外的公司链接不算
+const imdbDetailDoc = hrefs => documentFrom(el('html', {}, [
+  el('script', { type: 'application/ld+json' }, [], JSON.stringify({ '@type': 'TVSeries', genre: ['Drama'] })),
+  el('section', { 'data-testid': 'title-details-section' }, [
+    el('li', { 'data-testid': 'title-details-companies' }, [
+      el('a', { href: '/search/title/?companies=co1016895' }, [], 'Production companies'),
+      el('ul', {}, hrefs.map(href => el('li', {}, [el('a', { href }, [], 'X')])))
+    ])
+  ]),
+  el('a', { href: '/company/co0000001/?ref_=tt_ov' }, [], 'elsewhere')
+]));
+const imdbCompaniesRun = hrefs => runScenario({
+  location: { href: IMDB_URL, hostname: 'www.imdb.com', pathname: '/search/title/', search: '?release_date=2026-01-01,&genres=Drama' },
+  subscription: { urlPattern: IMDB_URL, tags: ['IMDB', 'drama'] },
+  document: baseDocument({
+    querySelectorAll: (sel) => sel === '.ipc-metadata-list-summary-item' ? [imdbItem] : []
+  }),
+  fetch: async (url) => ({ ok: true, url, text: async () => 'IMDB-DETAIL' }),
+  domParser: class {
+    parseFromString(html) { return html === 'IMDB-DETAIL' ? imdbDetailDoc(hrefs) : baseDocument(); }
+  }
+});
+const { saved: coSaved } = await imdbCompaniesRun(['/company/co1140204/?ref_=tt_dt_cmpy_1', '/company/co1016895/?ref_=tt_dt_cmpy_2', '/company/co1016895/?ref_=tt_dt_cmpy_3']);
+const { saved: coNone } = await imdbCompaniesRun([]);
+check('I2 IMDB 详情页出品公司：Details 区的 co 编号按出现顺序去重写进 imdbCompanies，区外链接不算；没有就不写这个字段',
+  eq(coSaved[0]?.imdbCompanies, ['co1140204', 'co1016895']) && eq(coSaved[0]?.genres, ['Drama'])
+  && coNone.length === 1 && !('imdbCompanies' in coNone[0]),
+  JSON.stringify({ with: coSaved[0]?.imdbCompanies, without: coNone[0] && Object.keys(coNone[0]) }));
 
 // ---------- 场景 6：NetShort 存量回填（缺 genres 才提交，已有的零消息） ----------
 const NS_ID2 = '3064230228554887169';

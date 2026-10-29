@@ -1,12 +1,16 @@
 import './bootstrap.cjs';
 // IMDb 条目「搜平台」的后台接线（v1.7.3，真实 background.js 跑在 background-fixture 里）：
 //   H 弹窗封面菜单「搜 X」（openPlatformPage）：唯一同名 → 开播放页并记下 playUrl；多部 / 没搜到 /
-//     查找失败 → 开搜索结果页、不记；网页端没有搜索页的平台没找到 → notFound、不开页；ShortMax /
-//     NetShort 不联网只看库内同名卡；记下过的直开零请求；请求不带 cookie、固定英文；同卡连点单飞；
-//     站点地图缓存；只读护栏下照开不写。
-//   S 内容脚本入库带来的 playUrl 一律丢弃（被攻破的页面不能给卡片塞跳转地址）。
-//   B 飞书群卡片「搜 X」：推送前解析、唯一同名直达并记下、查不到退回搜索页链接或不带按钮，
+//     查找失败 → 开搜索结果页、不记；网页端没有搜索页的平台没找到 → notFound 并带平台页 fallbackUrl、
+//     后台不开页（v1.8.7，弹窗先复制片名再开）；ShortMax / NetShort 不联网只看库内同名卡；记下过的直开
+//     零请求；请求不带 cookie、固定英文；同卡连点单飞；站点地图缓存；只读护栏下照开不写；
+//     micro-drama 卡按入库时记下的出品公司认平台（v1.8.7）。
+//   S 内容脚本入库带来的 playUrl 一律丢弃（被攻破的页面不能给卡片塞跳转地址）；imdbCompanies 只给
+//     IMDb 卡留合法的 co 编号，去重命中不回补（v1.8.7）。
+//   B 飞书群卡片「搜 X」：推送前解析、唯一同名直达并记下、查不到退回搜索页链接或平台页（v1.8.7），
 //     任何失败都照常推送；重试沿用记下的地址；测试发送与真实推送同口径。
+//   R 推送后复查（v1.8.7）：翻译闹钟每轮对近 30 天、没有搜索页的平台、还没记下播放页的 IMDb 卡再判一次；
+//     本生命周期没碰过表时不查（不为它整表读一遍）。
 // 纯逻辑（解析器 / 判定 / 菜单项 / 卡片排版）见 unit-platform-link.mjs。
 // 用法：node tests/unit-platform-open.mjs
 import { background, card } from './background-fixture.mjs';
@@ -22,6 +26,7 @@ const SUBS = {
   reelshort: 'https://www.imdb.com/search/title/?companies=co1016895',
   mydrama: 'https://www.imdb.com/search/title/?companies=co1116954',
   netshort: 'https://www.imdb.com/search/title/?companies=co1104898',
+  shortical: 'https://www.imdb.com/search/title/?companies=co1167893',
   shortmax: 'https://www.imdb.com/search/title/?companies=co1065580',
   dramabox: 'https://www.imdb.com/search/title/?companies=co1028734',
   goodshort: 'https://www.imdb.com/search/title/?companies=co1045147',
@@ -149,14 +154,16 @@ async function drive(bg, steps = 12, ms = 1000) {
     && show(h.tabs()) === show(['https://my-drama.com/video/b6973579-f9b6-429c-8cc5-bad184a58236', 'https://my-drama.com/video/432a3003-9b2c-496e-9205-8ada4d497ff5'])
     && h.requests.length === 1, show({ tabs: h.tabs(), requests: h.requests.map(r => r.url) }));
   const missing = await h.open('id_tt6');
-  check('H8 MyDrama 没找到：回 notFound（带平台名 / 片名 / 原因），不开页、不写',
+  check('H8 MyDrama 没找到：回 notFound（带平台名 / 片名 / 原因 / 平台页 fallbackUrl），后台不开页、不写',
     missing?.success === false && missing.notFound === true && missing.name === 'MyDrama' && missing.title === 'Club of Desire'
-    && missing.reason === 'none' && h.tabs().length === 2 && h.stored('id_tt6') === undefined, show(missing));
+    && missing.reason === 'none' && missing.fallbackUrl === 'https://my-drama.com/' && h.tabs().length === 2 && h.stored('id_tt6') === undefined,
+    show(missing));
 }
 {
   const h = await makeBg({ dramas: [imdbCard('tt7', 'mydrama', 'His Dark Kiss')], pages: { [MD_SITEMAP]: 503 } });
   const resp = await h.open('id_tt7');
-  check('H8b MyDrama 站点地图取不到：notFound，原因 error', resp?.notFound === true && resp.reason === 'error' && h.tabs().length === 0, show(resp));
+  check('H8b MyDrama 站点地图取不到：notFound，原因 error，照样给平台页', resp?.notFound === true && resp.reason === 'error'
+    && resp.fallbackUrl === 'https://my-drama.com/' && h.tabs().length === 0, show(resp));
 }
 {
   const twin = card('ns1', { source: 'netshort', title: 'Racing Back to Your Heart', sourceListUrl: SUBS.nsList, url: 'https://netshort.com/episode/racing-back-to-your-heart-2098290708771815426' });
@@ -168,8 +175,10 @@ async function drive(bg, steps = 12, ms = 1000) {
   const amb = await h.open('id_tt10');
   check('H9 NetShort：库里平台自己抓到的唯一同名卡 → 直达并记下',
     hit?.kind === 'play' && h.tabs()[0] === twin.url && h.stored('id_tt8') === twin.url, show({ hit, tabs: h.tabs() }));
-  check('H9b NetShort：没有同名卡 → notFound(none)；两张同名 → notFound(ambiguous)；全程零请求',
-    miss?.notFound && miss.reason === 'none' && amb?.notFound && amb.reason === 'ambiguous' && h.requests.length === 0 && h.tabs().length === 1,
+  check('H9b NetShort：没有同名卡 → notFound(none)；两张同名 → notFound(ambiguous)；都给 NetShort 搜索页；全程零请求',
+    miss?.notFound && miss.reason === 'none' && amb?.notFound && amb.reason === 'ambiguous'
+    && miss.fallbackUrl === 'https://netshort.com/search' && amb.fallbackUrl === 'https://netshort.com/search'
+    && h.requests.length === 0 && h.tabs().length === 1,
     show({ miss, amb, requests: h.requests.length }));
 }
 {
@@ -229,6 +238,18 @@ async function drive(bg, steps = 12, ms = 1000) {
     unknown?.success === false && /未找到/.test(unknown.error) && micro?.success === false && /不属于/.test(micro.error)
     && wave?.success === false && h.tabs().length === 0 && h.requests.length === 0, show({ unknown, micro, wave }));
 }
+{
+  const title = 'Silicon God Strikes Back';
+  const h = await makeBg({
+    dramas: [imdbCard('tt17b', 'micro', title, { imdbCompanies: ['co1140204', 'co1016895'] }), imdbCard('tt17c', 'micro', 'Z', { imdbCompanies: ['co1143620'] })],
+    pages: { [rsSearch(title)]: rsPage([RS_BOOK]) }
+  });
+  const known = await h.open('id_tt17b');
+  const other = await h.open('id_tt17c');
+  check('H14b micro-drama 卡记下了出品公司：认得的（ReelShort）照常去平台找；不认得的（aTwist）仍不属于已知平台',
+    known?.success && known.kind === 'play' && show(h.tabs()) === show([RS_PLAY]) && other?.success === false && /不属于/.test(other.error),
+    show({ known, other, tabs: h.tabs() }));
+}
 
 // ---------- S 内容脚本入库带来的 playUrl 丢弃 ----------
 {
@@ -238,6 +259,21 @@ async function drive(bg, steps = 12, ms = 1000) {
   const resp = await h.bg.send({ action: 'saveDrama', drama: planted }, sender);
   const saved = h.bg.dramas().find(d => d.itemId === 'tt19');
   check('S1 入库时丢掉调用方带来的 playUrl（只有后台查到唯一同名剧才写）', resp?.success && saved && !('playUrl' in saved), show({ resp, saved }));
+}
+{
+  const existing = imdbCard('tt19c', 'micro', 'Old Card');
+  const h = await makeBg({ dramas: [existing] });
+  const sender = { id: 'fixture', url: SUBS.micro, tab: { id: 9, url: SUBS.micro } };
+  const many = Array.from({ length: 12 }, (_, i) => `co${1000 + i}`);
+  const junk = ['co1016895', 'co1016895', 'constructor', 5, 'co12x', ' co1', ...many];
+  await h.bg.send({ action: 'saveDrama', drama: { ...imdbCard('tt19b', 'micro', 'New Card'), status: 'new', imdbCompanies: junk } }, sender);
+  await h.bg.send({ action: 'saveDrama', drama: { ...card('ns19', { source: 'netshort', title: 'NS', sourceListUrl: SUBS.nsList }), imdbCompanies: ['co1016895'] } }, sender);
+  await h.bg.send({ action: 'saveDrama', drama: { ...existing, imdbCompanies: ['co1016895'] } }, sender);
+  const byItem = id => h.bg.dramas().find(d => d.itemId === id);
+  check('S2 imdbCompanies：IMDb 新卡只留合法 co 编号（去重、最多 10 个）；非 IMDb 卡丢掉；已有的卡不回补',
+    show(byItem('tt19b')?.imdbCompanies) === show(['co1016895', ...many.slice(0, 9)])
+    && byItem('ns19') && !('imdbCompanies' in byItem('ns19')) && !('imdbCompanies' in byItem('tt19c')),
+    show({ new: byItem('tt19b')?.imdbCompanies, ns: byItem('ns19'), old: byItem('tt19c') }));
 }
 
 // ---------- B 飞书群卡片「搜 X」 ----------
@@ -272,8 +308,9 @@ async function drive(bg, steps = 12, ms = 1000) {
   const [gsCard, mdCard, nfCard] = h.botPosts;
   check('B2 GoodShort（用户选了推送时也搜）：去搜了，没有同名 → 按钮给搜索结果页',
     h.requests.some(r => r.url === gsUrl) && show(buttonsOf(gsCard)[0]) === show({ text: '搜 GoodShort', url: gsUrl }), show(buttonsOf(gsCard)));
-  check('B3 MyDrama 站点地图挂住：6 秒后放弃，卡照常推出、不带「搜」按钮',
-    pushed.every(Boolean) && show(buttonsOf(mdCard).map(b => b.text)) === show(['去瞅瞅']), show({ pushed, buttons: buttonsOf(mdCard) }));
+  check('B3 MyDrama 站点地图挂住：6 秒后放弃，卡照常推出，「搜 MyDrama」链到 MyDrama 首页（v1.8.7 前不带按钮）',
+    pushed.every(Boolean) && show(buttonsOf(mdCard)) === show([{ text: '搜 MyDrama', url: 'https://my-drama.com/' }, { text: '去瞅瞅', url: 'https://www.imdb.com/title/tt22/' }]),
+    show({ pushed, buttons: buttonsOf(mdCard) }));
   check('B4 非 IMDb 卡：不查平台、卡片只有「去瞅瞅」',
     show(buttonsOf(nfCard).map(b => b.text)) === show(['去瞅瞅']) && h.requests.every(r => !/netflix/.test(r.url)) && h.requests.length === 2,
     show({ buttons: buttonsOf(nfCard), requests: h.requests.map(r => r.url) }));
@@ -299,6 +336,75 @@ async function drive(bg, steps = 12, ms = 1000) {
   const resp = await sent;
   check('B6 设置页「发送机器人测试」与真实推送同口径：最新一条是 IMDb 平台卡就带「搜 X」',
     resp?.success && buttonsOf(h.botPosts[0])[0]?.text === '搜 ReelShort', show({ resp, buttons: buttonsOf(h.botPosts[0]) }));
+}
+
+{
+  const SC_SITEMAP = 'https://shortical.com/sitemaps/series.xml';
+  const h = await makeBg({
+    dramas: [imdbCard('tt60', 'netshort', 'Nowhere'), imdbCard('tt61', 'shortical', 'Nowhere Either')],
+    pages: { [SC_SITEMAP]: '<urlset><url><loc>https://shortical.com/drama/against-all-odds-175</loc></url></urlset>' }
+  });
+  const byId = id => h.bg.dramas().find(d => d.id === id);
+  const ns = await h.bg.context.botPlatformLink(byId('id_tt60'));
+  const sc = await h.bg.context.botPlatformLink(byId('id_tt61'));
+  check('B7 NetShort / Shortical 没找到：「搜 X」按钮链到平台页（NetShort 搜索页、Shortical 全部剧集）',
+    show(ns) === show({ name: 'NetShort', url: 'https://netshort.com/search' }) && show(sc) === show({ name: 'Shortical', url: 'https://shortical.com/browse' }),
+    show({ ns, sc }));
+}
+
+// ---------- R 推送后复查（夹具时钟固定在 2026-09-05T00:00Z） ----------
+{
+  const recent = '2026-09-04T00:00:00.000Z';
+  const old = '2026-07-20T00:00:00.000Z';   // 47 天前
+  const twin = card('ns30', { source: 'netshort', title: 'Racing Back to Your Heart', sourceListUrl: SUBS.nsList, url: 'https://netshort.com/episode/racing-back-to-your-heart-2098290708771815426' });
+  const h = await makeBg({
+    dramas: [
+      imdbCard('tt30', 'mydrama', 'His Dark Kiss', { savedAt: recent }),
+      imdbCard('tt31', 'mydrama', 'Not Online Yet', { savedAt: recent }),
+      imdbCard('tt32', 'mydrama', 'Claimed by the Crown', { savedAt: old, scrapedAt: old }),
+      imdbCard('tt33', 'mydrama', 'Club of Desire', { savedAt: recent, playUrl: 'https://my-drama.com/video/00000000-0000-0000-0000-000000000000' }),
+      imdbCard('tt34', 'reelshort', 'Silicon God Strikes Back', { savedAt: recent }),
+      imdbCard('tt35', 'netshort', 'Racing Back to Your Heart', { savedAt: recent }),
+      twin
+    ],
+    pages: { [MD_SITEMAP]: MD_XML }
+  });
+  await h.bg.context.recheckPlatformPlayUrls();
+  await h.bg.flush();
+  check('R1 复查：近 30 天、没记下播放页的 MyDrama / NetShort 卡查到就记下；站点地图只取一次；搜索页平台、超过 30 天、已记下的不查',
+    h.stored('id_tt30') === 'https://my-drama.com/video/b6973579-f9b6-429c-8cc5-bad184a58236' && h.stored('id_tt35') === twin.url
+    && h.stored('id_tt31') === undefined && h.stored('id_tt32') === undefined
+    && show(h.requests.map(r => r.url)) === show([MD_SITEMAP]) && h.tabs().length === 0,
+    show({ stored: ['id_tt30', 'id_tt31', 'id_tt32', 'id_tt35'].map(h.stored), requests: h.requests.map(r => r.url) }));
+}
+{
+  const recent = '2026-09-04T00:00:00.000Z';
+  const SC_SITEMAP = 'https://shortical.com/sitemaps/series.xml';
+  const h = await makeBg({
+    dramas: [imdbCard('tt40', 'mydrama', 'A', { savedAt: recent }), imdbCard('tt41', 'mydrama', 'B', { savedAt: recent }),
+      imdbCard('tt42', 'shortical', 'C', { savedAt: recent })],
+    pages: { [MD_SITEMAP]: 503, [SC_SITEMAP]: 503 }
+  });
+  await h.bg.context.recheckPlatformPlayUrls();
+  check('R2 复查：某站这一轮取数失败就跳过它剩下的卡（MyDrama 两张只请求一次），别的站照查',
+    show(h.requests.map(r => r.url)) === show([MD_SITEMAP, SC_SITEMAP]), show(h.requests.map(r => r.url)));
+}
+{
+  const h = await makeBg({ dramas: [imdbCard('tt50', 'mydrama', 'His Dark Kiss', { savedAt: '2026-09-04T00:00:00.000Z' })], pages: { [MD_SITEMAP]: MD_XML } });
+  await h.bg.listeners.alarm({ name: 'translate-task' });
+  await h.bg.flush();
+  check('R3 翻译闹钟触发后顺带复查', h.stored('id_tt50') === 'https://my-drama.com/video/b6973579-f9b6-429c-8cc5-bad184a58236',
+    show({ stored: h.stored('id_tt50'), requests: h.requests.map(r => r.url) }));
+}
+
+{
+  const h = await makeBg({ dramas: [imdbCard('tt51', 'mydrama', 'His Dark Kiss', { savedAt: '2026-09-04T00:00:00.000Z' })], pages: { [MD_SITEMAP]: MD_XML } });
+  h.bg.run('dramasCache = null');   // 模拟冷唤醒：本生命周期还没碰过表
+  const readsBefore = h.bg.storage.dramasReadCount();
+  await h.bg.context.recheckPlatformPlayUrls();
+  check('R4 本生命周期没碰过表（缓存为空）：不复查，不为它整表读一遍、零请求（v1.6.22 冷启动原则）',
+    h.bg.storage.dramasReadCount() === readsBefore && h.requests.length === 0 && h.stored('id_tt51') === undefined,
+    show({ reads: h.bg.storage.dramasReadCount() - readsBefore, requests: h.requests.length }));
 }
 
 check('Z 全程无未处理的 Promise 拒绝', unhandled === 0, `unhandled=${unhandled}`);

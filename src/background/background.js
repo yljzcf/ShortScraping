@@ -770,6 +770,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       await performScrape();
     } else if (alarm.name === 'translate-task') {
       await performTranslate();
+      await recheckPlatformPlayUrls();
     }
   } finally {
     await rescheduleCronTask(alarm.name).catch(e =>
@@ -2672,9 +2673,12 @@ function saveDramaRecord(drama) {
     // 多维表格增量导出按 savedAt || scrapedAt 比水位线（Lark.exportStamp）。scrapedAt 是内容
     // 脚本提取列表时定的，要等详情补抓完才入库，复制恰好落在这几秒里的卡会被水位线永久挡掉。
     // 调用方传来的 savedAt 一律覆盖（内容脚本不写该字段，不信任外来值）。playUrl 同理丢弃：它只由后台
-    // 在平台上查到唯一同名剧后写（rememberPlayUrl），被攻破的页面不能借入库给卡片塞跳转地址
+    // 在平台上查到唯一同名剧后写（rememberPlayUrl），被攻破的页面不能借入库给卡片塞跳转地址。
+    // imdbCompanies（v1.8.7，IMDb 详情页上的出品公司）只给 IMDb 卡留，且只留合法的 co 编号
     const savedAt = new Date().toISOString();
-    const { playUrl: _untrustedPlayUrl, ...fields } = drama;
+    const { playUrl: _untrustedPlayUrl, imdbCompanies, ...fields } = drama;
+    const companies = drama.source === 'imdb' ? SiteRegistry.imdbCompanyIds(imdbCompanies) : [];
+    if (companies.length) fields.imdbCompanies = companies;
     await writeDramasInQueue([{ ...fields, savedAt }, ...existing], { lastScrape: savedAt });
     return true;
   });
@@ -3656,6 +3660,8 @@ async function handleLarkBotTestSend(draftConfig) {
 // 联网范围（2026-09-28 用户定）：弹窗点击与推送都查；GoodShort / DramaBox 的 robots.txt 不允许程序访问
 // 搜索页，用户知情后选择推送时也自动查（量约每天几次到十几次，被拦时退回搜索页链接）。
 // ShortMax（搜一次约 15 秒且常搜不到）与 NetShort（网页端只有加密接口）从不联网，只查库内同名卡。
+// 没有搜索网址的 MyDrama / Shortical / NetShort 没找到时退到平台页（v1.8.7，SiteRegistry.platformLandingUrl），
+// 翻译闹钟每轮还对近 30 天的这几家卡复查一次（recheckPlatformPlayUrls）：平台常常晚几天才上线。
 
 // 单次取数期限（连正文）：弹窗里用户等着看结果，给 12 秒；推送链路在翻译线里是 await 的，
 // 查不出也要尽快把卡推出去，6 秒即退回搜索页链接
@@ -3702,9 +3708,10 @@ function platformCandidates(site, title, mode) {
 }
 
 /**
- * 一部 IMDb 条目在其平台上的去处：{ site, name, kind: 'play' | 'search' | 'none', url, reason }。
- * 平台未知（非 IMDb、micro-drama 这类非平台榜、DramaWave）返回 null。不抛错，按规则降级：
- * 唯一同名 → play；多部同名 / 没搜到 / 查找失败 → 有搜索页给 search，没有给 none。
+ * 一部 IMDb 条目在其平台上的去处：{ site, name, kind: 'play' | 'search' | 'browse' | 'none', url, reason }。
+ * 平台未知（非 IMDb、出品公司都不认得、DramaWave）返回 null。不抛错，按规则降级：
+ * 唯一同名 → play；多部同名 / 没搜到 / 查找失败 → 有搜索页给 search，没有搜索页给平台页 browse
+ * （v1.8.7），片名为空又没有平台页才是 none。
  * reason：play 为 'stored'（条目上记下的）| 'found'（本次查到，调用方负责 rememberPlayUrl）；
  * 其余为 'ambiguous' | 'none' | 'error'，弹窗据此给提示。
  */
@@ -3729,8 +3736,10 @@ async function resolvePlatformLink(drama, { mode = 'click' } = {}) {
   if (verdict.kind === 'play') return { site, name, kind: 'play', url: verdict.url, reason: 'found' };
 
   const searchUrl = SiteRegistry.platformSearchUrl(site, drama.title);
-  return searchUrl
-    ? { site, name, kind: 'search', url: searchUrl, reason: verdict.kind }
+  if (searchUrl) return { site, name, kind: 'search', url: searchUrl, reason: verdict.kind };
+  const browseUrl = SiteRegistry.platformBrowseUrl(site);
+  return browseUrl
+    ? { site, name, kind: 'browse', url: browseUrl, reason: verdict.kind }
     : { site, name, kind: 'none', url: null, reason: verdict.kind };
 }
 
@@ -3775,8 +3784,10 @@ async function openPlatformPageOnce(dramaId) {
   try {
     const link = await resolvePlatformLink(drama, { mode: 'click' });
     if (!link) return { success: false, error: '这张卡片不属于已知的短剧平台' };
-    if (!link.url) {
-      return { success: false, notFound: true, name: link.name, title: drama.title, reason: link.reason };
+    // 没有搜索页的平台没找到（v1.8.7）：平台页交给弹窗开——弹窗要先复制片名，后台这边一开页弹窗就失焦关了
+    if (!link.url || link.kind === 'browse') {
+      return { success: false, notFound: true, name: link.name, title: drama.title, reason: link.reason,
+        fallbackUrl: link.kind === 'browse' ? link.url : null };
     }
     await chrome.tabs.create({ url: link.url });
     // 先开页再回写，用户不用等这一次整表写
@@ -3789,8 +3800,9 @@ async function openPlatformPageOnce(dramaId) {
 
 /**
  * 飞书卡片「搜 X」按钮（推送时定）：唯一同名 → 播放页，多部 / 没搜到 → 搜索结果页，网页端没有
- * 搜索页的平台没找到时不加按钮。按库里那条的最新状态解析（入库消息带来的对象不可信，也可能缺刚
- * 回写的 playUrl）。任何异常都吞掉返回 null——按钮是锦上添花，绝不能影响推送。
+ * 搜索页的平台没找到时链到平台页（v1.8.7；以前不加按钮，平台晚几天上线就再也点不过去）。
+ * 按库里那条的最新状态解析（入库消息带来的对象不可信，也可能缺刚回写的 playUrl）。
+ * 任何异常都吞掉返回 null——按钮是锦上添花，绝不能影响推送。
  */
 async function botPlatformLink(drama, dramas = null) {
   try {
@@ -3805,6 +3817,48 @@ async function botPlatformLink(drama, dramas = null) {
   } catch (e) {
     console.warn('[ShortScraping] 飞书「搜平台」按钮解析失败（照常推送）:', e?.message || e);
     return null;
+  }
+}
+
+// 推送后复查（v1.8.7）：只复查没有搜索网址、推送时没找到就只能给平台页的几家。搜索页类的平台推送时
+// 已给了搜索结果页，晚上线也搜得到；逐张复查量大，GoodShort / DramaBox 的 robots 也不允许
+const PLATFORM_RECHECK_SITES = Object.freeze(['mydrama', 'shortical', 'netshort']);
+const PLATFORM_RECHECK_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * 翻译闹钟每轮顺带跑：近 30 天入库、还没记下播放页的这几家 IMDb 卡再判一次，查到唯一同名就
+ * rememberPlayUrl，弹窗、共享页以后直达。群里已发的卡改不了（webhook 机器人不能改消息），多维表格
+ * 只追加也不回写。站点地图缓存 30 分钟，一轮每站最多取一次；NetShort 只查库内，不联网。
+ * 本生命周期还没碰过表（缓存为空）就不查：冷唤醒、没东西可翻时不为它整表读一遍（v1.6.22 冷启动原则，
+ * unit-csv-coldstart T1b）。整点 :45 的抓取到 :50 通常还在跑、或有新卡要翻，表多半已在缓存里。
+ * 某站这一轮取数失败就跳过它剩下的卡：失败结果不进缓存，不跳会一张卡请求一次。任何失败只记日志。
+ */
+async function recheckPlatformPlayUrls() {
+  try {
+    if (dramasCache === null) return;
+    const cutoff = Date.now() - PLATFORM_RECHECK_WINDOW_MS;
+    const pending = (await getDramasSnapshot()).filter(drama => {
+      if (!drama || drama.playUrl) return false;
+      if (!PLATFORM_RECHECK_SITES.includes(SiteRegistry.imdbPlatformOf(drama))) return false;
+      const at = Date.parse(drama.savedAt || drama.scrapedAt || '');
+      return Number.isFinite(at) && at >= cutoff;
+    });
+    const failedSites = new Set();
+    let found = 0;
+    for (const drama of pending) {
+      const site = SiteRegistry.imdbPlatformOf(drama);
+      if (failedSites.has(site)) continue;
+      const link = await resolvePlatformLink(drama, { mode: 'push' });
+      if (!link) continue;
+      if (link.reason === 'error') failedSites.add(site);
+      if (link.reason === 'found') {
+        await rememberPlayUrl(drama.id, link.url);
+        found++;
+      }
+    }
+    if (found) console.log(`[ShortScraping] 复查平台播放页：新记下 ${found} 部（共查 ${pending.length} 部）`);
+  } catch (e) {
+    console.warn('[ShortScraping] 复查平台播放页失败（不影响抓取 / 翻译）:', e?.message || e);
   }
 }
 

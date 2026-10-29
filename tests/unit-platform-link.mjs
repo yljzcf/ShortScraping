@@ -1,5 +1,5 @@
 import './bootstrap.cjs';
-// IMDb 条目「搜平台」（v1.7.3）的纯逻辑：平台反查 / 搜索页地址 / 地址校验（site-registry.js）、
+// IMDb 条目「搜平台」（v1.7.3）的纯逻辑：平台反查（含 v1.8.7 按出品公司）/ 搜索页与平台页地址 / 地址校验（site-registry.js）、
 // 片名比对与唯一同名判定、各站解析器（platform-link.js）、封面菜单项（timeline-render.js）、
 // 飞书卡片「搜 X」按钮与拒收重发（lark.js）。后台的查找 / 开页 / 推送接线见 unit-platform-open.mjs。
 // 用法：node tests/unit-platform-link.mjs
@@ -62,6 +62,36 @@ const imdb = (company, extra = {}) => ({
   check('R7 网页端没有搜索页的平台与空片名给 null',
     ['mydrama', 'shortical', 'netshort', 'imdb', 'constructor'].every(site => SiteRegistry.platformSearchUrl(site, 'x') === null)
     && SiteRegistry.platformSearchUrl('reelshort', '   ') === null);
+  check('R7b 平台页（v1.8.7）：只给没有搜索页的三家，且都是该平台自己的 https 页面',
+    SiteRegistry.platformBrowseUrl('mydrama') === 'https://my-drama.com/'
+    && SiteRegistry.platformBrowseUrl('shortical') === 'https://shortical.com/browse'
+    && SiteRegistry.platformBrowseUrl('netshort') === 'https://netshort.com/search'
+    && ['reelshort', 'dramabox', 'imdb', 'constructor', '__proto__'].every(site => SiteRegistry.platformBrowseUrl(site) === null)
+    && ['mydrama', 'shortical', 'netshort'].every(site => SiteRegistry.isPlatformUrl(site, SiteRegistry.platformBrowseUrl(site))));
+  check('R7c 落地页：有搜索页给搜索页，没有给平台页（空片名也给），两样都没有给 null',
+    SiteRegistry.platformLandingUrl('reelshort', 'x y') === SiteRegistry.platformSearchUrl('reelshort', 'x y')
+    && SiteRegistry.platformLandingUrl('mydrama', 'x') === 'https://my-drama.com/'
+    && SiteRegistry.platformLandingUrl('netshort', '') === 'https://netshort.com/search'
+    && SiteRegistry.platformLandingUrl('reelshort', '  ') === null
+    && SiteRegistry.platformLandingUrl('imdb', 'x') === null);
+  const micro = extra => imdb('x', { sourceListUrl: 'https://www.imdb.com/search/title/?interests=in0000310', ...extra });
+  check('R9 出品公司清洗（v1.8.7）：只留 co 编号、去重、最多 10 个；不是数组给 []',
+    same(SiteRegistry.imdbCompanyIds(['co1', 'co1', 'constructor', 5, null, 'co12x', ' co2', 'co2']), ['co1', 'co2'])
+    && SiteRegistry.imdbCompanyIds(Array.from({ length: 15 }, (_, i) => `co${i}`)).length === 10
+    && same(SiteRegistry.imdbCompanyIds('co1016895'), []) && same(SiteRegistry.imdbCompanyIds(undefined), []),
+    JSON.stringify(SiteRegistry.imdbCompanyIds(['co1', 'co1', 'constructor', 5, null, 'co12x', ' co2', 'co2'])));
+  check('R10 micro-drama 卡按记下的出品公司认平台：取第一个认得的；都不认得、DramaWave、原型链键给 null',
+    SiteRegistry.imdbPlatformOf(micro({ imdbCompanies: ['co1140204', 'co1016895'] })) === 'reelshort'
+    && SiteRegistry.imdbPlatformOf(micro({ imdbCompanies: ['co1028734', 'co1116954'] })) === 'dramabox'
+    && SiteRegistry.imdbPlatformOf(micro({ imdbCompanies: ['co1143620'] })) === null
+    && SiteRegistry.imdbPlatformOf(micro({ imdbCompanies: ['co1124838'] })) === null
+    && SiteRegistry.imdbPlatformOf(micro({ imdbCompanies: ['constructor', '__proto__'] })) === null
+    && SiteRegistry.imdbPlatformOf(micro({ imdbCompanies: 'co1016895' })) === null);
+  check('R11 订阅 URL 认得的优先于记下的出品公司；没有 sourceListUrl 也能按出品公司认；非 IMDb 卡不认',
+    SiteRegistry.imdbPlatformOf(imdb('co1116954', { imdbCompanies: ['co1016895'] })) === 'mydrama'
+    && SiteRegistry.imdbPlatformOf(imdb('co1124838', { imdbCompanies: ['co1016895'] })) === 'reelshort'
+    && SiteRegistry.imdbPlatformOf(imdb('x', { sourceListUrl: undefined, imdbCompanies: ['co1016895'] })) === 'reelshort'
+    && SiteRegistry.imdbPlatformOf(imdb('x', { source: 'reelshort', sourceListUrl: undefined, imdbCompanies: ['co1016895'] })) === null);
   check('R8 搜索词去掉末尾括号注释（全角 / 方括号同样），去完为空用原片名',
     SiteRegistry.platformSearchQuery('A Marriage on Fire (Un Matrimonio al Rojo Vivo)') === 'A Marriage on Fire'
     && SiteRegistry.platformSearchQuery('标题（配音版）') === '标题'
@@ -234,7 +264,7 @@ const nextData = props => `<html><body><script id="__NEXT_DATA__" type="applicat
     same(TimelineRender.posterMenuItems(rs, popupOpts), [
       { label: 'IMDB 影片页', url: 'https://www.imdb.com/title/tt1/' }, { label: '搜 ReelShort', platform: true }
     ]), JSON.stringify(TimelineRender.posterMenuItems(rs, popupOpts)));
-  check('M2 弹窗：MyDrama / NetShort 也给菜单（没找到时弹窗提示）',
+  check('M2 弹窗：MyDrama / NetShort 也给菜单（没找到时弹窗复制片名、开平台页）',
     TimelineRender.posterMenuItems(imdb('co1116954'), popupOpts)?.[1]?.label === '搜 MyDrama'
     && TimelineRender.posterMenuItems(imdb('co1104898'), popupOpts)?.[1]?.platform === true);
   check('M3 共享页：没记下播放页时「搜 X」直接开平台搜索页',
@@ -242,8 +272,9 @@ const nextData = props => `<html><body><script id="__NEXT_DATA__" type="applicat
   check('M4 共享页：记下过播放页就直达；记下的地址不属于该平台则不用',
     TimelineRender.posterMenuItems(imdb('co1016895', { playUrl: 'https://www.reelshort.com/episodes/episode-1-x-1-2' }), shareOpts)?.[1]?.url === 'https://www.reelshort.com/episodes/episode-1-x-1-2'
     && TimelineRender.posterMenuItems(imdb('co1016895', { playUrl: 'https://evil.example/x' }), shareOpts)?.[1]?.url.startsWith('https://www.reelshort.com/search?'));
-  check('M5 共享页：无搜索页平台没记下播放页 → 不弹菜单；记下了 → 弹',
-    TimelineRender.posterMenuItems(imdb('co1116954'), shareOpts) === null
+  check('M5 共享页：无搜索页平台没记下播放页 → 开平台页（v1.8.7 前不弹菜单）；记下了 → 直达',
+    same(TimelineRender.posterMenuItems(imdb('co1116954'), shareOpts)?.[1], { label: '搜 MyDrama', url: 'https://my-drama.com/' })
+    && TimelineRender.posterMenuItems(imdb('co1167893'), shareOpts)?.[1]?.url === 'https://shortical.com/browse'
     && TimelineRender.posterMenuItems(imdb('co1116954', { playUrl: 'https://my-drama.com/video/b6973579-f9b6-429c-8cc5-bad184a58236' }), shareOpts)?.[1]?.url === 'https://my-drama.com/video/b6973579-f9b6-429c-8cc5-bad184a58236');
   check('M6 平台未知（micro-drama / DramaWave）、非 IMDb 卡、缺原站链接、没注入 onOpenUrl → 不弹菜单',
     TimelineRender.posterMenuItems(imdb('x', { sourceListUrl: 'https://www.imdb.com/search/title/?interests=in0000310' }), popupOpts) === null

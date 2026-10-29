@@ -3640,6 +3640,10 @@
       const genres = extractJsonLdGenres(doc);
       if (genres.length) drama.genres = genres;
 
+      // 出品公司（v1.8.7）：micro-drama 这类不分平台的榜靠它认平台，卡片才有「搜 X」
+      const companies = extractImdbCompanies(doc);
+      if (companies.length) drama.imdbCompanies = companies;
+
       // 不从详情页补封面：详情页可能返回剧照、视频缩略图或推荐图，容易误当成封面。
       // 封面只信任搜索结果列表中的海报容器；没有则使用默认占位图。
 
@@ -3649,6 +3653,19 @@
     }
 
     return drama;
+  }
+
+  /**
+   * IMDb 详情页「Details」里的出品公司编号（co…），按出现顺序去重。同一家常出现两次
+   * （/company/co1016895/?ref_=tt_dt_cmpy_1、_2）。后台入库时还会再清洗一次。
+   */
+  function extractImdbCompanies(doc) {
+    const ids = [];
+    for (const link of doc.querySelectorAll('[data-testid="title-details-companies"] a[href*="/company/co"]')) {
+      const id = (String(link.getAttribute('href') || '').match(/\/company\/(co\d+)/) || [])[1];
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    return ids;
   }
 
   /**

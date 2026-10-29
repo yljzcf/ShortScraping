@@ -63,10 +63,11 @@
   }
 
   /**
-   * 封面菜单的菜单项（v1.7.3）：只给已知平台的 IMDb 卡——IMDb 没有播放页，平台榜按出品公司能反查
+   * 封面菜单的菜单项（v1.7.3）：只给已知平台的 IMDb 卡——IMDb 没有播放页，按出品公司能反查
    * 平台（SiteRegistry.imdbPlatformOf）。返回 null＝不弹菜单，封面照旧直接打开原站。
-   * - 弹窗（传了 onOpenPlatform）：「搜 X」交给后台查，唯一同名直达播放页，多部 / 没搜到开搜索结果页；
-   * - 共享页（没有扩展后台，查不了）：「搜 X」打开条目上记下的播放页，没有就开平台搜索页，两者都没有不弹。
+   * - 弹窗（传了 onOpenPlatform）：「搜 X」交给后台查，唯一同名直达播放页，多部 / 没搜到开搜索结果页
+   *   （没有搜索页的平台开平台页，v1.8.7）；
+   * - 共享页（没有扩展后台，查不了）：「搜 X」打开条目上记下的播放页，没有就开平台搜索页或平台页，都没有不弹。
    * 每项为 { label, url }（直接打开）或 { label, platform: true }（交给 onOpenPlatform）。
    */
   function posterMenuItems(drama, opts) {
@@ -82,7 +83,7 @@
       platformItem = { label, platform: true };
     } else {
       const stored = typeof drama.playUrl === 'string' && registry.isPlatformUrl(site, drama.playUrl) ? drama.playUrl : null;
-      const url = stored || registry.platformSearchUrl(site, drama.title);
+      const url = stored || registry.platformLandingUrl(site, drama.title);
       if (url) platformItem = { label, url };
     }
     if (!platformItem) return null;

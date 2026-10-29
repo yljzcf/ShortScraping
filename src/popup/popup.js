@@ -1210,8 +1210,9 @@
   /**
    * IMDb 卡封面菜单「搜 X」（v1.7.3）：查找与开标签页都在后台（openPlatformPage）——弹窗一失焦就关，
    * 自己开页或等结果都靠不住。菜单项的「⏳」与收起由渲染模块管（它等这里返回的 promise）。
-   * 没找到只会发生在网页端没有搜索页的 MyDrama / Shortical / NetShort：提示并复制片名，方便到 App
-   * 或站内手动搜。同一张卡查找期间再点，等同一次结果、不重复发消息。
+   * 没找到只会发生在网页端没有搜索页的 MyDrama / Shortical / NetShort：复制片名，再开后台给的平台页
+   * （fallbackUrl，v1.8.7），到站内或 App 粘贴就能搜；开页弹窗随之关闭，所以先复制后开页。拿不到
+   * 平台页（片名为空）只提示。同一张卡查找期间再点，等同一次结果、不重复发消息。
    */
   const platformSearchInFlight = new Map();   // dramaId → promise
 
@@ -1233,6 +1234,12 @@
             } catch (e) {
               // 复制失败不影响提示：片名直接写进提示里
             }
+          }
+          const fallbackUrl = typeof response.fallbackUrl === 'string' && /^https?:\/\//i.test(response.fallbackUrl)
+            ? response.fallbackUrl : null;
+          if (fallbackUrl) {
+            await chrome.tabs.create({ url: fallbackUrl });
+            return;
           }
           const tail = copied ? '，已复制片名' : (response.title ? `（片名：${response.title}）` : '');
           showToast(`${what}${tail}`, { type: 'info', duration: 4000 });

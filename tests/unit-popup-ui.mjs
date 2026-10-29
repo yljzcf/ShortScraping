@@ -20,6 +20,8 @@ import './bootstrap.cjs';
 //         输入法选字回车不提交、重开弹窗直接恢复结果态、改了一半的词先退回再关闭、onChanged 跟上、零结果文案
 //   P 组：卡片纸飞机（v1.8.4）——只有配了多维表格工作流 webhook（http/https）才把推送回调交给卡片渲染；
 //         设置页清空 / 填上 webhook 时跟着重画，判定没变不重画
+//   O 组：IMDb 卡「搜 X」没找到（v1.8.7）——后台给了平台页就先复制片名、再开平台页、不弹提示；
+//         没给（或不是 http(s)）只提示并复制片名
 // 用法：node tests/unit-popup-ui.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -71,7 +73,7 @@ const IMDB = 'https://www.imdb.com/chart/tvmeter/';
 const DRAMABOXDB = 'https://www.dramaboxdb.com/ranking';
 const REELSHORT = 'https://www.reelshort.com/';
 
-async function popupFixture({ stored = {} } = {}) {
+async function popupFixture({ stored = {}, reply = null } = {}) {
   const byId = {};
   const misc = {};
   const doc = {
@@ -86,11 +88,13 @@ async function popupFixture({ stored = {} } = {}) {
   const messages = [];
   const pendingScrapes = [];
   const tabsCreated = [];
+  const events = [];   // 剪贴板写入与开标签页的先后
   const storageGets = [];
   const chrome = {
     runtime: {
       sendMessage(message) {
         messages.push(message);
+        if (reply && message.action in reply) return Promise.resolve(reply[message.action](message));
         if (message.action === 'triggerScrape') return new Promise(resolve => pendingScrapes.push(resolve));
         if (message.action === 'getTranslateState') return Promise.resolve({ running: false });
         return Promise.resolve(undefined);
@@ -110,7 +114,7 @@ async function popupFixture({ stored = {} } = {}) {
       },
       onChanged: { addListener(fn) { onChanged = fn; } }
     },
-    tabs: { create(opts) { tabsCreated.push(opts.url); } }
+    tabs: { create(opts) { tabsCreated.push(opts.url); events.push(`tab:${opts.url}`); } }
   };
 
   const tabRenders = [];
@@ -122,7 +126,7 @@ async function popupFixture({ stored = {} } = {}) {
     console: { log() {}, warn() {}, error() {} },
     document: doc,
     window: { location: { href: '' } },
-    navigator: { platform: 'MacIntel' },
+    navigator: { platform: 'MacIntel', clipboard: { async writeText(text) { events.push(`copy:${text}`); } } },
     chrome,
     SiteRegistry,
     SubscriptionConfig,
@@ -163,7 +167,7 @@ async function popupFixture({ stored = {} } = {}) {
   await settle();
 
   return {
-    fx, byId, store, messages, pendingScrapes, tabsCreated, storageGets, tabRenders, toasts, settle, flushTimers,
+    fx, byId, store, messages, pendingScrapes, tabsCreated, events, storageGets, tabRenders, toasts, settle, flushTimers,
     timelineRenders: () => timelineRenders,
     lastRender: () => lastRender,
     fireChange: changes => onChanged(changes, 'local'),
@@ -594,6 +598,27 @@ const ids = h => h.lastRender().dramas.map(d => d.id).join(',');
   h.fireChange({ larkConfig: { newValue: { webhookUrl: 'http://x/y' } } });
   h.flushTimers();
   check('P6 重新填上 webhook：纸飞机回来', typeof h.lastRender()?.opts.onLarkPush === 'function', '');
+}
+
+// ---------- O 组：「搜 X」没找到（v1.8.7） ----------
+{
+  const notFound = fallbackUrl => ({ openPlatformPage: () => ({ success: false, notFound: true, name: 'MyDrama', title: 'Saddled with My Nemesis', reason: 'none', fallbackUrl }) });
+  const run = async fallbackUrl => {
+    const h = await popupFixture({ stored: { dramas: [] }, reply: notFound(fallbackUrl) });
+    h.flushTimers();
+    const before = h.toasts.length;   // 打开弹窗本身会弹「抓取于 …」，只看点击之后的
+    await h.lastRender()?.opts.onOpenPlatform('id_tt1');
+    return { ...h, toasts: h.toasts.slice(before) };
+  };
+  const h1 = await run('https://my-drama.com/');
+  check('O1 后台给了平台页：先复制片名、再开平台页，不弹提示',
+    JSON.stringify(h1.events) === JSON.stringify(['copy:Saddled with My Nemesis', 'tab:https://my-drama.com/']) && h1.toasts.length === 0,
+    JSON.stringify({ events: h1.events, toasts: h1.toasts }));
+  const h2 = await run(null);
+  check('O2 没给平台页：不开页，只提示「没找到同名剧，已复制片名」',
+    h2.tabsCreated.length === 0 && h2.toasts.some(t => t.message === 'MyDrama 上没找到同名剧，已复制片名'), JSON.stringify(h2.toasts));
+  const h3 = await run('javascript:alert(1)');
+  check('O3 平台页不是 http(s)：当没给，不开页', h3.tabsCreated.length === 0 && h3.toasts.length === 1, JSON.stringify({ tabs: h3.tabsCreated, toasts: h3.toasts }));
 }
 
 console.log(results.map(r => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : `   [${r.detail}]`}`).join('\n'));

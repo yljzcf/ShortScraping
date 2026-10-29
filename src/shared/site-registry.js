@@ -191,11 +191,12 @@
   /* ——— IMDb 条目「搜平台」（v1.7.3）————————————————————————————————————————
    * IMDb 只是片目库、没有播放页；订阅的 IMDb「平台榜」是按出品公司筛选的搜索页
    * （companies=co…），所以一部 IMDb 条目属于哪个短剧平台由它的 sourceListUrl 就能确定。
+   * micro-drama 这类不分平台的榜（v1.8.7）改看详情页上记下的出品公司（imdbCompanies）。
    * 弹窗 / 共享页的封面菜单与飞书卡片的「搜 X」按钮按这里的表反查平台；在平台上怎么找、
    * 怎么判定唯一同名见 src/shared/platform-link.js。 */
 
   // IMDb 出品公司 → 站点键。DramaWave（co1124838）只有 App、网页端不能播放，刻意不收：
-  // 它的卡保持点封面直开 IMDb。新平台榜要支持「搜平台」时在这里加一行
+  // 它的卡保持点封面直开 IMDb（2026-10-29 复查，网页端仍只有落地页）。新平台榜要支持「搜平台」时在这里加一行
   const IMDB_COMPANY_SITES = Object.freeze({
     co1116954: 'mydrama',
     co1016895: 'reelshort',
@@ -220,21 +221,57 @@
     dramabox: q => `https://www.dramabox.com/search?searchValue=${encodeURIComponent(q)}`
   });
 
-  /** IMDb 条目属于哪个短剧平台（站点键）；不是 IMDb 条目、micro-drama 这类非平台榜、DramaWave 返回 null。 */
-  function imdbPlatformOf(drama) {
-    if (!drama || siteOfDrama(drama) !== 'imdb' || typeof drama.sourceListUrl !== 'string') return null;
-    let companies;
-    try {
-      companies = new URL(drama.sourceListUrl).searchParams.get('companies');
-    } catch (e) {
-      return null;
+  // 没有搜索网址的三家，没搜到时退到平台自己的页面（v1.8.7，2026-10-29 实测）：MyDrama 网页端没有
+  // 搜索框，只能开首页；Shortical 开全部剧集页；NetShort 有搜索框，但搜索词存在 localStorage、
+  // 带不进 URL，开空的搜索页。Google / Bing 的站内搜索试过不行：两家几乎没收录 my-drama.com，
+  // 片子没上线时 Google 还会去掉站点限制、换成别家的同名剧
+  const PLATFORM_BROWSE_PAGES = Object.freeze({
+    mydrama: 'https://my-drama.com/',
+    shortical: 'https://shortical.com/browse',
+    netshort: 'https://netshort.com/search'
+  });
+
+  const IMDB_COMPANY_ID = /^co\d{1,12}$/;
+  const IMDB_COMPANY_LIMIT = 10;
+
+  /** 详情页记下的出品公司清洗成 co 编号数组（去重、最多 10 个）；不是数组返回 []。 */
+  function imdbCompanyIds(value) {
+    if (!Array.isArray(value)) return [];
+    const ids = [];
+    for (const item of value) {
+      if (typeof item !== 'string' || !IMDB_COMPANY_ID.test(item) || ids.includes(item)) continue;
+      ids.push(item);
+      if (ids.length >= IMDB_COMPANY_LIMIT) break;
     }
-    // companies 可以逗号多值，取第一个认得的；hasOwnProperty 挡住 constructor 这类原型链键
-    for (const id of String(companies || '').split(',')) {
-      const key = id.trim();
+    return ids;
+  }
+
+  // 一组出品公司里第一个认得的平台；hasOwnProperty 挡住 constructor 这类原型链键
+  function platformOfCompanies(ids) {
+    for (const id of ids) {
+      const key = String(id).trim();
       if (Object.prototype.hasOwnProperty.call(IMDB_COMPANY_SITES, key)) return IMDB_COMPANY_SITES[key];
     }
     return null;
+  }
+
+  /**
+   * IMDb 条目属于哪个短剧平台（站点键）。先看订阅 URL 的 companies（平台榜），认不出再看详情页上
+   * 记下的出品公司（micro-drama 这类不分平台的榜，v1.8.7）。不是 IMDb 条目、出品公司都不认得、
+   * DramaWave 返回 null。
+   */
+  function imdbPlatformOf(drama) {
+    if (!drama || siteOfDrama(drama) !== 'imdb') return null;
+    let companies = '';
+    if (typeof drama.sourceListUrl === 'string') {
+      try {
+        companies = new URL(drama.sourceListUrl).searchParams.get('companies') || '';
+      } catch (e) {
+        companies = '';
+      }
+    }
+    // companies 可以逗号多值，取第一个认得的
+    return platformOfCompanies(companies.split(',')) || platformOfCompanies(imdbCompanyIds(drama.imdbCompanies));
   }
 
   /**
@@ -252,6 +289,16 @@
     const query = platformSearchQuery(title);
     const build = Object.prototype.hasOwnProperty.call(PLATFORM_SEARCH_PAGES, site) ? PLATFORM_SEARCH_PAGES[site] : null;
     return build && query ? build(query) : null;
+  }
+
+  /** 没有搜索网址的平台，没搜到时退到的平台页；其余平台返回 null。 */
+  function platformBrowseUrl(site) {
+    return Object.prototype.hasOwnProperty.call(PLATFORM_BROWSE_PAGES, site) ? PLATFORM_BROWSE_PAGES[site] : null;
+  }
+
+  /** 没直达播放页时给用户开的地址：有搜索页开搜索结果页，没有开平台页；两样都没有返回 null。 */
+  function platformLandingUrl(site, title) {
+    return platformSearchUrl(site, title) || platformBrowseUrl(site);
   }
 
   /**
@@ -305,7 +352,8 @@
     SITES, SITE_GROUPS, DEFAULT_GROUP, CATEGORY_SOURCES, SOURCE_NAMES, DEFAULT_ACCENT, accentOf,
     LARK_HEADER_TEMPLATES, DEFAULT_LARK_HEADER, larkHeaderOf,
     groupOfSite, siteOfHostname, siteOfUrl, siteOfDrama, isInjectableUrl, contentScriptMatches,
-    IMDB_COMPANY_SITES, PLATFORM_SEARCH_PAGES, imdbPlatformOf, platformSearchQuery, platformSearchUrl, isPlatformUrl,
+    IMDB_COMPANY_SITES, PLATFORM_SEARCH_PAGES, PLATFORM_BROWSE_PAGES, imdbCompanyIds, imdbPlatformOf,
+    platformSearchQuery, platformSearchUrl, platformBrowseUrl, platformLandingUrl, isPlatformUrl,
     FORCE_ENGLISH_DOMAINS, FORCE_ENGLISH_ACCEPT_LANGUAGE, isForceEnglishUrl
   };
 
