@@ -15,6 +15,8 @@ import { startIsolatedServer, card, freePort, DEFAULT_TAGS } from './server-fixt
 //   S10 lark.json 坏了按未启用处理，/sync 不受影响
 //   S11 默认身份（没填凭据）走 lark-cli：服务按 SHORTSCRAPING_LARK_CLI 找到 node 脚本、用自己的 node 跑，
 //       写入体走 stdin、不换应用令牌；/health 与测试连接报 mode:cli；登录失效时报错因并给重新登录命令
+//   S13 补「IMDB跳转播放」（v1.8.10）：行先进表、之后库里才有播放页，下一次 /sync 就把这一列补上；
+//       /health 报上次补了几行，日志记一行
 // 隔离方式：tests/server-fixture.mjs（tmpdir 隔离树 + 随机端口）；OpenAPI 是本进程里起的假服务，
 // 经 SHORTSCRAPING_LARK_API_BASE 指过去，绝不出网。
 // 用法：node tests/unit-server-bitable-sync.mjs
@@ -43,11 +45,12 @@ const api = {
   failBatch: false,
   failFields: false,
   batchDelayMs: 0,
+  withPlay: false, // 表里有没有「IMDB跳转播放」列（S13）
   fieldTypes: [
     ['uid', 1], ['title0', 1], ['des0', 1], ['tag0', 4], ['标题', 1], ['简介', 1], ['平台', 3], ['来源标签', 4],
     ['内容标签', 4], ['海报链接', 1], ['跳转链接', 15], ['抓取时间', 5], ['海报', 17]
   ],
-  reset() { this.rows = []; this.calls = []; this.failBatch = false; this.failFields = false; this.batchDelayMs = 0; }
+  reset() { this.rows = []; this.calls = []; this.failBatch = false; this.failFields = false; this.batchDelayMs = 0; this.withPlay = false; }
 };
 const apiServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
@@ -60,7 +63,8 @@ const apiServer = http.createServer(async (req, res) => {
   if (p.endsWith('/wiki/v2/spaces/get_node')) return send({ code: 0, data: { node: { obj_type: 'bitable', obj_token: 'AppTok' } } });
   if (p.endsWith('/fields')) {
     if (api.failFields) return send({ code: 91403, msg: 'Forbidden' });
-    return send({ code: 0, data: { items: api.fieldTypes.map(([field_name, type]) => ({ field_name, type })), has_more: false } });
+    const types = api.withPlay ? [...api.fieldTypes, ['IMDB跳转播放', 15]] : api.fieldTypes;
+    return send({ code: 0, data: { items: types.map(([field_name, type]) => ({ field_name, type })), has_more: false } });
   }
   if (p.endsWith('/records/batch_create')) {
     if (api.batchDelayMs) await sleep(api.batchDelayMs);
@@ -69,7 +73,16 @@ const apiServer = http.createServer(async (req, res) => {
     for (const r of records) api.rows.push({ fields: r.fields });
     return send({ code: 0, data: { records } });
   }
-  if (p.endsWith('/records')) return send({ code: 0, data: { items: api.rows.map(r => ({ fields: { uid: r.fields.uid } })), has_more: false } });
+  if (p.endsWith('/records/batch_update')) {
+    for (const { record_id, fields } of JSON.parse(body).records) Object.assign(api.rows[Number(record_id.slice(3))].fields, fields);
+    return send({ code: 0, data: { records: [] } });
+  }
+  if (p.endsWith('/records')) {
+    return send({ code: 0, data: { items: api.rows.map((r, i) => ({
+      record_id: `rec${i}`,
+      fields: api.withPlay && r.fields['IMDB跳转播放'] ? { uid: r.fields.uid, 'IMDB跳转播放': r.fields['IMDB跳转播放'] } : { uid: r.fields.uid }
+    })), has_more: false } });
+  }
   return send({ code: 404, msg: 'nope' }, 404);
 });
 const apiPort = await freePort();
@@ -207,6 +220,34 @@ try {
       check('S9c 飞书报错：502 带着原因', bad.status === 502 && /Forbidden/.test(bad.body.error) && bad.body.code === 91403, show(bad));
       api.failFields = false;
       check('S9d 回给设置页的结果和日志里都不带 App Secret', !show(ok.body).includes('secret') && !server.output.includes('secret'), '');
+    } finally {
+      await server.stop();
+    }
+  }
+
+  // S13
+  {
+    const server = await startIsolatedServer({
+      prefix: 'shortscraping-bitable-fill-', env,
+      config: { 'tag.json': DEFAULT_TAGS, 'lark.json': LARK }
+    });
+    try {
+      api.reset();
+      api.withPlay = true;
+      const PLAY = 'https://my-drama.com/video/b6973579-f9b6-429c-8cc5-bad184a58236';
+      await server.postSync([trans('p1'), trans('p2')]);
+      await until(() => batchCalls() === 1);
+      await until(async () => (await server.health())?.bitableSync?.lastOkAt);
+      const before = api.rows.find(r => r.fields.uid === 'p1')?.fields['IMDB跳转播放'];
+      await server.postSync([trans('p1', { playUrl: PLAY }), trans('p2')]);
+      const filled = await until(() => api.rows.find(r => r.fields.uid === 'p1')?.fields['IMDB跳转播放']);
+      await until(async () => (await server.health())?.bitableSync?.lastFilled === 1);
+      const h = (await server.health()).bitableSync;
+      check('S13a 行先进表（当时没有播放页），之后库里有了：下一次 /sync 补上这一列，别的行不动、不重复追加',
+        before === undefined && filled && show(api.rows.find(r => r.fields.uid === 'p1').fields['IMDB跳转播放']) === show({ text: PLAY, link: PLAY })
+        && !('IMDB跳转播放' in api.rows.find(r => r.fields.uid === 'p2').fields) && api.rows.length === 2, show(api.rows));
+      check('S13b /health 报上次补了 1 行、没有错误；日志记一行', h.lastFilled === 1 && h.lastFillError === null
+        && /补上 1 行「IMDB跳转播放」/.test(server.output), show(h));
     } finally {
       await server.stop();
     }

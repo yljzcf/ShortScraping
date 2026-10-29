@@ -1012,6 +1012,8 @@ async function runBitableSync() {
       lastOkAt: now(),
       lastError: null,
       lastAdded: result.added,
+      lastFilled: result.filled,
+      lastFillError: result.fillError,
       rowCount: result.rowCount,
       missingColumns: result.missingColumns,
       syncedIds: [...synced]
@@ -1020,6 +1022,9 @@ async function runBitableSync() {
       console.log(`[ShortScraping Sync] 多维表格：追加 ${result.added} 条（表内现 ${result.rowCount} 行）`
         + (result.missingColumns.length ? `；表里没有这些列，已跳过：${result.missingColumns.join('、')}` : ''));
     }
+    // 补「IMDB跳转播放」（v1.8.10）：失败不算整轮失败，表里还空着，下一轮读表时自然再补
+    if (result.filled > 0) console.log(`[ShortScraping Sync] 多维表格：补上 ${result.filled} 行「IMDB跳转播放」`);
+    if (result.fillError) console.warn('[ShortScraping Sync] 多维表格补「IMDB跳转播放」失败（下一轮再试）:', result.fillError);
   } catch (error) {
     writeBitableState({ ...previous, target: key, lastRunAt: now(), lastError: error.message, syncedIds: [...synced] });
     console.warn(`[ShortScraping Sync] 多维表格同步失败（${Math.round(BITABLE_RETRY_MS / 60000)} 分钟后重试）:`, error.message);
@@ -1051,6 +1056,8 @@ function bitableHealth() {
     lastOkAt: sameTarget ? state.lastOkAt || null : null,
     lastError: sameTarget ? state.lastError || null : null,
     lastAdded: sameTarget ? state.lastAdded ?? null : null,
+    lastFilled: sameTarget ? state.lastFilled ?? null : null,
+    lastFillError: sameTarget ? state.lastFillError || null : null,
     rowCount: sameTarget ? state.rowCount ?? null : null,
     missingColumns: sameTarget && Array.isArray(state.missingColumns) ? state.missingColumns : []
   };

@@ -4,8 +4,10 @@
  * 调用方是同步服务（server/sync-server.js）：每次扩展 POST /sync 后在后台跑一轮；设置页「测试连接」
  * 也经同步服务走同一套函数（只读不写），测试路径＝真实路径。
  *
- * 只追加、不更新、不删除：已进表的条目之后在库里变了（补了类型、改了译文）不回写；
+ * 只追加、不删除，原则上也不更新：已进表的条目之后在库里变了（补了类型、改了译文）不回写；
  * 用户在表里手动删掉的行也不会被加回来（同步服务另记一份已写入的 uid）。
+ * 唯一的例外是「IMDB跳转播放」列（v1.8.10，用户定）：行进表时播放页往往还没找到，事后扩展找到了，
+ * 这一列在表里还空着就补上；只填空格，表里已有的值（含手改的）不动。
  *
  * 写法要点（Bitable OpenAPI v1）：
  * - 每列按表里的**实际字段类型**填值（文本 / 单选 / 多选 / 日期 / 超链接），表里没有的列跳过；
@@ -28,7 +30,7 @@
   const FetchUtil = isNode ? require('./fetch-util.js') : global.FetchUtil;
   const SOURCE_NAMES = isNode ? require('./site-registry.js').SOURCE_NAMES : global.SiteRegistry.SOURCE_NAMES;
 
-  const BATCH_SIZE = 500; // batch_create 单次上限
+  const BATCH_SIZE = 500; // batch_create / batch_update 单次上限
   const PAGE_SIZE = 500; // 列记录单页上限
 
   // Bitable v1 字段类型码（只列会写的几种）
@@ -316,22 +318,67 @@
     return text(value);
   }
 
-  async function listExistingUids(ctx, appToken, uidColumn) {
+  /**
+   * 「IMDB跳转播放」能补的列名（v1.8.10）：映射里开着、表里有、类型是超链接或文本；否则 ''（不补）。
+   */
+  function playUrlColumnOf(fields, fieldTypes) {
+    const column = Lark.normalizeBitableFields(fields).playUrl;
+    const type = column ? fieldTypes.get(column) : undefined;
+    return type === FIELD_TYPE.URL || type === FIELD_TYPE.TEXT ? column : '';
+  }
+
+  /**
+   * 分页读表：uid 集合与总行数；给了 playColumn 时一并读这一列，记下它还空着的行（uid → [record_id]）。
+   */
+  async function listExistingUids(ctx, appToken, uidColumn, playColumn = '') {
     const uids = new Set();
+    const blankPlay = new Map();
     let total = 0;
     let pageToken = '';
     do {
-      const query = { page_size: String(PAGE_SIZE), field_names: JSON.stringify([uidColumn]) };
+      const query = { page_size: String(PAGE_SIZE), field_names: JSON.stringify(playColumn ? [uidColumn, playColumn] : [uidColumn]) };
       if (pageToken) query.page_token = pageToken;
       const data = await request(ctx, 'GET', `/open-apis/bitable/v1/apps/${appToken}/tables/${ctx.target.tableId}/records`, { query });
       for (const item of data.items || []) {
         total++;
         const uid = cellText(item.fields && item.fields[uidColumn]);
-        if (uid) uids.add(uid);
+        if (!uid) continue;
+        uids.add(uid);
+        if (playColumn && item.record_id && !cellText(item.fields[playColumn])) {
+          blankPlay.set(uid, [...(blankPlay.get(uid) || []), item.record_id]);
+        }
       }
       pageToken = data.has_more ? data.page_token : '';
     } while (pageToken);
-    return { uids, total };
+    return { uids, total, blankPlay };
+  }
+
+  /**
+   * 要补「IMDB跳转播放」的行：库里有合法播放页（http/https）、表里同 uid 的行这一列还空着。
+   * 同一 uid 在表里有几行空着就补几行；库里同 uid 只看第一条。返回 [{ record_id, uid, url }]。
+   */
+  function selectPlayUrlFills(dramas, blankPlay) {
+    const out = [];
+    const seen = new Set();
+    for (const drama of Array.isArray(dramas) ? dramas : []) {
+      if (!drama) continue;
+      const uid = text(drama.itemId) || text(drama.id);
+      if (!uid || seen.has(uid)) continue;
+      seen.add(uid);
+      const url = text(drama.playUrl);
+      const records = blankPlay instanceof Map ? blankPlay.get(uid) : null;
+      if (!records || !/^https?:\/\//i.test(url)) continue;
+      for (const record_id of records) out.push({ record_id, uid, url });
+    }
+    return out;
+  }
+
+  async function batchUpdate(ctx, appToken, records) {
+    for (let i = 0; i < records.length; i += BATCH_SIZE) {
+      await request(ctx, 'POST', `/open-apis/bitable/v1/apps/${appToken}/tables/${ctx.target.tableId}/records/batch_update`, {
+        body: { records: records.slice(i, i + BATCH_SIZE) }
+      });
+    }
   }
 
   async function batchCreate(ctx, appToken, records) {
@@ -361,8 +408,12 @@
     if (!fieldTypes.has(uidColumn)) {
       throw new BitableError(`表里没有去重用的「${uidColumn}」列（可在 config/lark.json 的 bitableFields.uid 改列名）`);
     }
-    const { uids, total } = await listExistingUids(ctx, appToken, uidColumn);
-    return { appToken, fieldTypes, existingUids: uids, rowCount: total, missing: missingColumns(ctx.config.bitableFields, fieldTypes) };
+    const playColumn = playUrlColumnOf(ctx.config.bitableFields, fieldTypes);
+    const { uids, total, blankPlay } = await listExistingUids(ctx, appToken, uidColumn, playColumn);
+    return {
+      appToken, fieldTypes, existingUids: uids, rowCount: total, missing: missingColumns(ctx.config.bitableFields, fieldTypes),
+      playColumn, blankPlay
+    };
   }
 
   /**
@@ -371,12 +422,17 @@
   async function testConnection(ctx, { dramas = [], syncedIds = new Set() } = {}) {
     const info = await inspect(ctx);
     const pending = selectPending(dramas, { existingUids: info.existingUids, syncedIds });
-    return { mode: ctx.mode, appToken: info.appToken, rowCount: info.rowCount, missingColumns: info.missing, pendingCount: pending.length };
+    return {
+      mode: ctx.mode, appToken: info.appToken, rowCount: info.rowCount, missingColumns: info.missing, pendingCount: pending.length,
+      fillCount: selectPlayUrlFills(dramas, info.blankPlay).length
+    };
   }
 
   /**
-   * 跑一轮同步：追加待写条目，返回 { added, addedIds, rowCount, missingColumns, appToken }。
-   * 失败直接抛（调用方记日志、留到下一轮）；已经成功写入的批次照常计入 addedIds。
+   * 跑一轮同步：追加待写条目，再补「IMDB跳转播放」还空着的行，返回
+   * { added, addedIds, filled, fillError, rowCount, missingColumns, appToken }。
+   * 追加失败直接抛（调用方记日志、留到下一轮）；已经成功写入的批次照常计入 addedIds。
+   * 补播放页失败不抛、不影响追加，原因放在 fillError（下一轮读表时它还空着，自然再补）。
    */
   async function syncOnce(ctx, { dramas = [], syncedIds = new Set(), contentTagsFor } = {}) {
     const info = await inspect(ctx);
@@ -390,9 +446,25 @@
       await batchCreate(ctx, info.appToken, records);
       for (const drama of chunk) addedIds.push(text(drama.itemId) || text(drama.id));
     }
+    let filled = 0;
+    let fillError = null;
+    const fills = selectPlayUrlFills(dramas, info.blankPlay);
+    if (fills.length) {
+      const type = info.fieldTypes.get(info.playColumn);
+      try {
+        await batchUpdate(ctx, info.appToken, fills.map(({ record_id, url }) => ({
+          record_id, fields: { [info.playColumn]: formatValue(url, type) }
+        })));
+        filled = fills.length;
+      } catch (e) {
+        fillError = e.message;
+      }
+    }
     return {
       added: addedIds.length,
       addedIds,
+      filled,
+      fillError,
       // 表里本来就有的 uid 也一并交给调用方记进「已写入」，用户之后手删的行不会被加回来
       existingIds: [...info.existingUids],
       rowCount: info.rowCount + addedIds.length,
@@ -411,6 +483,8 @@
     parseCliJson,
     buildRecordFields,
     selectPending,
+    selectPlayUrlFills,
+    playUrlColumnOf,
     missingColumns,
     createContext,
     testConnection,

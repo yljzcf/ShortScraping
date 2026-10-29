@@ -12,6 +12,8 @@ import './bootstrap.cjs';
 //   B9 测试连接只读：不调 batch_create，报待追加条数与缺的列
 //   B10 lark-cli 身份（默认）：拼出 `api <方法> <路径> --as user --format json [--params] [--data -]`、写入体走 stdin，
 //       成功读 stdout、失败读 stderr，登录失效给重新登录命令；不换应用令牌；没注入 runCli 时说清楚怎么办
+//   B11 补「IMDB跳转播放」（v1.8.10）：读 uid 时一并读这一列，库里有播放页、表里还空着的行按 record_id 补上；
+//       有值的不动，列不存在 / 映射关掉 / 类型不对不补，补失败不影响追加；测试连接报要补几行
 // 用法：node tests/unit-lark-bitable.mjs
 import { createRequire } from 'node:module';
 
@@ -102,6 +104,7 @@ check('B5 只挑已翻译的、同 uid 取第一条、跳过表里已有与已�
 function makeFetch({ existing = [], fieldsList = null, failOn = null, pageSize = 2 } = {}) {
   const calls = [];
   const created = [];
+  const updated = [];
   const fieldItems = fieldsList || [...fieldTypes].map(([field_name, type]) => ({ field_name, type }));
   const reply = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
   const fetchImpl = async (url, init = {}) => {
@@ -115,9 +118,18 @@ function makeFetch({ existing = [], fieldsList = null, failOn = null, pageSize =
       const start = Number(u.searchParams.get('page_token') || 0);
       const slice = existing.slice(start, start + pageSize);
       const more = start + pageSize < existing.length;
-      // 第二页起用富文本段数组形态，覆盖两种返回
-      const items = slice.map(uid => ({ fields: { uid: start === 0 ? uid : [{ type: 'text', text: uid }] } }));
+      // 第二页起用富文本段数组形态，覆盖两种返回；existing 的元素也可以是 { uid, rid, play }（带行号与「IMDB跳转播放」）
+      const items = slice.map((row, i) => {
+        const { uid, rid = `r${start + i}`, play } = typeof row === 'string' ? { uid: row } : row;
+        const fields = { uid: start === 0 ? uid : [{ type: 'text', text: uid }] };
+        if (play !== undefined) fields['IMDB跳转播放'] = play;
+        return { record_id: rid, fields };
+      });
       return reply({ code: 0, data: { items, has_more: more, page_token: more ? String(start + pageSize) : '' } });
+    }
+    if (u.pathname.endsWith('/records/batch_update')) {
+      updated.push(...JSON.parse(init.body).records);
+      return reply({ code: 0, data: { records: [] } });
     }
     if (u.pathname.endsWith('/records/batch_create')) {
       const body = JSON.parse(init.body);
@@ -126,7 +138,7 @@ function makeFetch({ existing = [], fieldsList = null, failOn = null, pageSize =
     }
     return reply({ code: 404, msg: 'not found' }, 404);
   };
-  return { fetchImpl, calls, created };
+  return { fetchImpl, calls, created, updated };
 }
 
 const config = { ...ready };
@@ -147,8 +159,8 @@ const many = Array.from({ length: 503 }, (_, i) => ({ itemId: `n${i}`, status: '
     result.added === 499 && show(stub.created) === show([499]) && !result.addedIds.includes('n0') && !result.addedIds.includes('n3'), show({ added: result.added, created: stub.created }));
   check('B6c 富文本形态的 uid 也认出来，existingIds 交回给调用方记账',
     show(result.existingIds.sort()) === show(['n0', 'n1', 'n2']), show(result.existingIds));
-  check('B6d 读 uid 只要 uid 一列、每页 500；Lark 表走 open.larksuite.com，Bearer 带令牌',
-    stub.calls[3].query.field_names === '["uid"]' && stub.calls[3].query.page_size === '500'
+  check('B6d 读 uid 只要 uid 与「IMDB跳转播放」两列、每页 500；Lark 表走 open.larksuite.com，Bearer 带令牌',
+    stub.calls[3].query.field_names === '["uid","IMDB跳转播放"]' && stub.calls[3].query.page_size === '500'
     && stub.calls.every(c => c.host === 'https://open.larksuite.com')
     && stub.calls.slice(1).every(c => c.auth === 'Bearer tok-https://open.larksuite.com'), show(stub.calls[3]));
 
@@ -193,6 +205,62 @@ const many = Array.from({ length: 503 }, (_, i) => ({ itemId: `n${i}`, status: '
   await run({ ...config, bitableAppId: 'cli_other' });
   const tokenCalls = stub.calls.filter(c => c.path.endsWith('/tenant_access_token/internal')).length;
   check('B8 令牌缓存：同域名同 appId 只换一次，换域名或 appId 重新换', tokenCalls === 3, String(tokenCalls));
+}
+
+// B11
+{
+  B.__resetTokenCache();
+  const PLAY = 'https://my-drama.com/video/b6973579-f9b6-429c-8cc5-bad184a58236';
+  const stub = makeFetch({
+    pageSize: 3,
+    existing: [
+      { uid: 'f1', rid: 'recF1' },                                   // 空着、库里有播放页 → 补
+      { uid: 'f2', rid: 'recF2', play: { link: 'https://x/hand', text: '手改' } },   // 有值 → 不动
+      { uid: 'f3', rid: 'recF3' },                                   // 库里没有播放页 → 不动
+      { uid: 'f4', rid: 'recF4a' }, { uid: 'f4', rid: 'recF4b' },     // 同 uid 两行都空着 → 两行都补（第二行在第二页）
+      { uid: 'f5', rid: 'recF5', play: '' }                          // 空串也算空着，但库里播放页不是 http → 不动
+    ]
+  });
+  const dramas = [
+    { itemId: 'f1', status: 'trans', playUrl: PLAY }, { itemId: 'f2', status: 'trans', playUrl: PLAY },
+    { itemId: 'f3', status: 'trans' }, { itemId: 'f4', status: 'trans', playUrl: PLAY },
+    { itemId: 'f5', status: 'trans', playUrl: 'javascript:alert(1)' }, { itemId: 'n9', status: 'trans', title: 'New', playUrl: PLAY }
+  ];
+  const r = await B.syncOnce(B.createContext(config, { fetchImpl: stub.fetchImpl }), { dramas });
+  const link = { text: PLAY, link: PLAY };
+  check('B11a 表里「IMDB跳转播放」空着、库里有播放页的行按 record_id 补上；有值的、库里没有的、不是 http 的不动；同 uid 几行空着补几行',
+    show(stub.updated) === show([
+      { record_id: 'recF1', fields: { 'IMDB跳转播放': link } },
+      { record_id: 'recF4a', fields: { 'IMDB跳转播放': link } }, { record_id: 'recF4b', fields: { 'IMDB跳转播放': link } }
+    ]) && r.filled === 3 && r.fillError === null && r.added === 1, show({ updated: stub.updated, r }));
+  const order = stub.calls.map(c => c.path.split('/').pop());
+  check('B11b 先追加新行再补；新追加的行自己就带播放页，不在补的范围里', order.indexOf('batch_create') < order.indexOf('batch_update'), show(order));
+
+  const off = makeFetch({ existing: [{ uid: 'f1', rid: 'recF1' }] });
+  const rOff = await B.syncOnce(B.createContext({ ...config, bitableFields: { playUrl: '' } }, { fetchImpl: off.fetchImpl }), { dramas });
+  const missing = makeFetch({ existing: [{ uid: 'f1', rid: 'recF1' }], fieldsList: [{ field_name: 'uid', type: T.TEXT }] });
+  const rMissing = await B.syncOnce(B.createContext(config, { fetchImpl: missing.fetchImpl }), { dramas });
+  const wrongType = makeFetch({ existing: [{ uid: 'f1', rid: 'recF1' }], fieldsList: [{ field_name: 'uid', type: T.TEXT }, { field_name: 'IMDB跳转播放', type: 17 }] });
+  await B.syncOnce(B.createContext(config, { fetchImpl: wrongType.fetchImpl }), { dramas });
+  check('B11c 映射里关掉这一列、表里没有这一列、列类型不是超链接 / 文本：只读 uid 一列，不补',
+    [off, missing, wrongType].every(st => st.updated.length === 0 && st.calls.find(c => c.path.endsWith('/records'))?.query.field_names === '["uid"]')
+    && rOff.filled === 0 && rMissing.filled === 0, show([off, missing, wrongType].map(st => st.updated.length)));
+
+  const textCol = makeFetch({ existing: [{ uid: 'f1', rid: 'recF1' }], fieldsList: [{ field_name: 'uid', type: T.TEXT }, { field_name: 'IMDB跳转播放', type: T.TEXT }] });
+  await B.syncOnce(B.createContext(config, { fetchImpl: textCol.fetchImpl }), { dramas });
+  check('B11d 文本类型的列补纯文本地址', show(textCol.updated) === show([{ record_id: 'recF1', fields: { 'IMDB跳转播放': PLAY } }]), show(textCol.updated));
+
+  const failing = makeFetch({ existing: [{ uid: 'f1', rid: 'recF1' }], failOn: '/batch_update' });
+  let thrown = null;
+  let rFail = null;
+  try { rFail = await B.syncOnce(B.createContext(config, { fetchImpl: failing.fetchImpl }), { dramas }); } catch (e) { thrown = e; }
+  check('B11e 补的时候出错：不抛、不影响追加，原因放在 fillError，filled 为 0',
+    !thrown && rFail?.added === 5 && rFail.filled === 0 && /FieldNameNotFound/.test(rFail.fillError || ''), show({ thrown: thrown?.message, rFail }));
+
+  const probe = makeFetch({ existing: [{ uid: 'f1', rid: 'recF1' }, { uid: 'f2', rid: 'recF2', play: { link: 'https://x/hand', text: '手改' } }] });
+  const t = await B.testConnection(B.createContext(config, { fetchImpl: probe.fetchImpl }), { dramas });
+  check('B11f 测试连接只读：报要补几行（fillCount），不调 batch_update', t.fillCount === 1 && probe.updated.length === 0
+    && !probe.calls.some(c => c.path.endsWith('/batch_update')), show(t));
 }
 
 // B9
