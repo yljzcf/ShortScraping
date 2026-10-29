@@ -12,7 +12,7 @@ import './bootstrap.cjs';
 //     任何失败都照常推送；重试沿用记下的地址；测试发送与真实推送同口径。
 //   R 推送后复查（v1.8.7）：翻译闹钟每轮对没有搜索页的平台、还没记下播放页的 IMDb 卡再判一次（v1.8.8 起
 //     旧卡也补；v1.8.9 起 30 天以前的旧卡每 6 小时才带上一次），一轮查到的一次整表写完；本生命周期没碰过
-//     表时不查（不为它整表读一遍）。
+//     表时不查（不为它整表读一遍）。有搜索页的平台也在内，但只看库里平台自己抓到过的同名卡、不联网（v1.8.11）。
 // 纯逻辑（解析器 / 判定 / 菜单项 / 卡片排版）见 unit-platform-link.mjs。
 // 用法：node tests/unit-platform-open.mjs
 import { background, card } from './background-fixture.mjs';
@@ -426,6 +426,23 @@ async function drive(bg, steps = 12, ms = 1000) {
     show({ stored: h.stored('id_tt50'), requests: h.requests.map(r => r.url) }));
 }
 
+{
+  const own = card('rs80', { source: 'reelshort', title: 'Silicon God Strikes Back', sourceListUrl: SUBS.rsList, url: RS_PLAY });
+  const h = await makeBg({
+    dramas: [
+      imdbCard('tt80', 'reelshort', 'Silicon God Strikes Back', { savedAt: '2026-09-04T00:00:00.000Z' }),
+      imdbCard('tt81', 'dramabox', 'Nowhere On DramaBox', { savedAt: '2026-09-04T00:00:00.000Z' }),
+      imdbCard('tt82', 'micro', 'Silicon God Strikes Back', { savedAt: '2026-09-04T00:00:00.000Z', imdbCompanies: ['co1016895'] }),
+      imdbCard('tt83', 'dramawave', 'Silicon God Strikes Back', { savedAt: '2026-09-04T00:00:00.000Z' }),
+      own
+    ]
+  });
+  await h.bg.context.recheckPlatformPlayUrls();
+  await h.bg.flush();
+  check('R6 有搜索页的平台也复查，但只看库里平台自己抓到过的同名卡、零请求（v1.8.11）：ReelShort 与按出品公司认出的 micro-drama 卡记下，DramaBox 没有同名卡不记，DramaWave 不属于已知平台',
+    h.stored('id_tt80') === RS_PLAY && h.stored('id_tt82') === RS_PLAY && h.stored('id_tt81') === undefined && h.stored('id_tt83') === undefined
+    && h.requests.length === 0, show({ stored: ['id_tt80', 'id_tt81', 'id_tt82', 'id_tt83'].map(h.stored), requests: h.requests.map(r => r.url) }));
+}
 {
   // 夹具时钟 2026-09-05T00:00Z；上次查旧卡在 2 小时前
   const h = await makeBg({

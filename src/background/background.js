@@ -3730,7 +3730,7 @@ async function resolvePlatformLink(drama, { mode = 'click', dramas = null } = {}
   let verdict;
   try {
     const table = Array.isArray(dramas) ? dramas : await getDramasSnapshot();
-    const local = PlatformLink.decide(drama.title, PlatformLink.localCandidates(site, table, isValid), isValid);
+    const local = localPlatformVerdict(site, drama.title, table);
     if (local.kind === 'play') return { site, name, kind: 'play', url: local.url, reason: 'found' };
     // ShortMax / NetShort 不联网（fetched 为 null），本地的判定就是结论
     const fetched = await platformCandidates(site, drama.title, mode);
@@ -3747,6 +3747,15 @@ async function resolvePlatformLink(drama, { mode = 'click', dramas = null } = {}
   return browseUrl
     ? { site, name, kind: 'browse', url: browseUrl, reason: verdict.kind }
     : { site, name, kind: 'none', url: null, reason: verdict.kind };
+}
+
+/**
+ * 库里该平台自己的榜单抓到过的同名卡判定（不联网）：恰好 1 张 → { kind: 'play', url }，否则
+ * { kind: 'none' | 'ambiguous' }。candidates 可由调用方按站预先算好传入（复查一轮要判几百张卡）。
+ */
+function localPlatformVerdict(site, title, dramas, candidates = null) {
+  const isValid = url => SiteRegistry.isPlatformUrl(site, url);
+  return PlatformLink.decide(title, candidates || PlatformLink.localCandidates(site, dramas, isValid), isValid);
 }
 
 /**
@@ -3837,9 +3846,10 @@ async function botPlatformLink(drama, dramas = null) {
   }
 }
 
-// 推送后复查（v1.8.7）：只复查没有搜索网址、推送时没找到就只能给平台页的几家。搜索页类的平台推送时
-// 已给了搜索结果页，晚上线也搜得到；逐张复查量大，GoodShort / DramaBox 的 robots 也不允许
-const PLATFORM_RECHECK_SITES = Object.freeze(['mydrama', 'shortical', 'netshort']);
+// 推送后复查（v1.8.7）：联网复查只给没有搜索网址、推送时没找到就只能给平台页的几家。搜索页类的平台
+// 推送时已给了搜索结果页，晚上线也搜得到；逐张联网复查量大，GoodShort / DramaBox 的 robots 也不允许。
+// 这些平台只做不联网的那一步（v1.8.11，用户定）：库里平台自己抓到过唯一同名卡就记下，多维表格也能补上
+const PLATFORM_RECHECK_ONLINE_SITES = Object.freeze(['mydrama', 'shortical', 'netshort']);
 // 近 30 天入库的新卡每轮都查（推送后晚几天上线最常见）；更早的旧卡每 6 小时查一次（v1.8.9，用户定），
 // 上次查旧卡的时刻记在 platformRecheckState.oldCheckedAt，SW 回收也不丢
 const PLATFORM_RECHECK_RECENT_MS = 30 * 24 * 60 * 60 * 1000;
@@ -3847,8 +3857,10 @@ const PLATFORM_RECHECK_OLD_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const PLATFORM_RECHECK_STATE_KEY = 'platformRecheckState';
 
 /**
- * 翻译闹钟每轮顺带跑：还没记下播放页的这几家 IMDb 卡再判一次，查到唯一同名就 rememberPlayUrl，
- * 弹窗、共享页以后直达。群里已发的卡改不了（webhook 机器人不能改消息），多维表格只追加也不回写。
+ * 翻译闹钟每轮顺带跑：还没记下播放页的 IMDb 平台卡再判一次，查到唯一同名就 rememberPlayUrl，
+ * 弹窗、共享页以后直达，多维表格「IMDB跳转播放」下一次同步补上（v1.8.10）。群里已发的卡改不了
+ * （webhook 机器人不能改消息）。MyDrama / Shortical / NetShort 走完整查找（先本地、再站点地图）；
+ * 其余平台只看库里平台自己抓到过的同名卡、不联网（v1.8.11）。
  * 旧卡也查（v1.8.8，用户要旧卡也补记）：v1.7.3 以前入库、从没点过的也在内，过了很久才上线的也能补上；
  * 但旧卡不必每小时查，距上次查旧卡满 6 小时才带上（v1.8.9）。开销有界：站点地图缓存 30 分钟，
  * 一轮每站最多取一次（MyDrama 约 22KB），判定只在本地；NetShort 只查库内，不联网。
@@ -3867,12 +3879,20 @@ async function recheckPlatformPlayUrls() {
     const isRecent = drama => now - Date.parse(drama.savedAt || drama.scrapedAt || '') < PLATFORM_RECHECK_RECENT_MS;
     const dramas = await getDramasSnapshot();
     const pending = dramas.filter(drama =>
-      drama && !drama.playUrl && PLATFORM_RECHECK_SITES.includes(SiteRegistry.imdbPlatformOf(drama))
-      && (includeOld || isRecent(drama)));
+      drama && !drama.playUrl && SiteRegistry.imdbPlatformOf(drama) && (includeOld || isRecent(drama)));
     const failedSites = new Set();
     const found = new Map();
+    const localBySite = new Map();   // 站点 → 库里该平台的候选，一轮只算一次
     for (const drama of pending) {
       const site = SiteRegistry.imdbPlatformOf(drama);
+      if (!PLATFORM_RECHECK_ONLINE_SITES.includes(site)) {
+        if (!localBySite.has(site)) {
+          localBySite.set(site, PlatformLink.localCandidates(site, dramas, url => SiteRegistry.isPlatformUrl(site, url)));
+        }
+        const local = localPlatformVerdict(site, drama.title, dramas, localBySite.get(site));
+        if (local.kind === 'play') found.set(drama.id, local.url);
+        continue;
+      }
       if (failedSites.has(site)) continue;
       const link = await resolvePlatformLink(drama, { mode: 'push', dramas });
       if (!link) continue;
