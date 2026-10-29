@@ -21,10 +21,9 @@
     onOpenUrl: null,
     // 封面菜单「搜 X」（v1.7.3）：(dramaId) => Promise，弹窗注入（交给后台查找并开页）；共享页不传
     onOpenPlatform: null,
-    // 弹窗搜索（v1.8.2）：命中词高亮（DramaSearch.parseQuery 的结果）与「已退订」标记，共享页不传
+    // 弹窗搜索（v1.8.2）：命中词高亮（DramaSearch.parseQuery 的结果）与「已退订」标记，共享页不传。
+    // 命中了没显示的那种语言（标题或简介）时卡片改成双语（v1.8.13）
     highlightTerms: null,
-    // 经中文对照命中的英文题材（小写数组），对应的题材标签整枚标亮
-    highlightGenres: null,
     isUnsubscribed: null,
     // 卡片显示语言（v1.8.12）：'zh' | 'en'，标题、简介、内容标签只显示这一种（缺了退回另一种）
     lang: 'zh',
@@ -44,8 +43,18 @@
 
   // 标题文案单一真源在 translate-config.js（弹窗/共享页卡片、多维表格 payload、
   // 群机器人卡片三处共用，见那边 titleDisplay 的注释）。须先加载该模块。
-  // v1.8.12 起卡片只显示一种语言，「中文（英文）」留给标题的悬停提示
+  // v1.8.12 起卡片只显示一种语言，「中文（英文）」留给标题的悬停提示；搜索的双语卡（v1.8.13）
+  // 按 titleParts 判断另一种语言的名字是不是其实同一个
   const titleDisplayOf = global.TranslateConfig.titleDisplay;
+  const titlePartsOf = global.TranslateConfig.titleParts;
+
+  // 搜索词怎么算命中（子串；1~3 个字母的英文按整词）以 DramaSearch 为准。只有弹窗搜索、也只有弹窗加载它；
+  // 没加载时（共享页不传搜索词，单测）按字面子串
+  const termPatternOf = term => (global.DramaSearch ? global.DramaSearch.termPattern(term) : escapeRegExp(term));
+  function termMatches(term, value) {
+    const text = String(value == null ? '' : value).normalize('NFKC').toLowerCase();
+    return global.DramaSearch ? global.DramaSearch.termMatches(term, text) : text.includes(term);
+  }
 
   /**
    * 由封面实际尺寸判定卡片是否走横版布局；返回 null＝**不改判**，保留按 source
@@ -288,7 +297,7 @@
     const list = (terms || []).filter(Boolean);
     if (!raw || list.length === 0) return escapeHtml(raw);
     // 长词优先，重叠时整段高亮长的那个
-    const pattern = new RegExp(`(${[...list].sort((a, b) => b.length - a.length).map(escapeRegExp).join('|')})`, 'gi');
+    const pattern = new RegExp(`(${[...list].sort((a, b) => b.length - a.length).map(termPatternOf).join('|')})`, 'gi');
     return raw.split(pattern).map((part, i) => (i % 2 === 1
       ? `<mark class="search-hit">${escapeHtml(part)}</mark>`
       : escapeHtml(part))).join('');
@@ -331,16 +340,20 @@
    * 中文标签按通用标签体系（GenreTaxonomy.zhTagsOf）对照，一个都对不上时退回英文；英文标签滤掉
    * ReelShort 混进 genres 的演员名。没加载体系（理应不会）时标签照旧显示站点原文。
    * descLang / tagsLang 是实际显示的语言（退回时与 lang 不同）。
+   * titleAlt / descAlt 是没显示的那种语言（v1.8.13 搜索双语卡用）：没有、或与显示的其实是同一个时为空串。
    */
   function cardTextOf(drama, lang) {
     const zhFirst = normalizeLang(lang) === 'zh';
     const text = value => String(value || '').trim();
     const pick = (zh, en) => {
       const [first, second] = zhFirst ? [zh, en] : [en, zh];
-      return first.text || !second.text ? first : second;
+      return first.text || !second.text ? [first, second] : [second, first];
     };
-    const title = pick({ text: text(drama.titleZh) }, { text: text(drama.title) });
-    const desc = pick({ text: text(drama.descriptionZh), lang: 'zh' }, { text: text(drama.description), lang: 'en' });
+    const [title, titleOther] = pick({ text: text(drama.titleZh) }, { text: text(drama.title) });
+    const [desc, descOther] = pick({ text: text(drama.descriptionZh), lang: 'zh' }, { text: text(drama.description), lang: 'en' });
+    // 中英文名只差装饰性标点（《NBA 2K27》/ NBA 2K27）算同一个，与 titleDisplay 同一判据
+    const titleAlt = titlePartsOf(drama).sub ? titleOther.text : '';
+    const descAlt = descOther.text !== desc.text ? descOther.text : '';
 
     const taxonomy = global.GenreTaxonomy;
     const enTags = taxonomy ? taxonomy.displayGenres(drama.genres) : getDisplayGenres(drama);
@@ -348,30 +361,68 @@
     const tagsLang = zhTags.length ? 'zh' : 'en';
     return {
       title: title.text,
+      titleAlt,
       desc: desc.text,
       descLang: desc.lang,
+      descAlt,
+      descAltLang: descOther.lang,
       tags: tagsLang === 'zh' ? zhTags : enTags,
       tagsLang
     };
   }
 
   /**
-   * 搜索时整枚标亮哪些标签（v1.8.12 起跨语言）：中文标签看挂它的英文原标签，英文标签看它归到的
-   * 中文标签——用哪种语言搜、在哪种模式下看，都看得出这部为什么被搜出来。
-   * terms 为 DramaSearch.parseQuery 的结果（已归一），genreHits 为经 GENRE_ZH 对照命中的英文题材（小写）。
+   * 搜索时整枚标亮哪些标签（v1.8.12 起跨语言，v1.8.13 起认同义词）：中文标签看它自己、它的搜索同义词
+   * 和挂它的英文原标签，英文标签看它归到的中文标签（含同义词）——用哪种语言、哪个说法搜，
+   * 在哪种模式下看，都看得出这部为什么被搜出来。terms 为 DramaSearch.parseQuery 的结果（已归一）。
    * 返回 tag => boolean；不在搜索态时恒为 false。
    */
-  function tagHitTest(drama, tagsLang, terms, genreHits) {
-    if (!terms.length && !genreHits.size) return () => false;
+  function tagHitTest(drama, tagsLang, terms) {
+    if (!terms.length) return () => false;
     const taxonomy = global.GenreTaxonomy;
     const zhOf = genre => (taxonomy ? taxonomy.zhTagsOf([genre]) : []);
-    const termHit = value => terms.some(term => String(value).normalize('NFKC').toLowerCase().includes(term));
-    const genreHit = genre => genreHits.has(genre.toLowerCase()) || termHit(genre);
+    const hit = value => terms.some(term => termMatches(term, value));
+    const zhTagHit = tag => hit(tag) || (taxonomy ? taxonomy.synonymsOf(tag).some(hit) : false);
     if (tagsLang === 'zh') {
-      const hitTags = new Set(getDisplayGenres(drama).filter(genreHit).flatMap(zhOf));
-      return tag => hitTags.has(tag);
+      const viaGenre = new Set(getDisplayGenres(drama).filter(hit).flatMap(zhOf));
+      return tag => viaGenre.has(tag) || zhTagHit(tag);
     }
-    return genre => genreHits.has(genre.toLowerCase()) || zhOf(genre).some(termHit);
+    return genre => zhOf(genre).some(zhTagHit);
+  }
+
+  // 搜索结果里简介从命中处附近开始显示（v1.8.13）：命中词排在长简介后半段时，卡片只显示开头几行，
+  // 标亮根本看不到。按字数估：中文一行约 25 字、英文约 50 个字符，命中处超过约两行才截，前面留一点上下文
+  const SNIPPET = { zh: { lead: 15, after: 45 }, en: { lead: 35, after: 100 } };
+
+  function snippetAround(text, terms) {
+    const raw = String(text || '');
+    if (!raw || !terms.length) return raw;
+    const match = new RegExp(terms.map(termPatternOf).join('|'), 'i').exec(raw);
+    const { lead, after } = SNIPPET[global.TranslateConfig.hasChineseChars(raw) ? 'zh' : 'en'];
+    if (!match || match.index <= after) return raw;
+    let start = match.index - lead;
+    // 英文从词首开始，不切半个单词
+    const space = raw.lastIndexOf(' ', start);
+    if (space > match.index - lead * 2) start = space + 1;
+    return `…${raw.slice(start).trimStart()}`;
+  }
+
+  /**
+   * 搜索命中、却在卡片上没有对应标签的英文原标签（v1.8.13）：中文模式下体系刻意不收的词（Hospital、USA）
+   * 和演员名，两种模式都看不到。搜出来的卡要把它们补成标签显示，不然看不出为什么命中。
+   */
+  function uncoveredHitGenres(drama, text, terms) {
+    if (!terms.length) return [];
+    const taxonomy = global.GenreTaxonomy;
+    const shown = new Set(text.tags.map(tag => tag.toLowerCase()));
+    const seen = new Set();
+    return getDisplayGenres(drama).filter(genre => {
+      const key = genre.toLowerCase();
+      if (seen.has(key) || !terms.some(term => termMatches(term, genre))) return false;
+      seen.add(key);
+      if (text.tagsLang === 'en') return !shown.has(key);
+      return !(taxonomy && taxonomy.zhTagsOf([genre]).length);
+    });
   }
 
   /**
@@ -385,19 +436,27 @@
     card.className = `drama-card ${drama.status === 'new' ? 'status-new' : ''} ${drama.source === 'steam' ? 'card-landscape' : ''}`;
     card.dataset.id = drama.id;
 
-    const terms = Array.isArray(options.highlightTerms) ? options.highlightTerms : null;
+    const terms = Array.isArray(options.highlightTerms) ? options.highlightTerms.filter(Boolean) : [];
     const mark = text => highlightHtml(text, terms);
+    const hitIn = value => terms.some(term => termMatches(term, value));
     const unsubscribed = typeof options.isUnsubscribed === 'function' && options.isUnsubscribed(drama);
 
     // 标题、简介、内容标签只显示一种语言（v1.8.12）；悬停标题看「中文（英文）」
     const text = cardTextOf(drama, options.lang);
     const titleDisplay = titleDisplayOf(drama);
+    // 搜索命中了没显示的那种语言的标题或简介（v1.8.13）：这张卡改成双语，另一种语言排在下面、字色淡一级，
+    // 命中处照样标亮；简介从命中处附近开始显示
+    const bilingual = hitIn(text.titleAlt) || hitIn(text.descAlt);
+    const descHtml = (value, lang, extraClass = '') => `<div class="card-desc${extraClass}" lang="${lang === 'zh' ? 'zh-CN' : 'en'}">${mark(snippetAround(value, terms))}</div>`;
 
     // footer 右槽：内容类型标签 chips（v1.5.3 替换原制作公司/作者标签展示；
-    // company 字段已于 v1.5.13 从数据模型彻底移除——不再采集、不进 CSV 列）
-    const genreChips = text.tags;
-    const tagHit = tagHitTest(drama, text.tagsLang, terms || [],
-      new Set(Array.isArray(options.highlightGenres) ? options.highlightGenres : []));
+    // company 字段已于 v1.5.13 从数据模型彻底移除——不再采集、不进 CSV 列）。
+    // 搜索时命中的排最前（右槽只显示一行，排后面会被裁掉），卡片上没有对应标签的命中原词补在它们后面
+    const tagHit = tagHitTest(drama, text.tagsLang, terms);
+    const chipHit = g => tagHit(g) || hitIn(g);
+    const genreChips = terms.length
+      ? [...text.tags.filter(chipHit), ...uncoveredHitGenres(drama, text, terms), ...text.tags.filter(g => !chipHit(g))]
+      : text.tags;
     const markGenre = g => (tagHit(g) ? `<mark class="search-hit">${escapeHtml(g)}</mark>` : mark(g));
 
     // Lark 按钮双闸门：readOnly（共享页）不渲染，未注入回调（调用方未接入）也不渲染
@@ -422,11 +481,11 @@
                 ${drama.status === 'new' ? '<span class="status-chip">待翻译</span>' : ''}
                 ${unsubscribed ? '<span class="status-chip chip-unsubscribed" title="所属订阅已退订，弹窗平时不显示这部">已退订</span>' : ''}
               </div>
+              ${bilingual && text.titleAlt ? `<div class="card-title-alt" title="${escapeAttribute(text.titleAlt)}">${mark(text.titleAlt)}</div>` : ''}
             </div>
             <div class="card-description">
-              ${text.desc
-                ? `<div class="card-desc" lang="${text.descLang === 'zh' ? 'zh-CN' : 'en'}">${mark(text.desc)}</div>`
-                : '<div class="card-desc-empty">暂无简介</div>'}
+              ${text.desc ? descHtml(text.desc, text.descLang) : '<div class="card-desc-empty">暂无简介</div>'}
+              ${bilingual && text.descAlt ? descHtml(text.descAlt, text.descAltLang, ' is-alt') : ''}
             </div>
           </div>
         </div>
@@ -511,7 +570,8 @@
    * - 竖版卡（海报在左）以「简介顶部到海报底边 + 内容区 gap」为固定预算，行数 = 预算能放下的整行数；
    * - 全文还占不到预算的一半：放大字号（desc-large，14px）填空白，行数按放大后的行高重算；
    * - 上半区高度钉死为海报高，文字只填充原有空隙、分割线绝不因文字增行下移；
-   * - 横版卡（封面在上，Steam）没有海报边界，行数走 CSS 静态规则，这里不动。
+   * - 横版卡（封面在上，Steam）没有海报边界，行数走 CSS 静态规则，这里不动；
+   * - 搜索双语卡（v1.8.13）有两段：放得下就都放全，放不下按一半一半分，短的那段用不完的行数让给另一段。
    * 行数按 scrollHeight / line-height 测量（line-clamp 不影响 scrollHeight），
    * 必须在卡片进入可见 DOM 后调用；测得 0 行（容器不可见）时保持默认样式。
    */
@@ -526,42 +586,58 @@
 
   /** 第一段（写）：清掉上一轮动态样式，返回后续两段共用的元素上下文；没有简介的卡返回 null。 */
   function resetCardDescStyles(card) {
-    const descEl = card.querySelector('.card-desc');
-    if (!descEl) return null;
+    const descEls = Array.from(card.querySelectorAll('.card-desc'));
+    if (descEls.length === 0) return null;
 
     const box = card.querySelector('.card-description');
     const cardTop = card.querySelector('.card-top');
     box.classList.remove('desc-large');
-    descEl.style.removeProperty('-webkit-line-clamp');
+    descEls.forEach(el => el.style.removeProperty('-webkit-line-clamp'));
     if (cardTop) cardTop.style.removeProperty('height');
-    return { descEl, box, cardTop };
+    return { descEls, box, cardTop };
+  }
+
+  /** 两段简介分行数：放得下就都放全；放不下各给一半，短的那段用不完的让给另一段（多出的一行给第二段）。 */
+  function splitDescLines(lines, avail) {
+    const [a, b] = lines;
+    if (a + b <= avail) return [a, b];
+    const half = Math.floor(avail / 2);
+    if (a <= half) return [a, avail - a];
+    if (b <= avail - half) return [avail - b, b];
+    return [half, avail - half];
   }
 
   /** 第二段（纯读+计算）：测量并产出应用计划；横版卡、容器不可见（测得 0 行）时返回 null 保持默认样式。 */
   function measureCardDesc(ctx, card) {
-    const { descEl, box, cardTop } = ctx;
+    const { descEls, box, cardTop } = ctx;
     const poster = card.querySelector('.card-poster');
     if (card.classList.contains('card-landscape') || !cardTop || !poster || poster.offsetHeight <= 40) return null;
 
-    const lineHeight = parseFloat(getComputedStyle(descEl).lineHeight);
-    const lines = lineHeight > 0 ? Math.round(descEl.scrollHeight / lineHeight) : 0;
-    if (lines === 0) return null;
+    // 两段同一个类、同样的字号与行高（只差字色）
+    const lineHeight = parseFloat(getComputedStyle(descEls[0]).lineHeight);
+    const lines = descEls.map(el => (lineHeight > 0 ? Math.round(el.scrollHeight / lineHeight) : 0));
+    if (lines.some(n => n === 0)) return null;
 
     const contentGap = parseFloat(getComputedStyle(cardTop.parentElement).rowGap) || 0;
     // 文字可下溢到海报底边之下、吃掉内容区 gap，与分割线保持 footer margin 的间距
     const budget = poster.getBoundingClientRect().bottom - box.getBoundingClientRect().top + contentGap;
-    const large = lines * lineHeight * 2 <= budget;
+    const posterHeight = poster.offsetHeight;
+    if (descEls.length > 1) {
+      const gap = parseFloat(getComputedStyle(descEls[0]).marginBottom) || 0;
+      const avail = Math.max(2, Math.floor((budget - gap + 0.5) / lineHeight));
+      return { shows: splitDescLines(lines, avail).map(n => Math.max(1, n)), large: false, posterHeight };
+    }
+    const large = lines[0] * lineHeight * 2 <= budget;
     const showLineHeight = large ? lineHeight * DESC_LARGE_SCALE : lineHeight;
-    const show = Math.max(1, Math.floor((budget + 0.5) / showLineHeight));
-    return { show, large, posterHeight: poster.offsetHeight };
+    return { shows: [Math.max(1, Math.floor((budget + 0.5) / showLineHeight))], large, posterHeight };
   }
 
   /** 第三段（纯写）：按计划应用样式。 */
   function applyCardDesc(ctx, plan) {
     if (!plan) return;
-    const { descEl, box, cardTop } = ctx;
+    const { descEls, box, cardTop } = ctx;
     if (plan.large) box.classList.add('desc-large');
-    descEl.style.setProperty('-webkit-line-clamp', String(plan.show));
+    descEls.forEach((el, i) => el.style.setProperty('-webkit-line-clamp', String(plan.shows[i])));
     // 上半区高度钉死为海报高：文字增行只填充空隙，分割线不动
     cardTop.style.height = `${plan.posterHeight}px`;
   }
@@ -630,6 +706,8 @@
     titleDisplay: titleDisplayOf,
     cardTextOf,
     tagHitTest,
+    snippetAround,
+    splitDescLines,
     orientationFromPoster,
     groupByDate,
     renderTimeline,

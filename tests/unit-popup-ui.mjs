@@ -513,12 +513,12 @@ const ids = h => h.lastRender().dramas.map(d => d.id).join(',');
   key(h, 'Enter');
   await h.settle();
   const opts = h.lastRender().opts;
-  check('S4 回车提交：搜全库（含已退订订阅的 b，题材对照让 Revenge 命中「复仇」），词去掉首尾空白后保留',
+  check('S4 回车提交：搜全库（含已退订订阅的 b，中文标签体系让 Revenge 命中「复仇」），词去掉首尾空白后保留',
     ids(h) === 'a,b' && h.fx.state.search.query === '复仇' && JSON.stringify(h.store.popupSearch) === '{"query":"复仇"}', ids(h));
-  check('S4b 结果卡片：source 记作 search、命中词高亮、经对照命中的题材 revenge 标亮、只有已退订的 b 标「已退订」',
+  check('S4b 结果卡片：source 记作 search、命中词高亮（标签的同义词、跨语言命中由卡片按词自己判断，不再传 highlightGenres）、只有已退订的 b 标「已退订」',
     opts.source === 'search' && JSON.stringify(opts.highlightTerms) === '["复仇"]'
       && opts.isUnsubscribed({ id: 'b' }) === true && opts.isUnsubscribed({ id: 'a' }) === false
-      && opts.highlightGenres.includes('revenge'), JSON.stringify(opts.highlightTerms));
+      && !('highlightGenres' in opts), JSON.stringify(opts.highlightTerms));
   check('S4c 结果条显示词与条数，头部保持搜索态',
     !h.byId.searchResultBar.classes.has('hidden') && h.byId.searchResultText.textContent === '搜索“复仇” · 共 2 部' && searching(h),
     h.byId.searchResultText.textContent);

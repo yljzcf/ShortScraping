@@ -404,6 +404,17 @@
   overflow-wrap: anywhere;
 }
 
+/* 搜索双语卡（v1.8.13）：命中了没显示的那种语言时，标题下补一行另一种语言的名字 */
+.card-title-alt {
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* 待翻译：标题后面的小标签（v1.8.0 之前是压在右上角的绿色角标） */
 .status-chip {
   flex-shrink: 0;
@@ -430,6 +441,17 @@
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* 搜索双语卡（v1.8.13）的第二段：另一种语言的简介，字色淡一级；竖版卡两段的行数由 timeline-render.js 分配，
+   这里的 3 行是横版卡与测量前的默认值 */
+.card-desc:not(:last-child) {
+  margin-bottom: 4px;
+}
+
+.card-desc.is-alt {
+  color: var(--text-secondary);
+  -webkit-line-clamp: 3;
 }
 
 /* 全文还占不到海报旁一半空间的稀疏卡片：放大字号填充（与 timeline-render.js DESC_LARGE_SCALE 对应） */

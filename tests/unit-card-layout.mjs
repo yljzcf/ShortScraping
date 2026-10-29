@@ -17,7 +17,8 @@ import './bootstrap.cjs';
 //   T：v1.8.0 标题分主副两行，titleParts 与 titleDisplay 判据同一份（v1.8.12 起卡片只显示一种语言，
 //      titleDisplay 的「中文（英文）」留给标题悬停提示）
 //   L：v1.8.12 卡片中英切换——cardTextOf 按语言取标题 / 简介 / 内容标签，缺了退回另一种；
-//      中文标签走通用标签体系、英文标签滤掉演员名；双语版式（副标题、两段简介）整段退场
+//      中文标签走通用标签体系、英文标签滤掉演员名；双语版式（副标题、两段简介）整段退场。
+//      v1.8.13 搜索命中另一种语言时的双语卡（L15-L17）
 //
 // 用法：node tests/unit-card-layout.mjs
 import fs from 'node:fs';
@@ -178,6 +179,11 @@ check('C4 timeline-render 在封面失败时加 poster-fallback 类',
     JSON.stringify(zhOnly));
   const empty = cardTextOf({ id: 'x' }, 'zh');
   check('L6 什么都没有：空串与空标签，不炸', empty.title === '' && empty.desc === '' && empty.tags.length === 0, JSON.stringify(empty));
+  check('L6b 另一种语言（搜索双语卡用）：中文模式给英文名与英文简介；名字只差装饰性标点、或缺另一种时为空串',
+    zh.titleAlt === full.title && zh.descAlt === full.description && zh.descAltLang === 'en'
+      && en.titleAlt === full.titleZh && en.descAltLang === 'zh'
+      && cardTextOf({ titleZh: '《NBA 2K27》', title: 'NBA 2K27' }, 'zh').titleAlt === ''
+      && untranslated.titleAlt === '' && untranslated.descAlt === '', JSON.stringify({ zh, untranslated }));
   check('L7 语言缺省、不认识的值都当中文；默认选项是中文',
     normalizeLang(undefined) === 'zh' && normalizeLang('fr') === 'zh' && normalizeLang('en') === 'en'
       && cardTextOf(full).title === zh.title, '');
@@ -186,9 +192,9 @@ check('C4 timeline-render 在封面失败时加 poster-fallback 类',
       && /切换为英文/.test(LANG_LABELS.zh.title) && /切换为中文/.test(LANG_LABELS.en.title), JSON.stringify(LANG_LABELS));
 
   const renderSrc = read('../src/shared/timeline-render.js');
-  check('L9 双语版式退场：卡片不再画副标题与两段简介，只画一段 .card-desc 并标 lang',
+  check('L9 双语版式退场：卡片不再画副标题与「中 + 英」两段简介的旧类名；平时只画一段 .card-desc 并标 lang（第二段只给搜索双语卡）',
     !/card-title-sub|card-desc-zh|card-desc-en|desc-zh-only|desc-en-only/.test(renderSrc)
-      && renderSrc.includes('<div class="card-desc" lang="'), '');
+      && renderSrc.includes('<div class="card-desc${extraClass}" lang="') && renderSrc.includes("bilingual && text.descAlt ? descHtml("), '');
   check('L10 标题悬停提示仍是 titleDisplay（中文（英文）），看得到另一种语言',
     renderSrc.includes('<div class="card-title-text" title="${escapeAttribute(titleDisplay)}">'), '');
 
@@ -203,6 +209,15 @@ check('C4 timeline-render 在封面失败时加 poster-fallback 类',
   check('L13 简介字号与 timeline-render 的放大倍数对得上（12px → desc-large 14px，行高写倍数）',
     /font-size:\s*12px/.test(desc) && /line-height:\s*1\.\d+;/.test(desc) && /font-size:\s*14px/.test(large)
       && Boolean(ratio) && ratio[1] === '14' && ratio[2] === '12', `${desc} | ${large} | ${ratio && ratio[0]}`);
+  const alt = ruleBody(sharedCss, '.card-desc.is-alt') || '';
+  check('L15 搜索双语卡（v1.8.13）：另一种语言的标题行与简介段有样式，简介段字色淡一级',
+    Boolean(ruleBody(sharedCss, '.card-title-alt')) && /color:\s*var\(--text-secondary\)/.test(alt)
+      && /margin-bottom:\s*4px/.test(ruleBody(sharedCss, '.card-desc:not(:last-child)') || ''), alt);
+  const { splitDescLines } = globalThis.TimelineRender;
+  const cases = [[[2, 3], 8, [2, 3]], [[10, 10], 7, [3, 4]], [[2, 10], 7, [2, 5]], [[10, 2], 7, [5, 2]], [[9, 9], 6, [3, 3]]];
+  check('L16 双语两段分行数：放得下都放全；放不下各给一半、短的让出富余，奇数多出的一行给第二段（命中的那段）',
+    cases.every(([lines, avail, want]) => JSON.stringify(splitDescLines(lines, avail)) === JSON.stringify(want)),
+    JSON.stringify(cases.map(([lines, avail]) => splitDescLines(lines, avail))));
   const btn = ruleBody(sharedCss, '.btn-lang') || '';
   check('L14 「中 / EN」按钮样式只在共享文件里写一份（两页同一枚）',
     /width:\s*32px/.test(btn) && Object.values(CSS).every(src => !src.includes('.btn-lang')), btn);

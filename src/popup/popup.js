@@ -1639,16 +1639,16 @@
   }
 
   /**
-   * 结果卡片的搜索选项：命中词高亮、经中文对照命中的题材整枚标亮、「已退订」标记
-   * （不在按订阅过滤后的 state.dramas 里的就是）。不在搜索态时全为 null，卡片与平时一致。
+   * 结果卡片的搜索选项：命中词高亮（标签经同义词、跨语言命中的整枚标亮，命中另一种语言时卡片改双语，
+   * 都由 timeline-render 按词自己判断）、「已退订」标记（不在按订阅过滤后的 state.dramas 里的就是）。
+   * 不在搜索态时全为 null，卡片与平时一致。
    */
   function searchRenderOptions() {
-    if (!isSearchActive()) return { highlightTerms: null, highlightGenres: null, isUnsubscribed: null };
+    if (!isSearchActive()) return { highlightTerms: null, isUnsubscribed: null };
     const terms = DramaSearch.parseQuery(state.search.query);
     const subscribed = new Set(state.dramas.map(d => d && d.id));
     return {
       highlightTerms: terms,
-      highlightGenres: DramaSearch.genresMatchedByZh(terms),
       isUnsubscribed: drama => !subscribed.has(drama.id)
     };
   }

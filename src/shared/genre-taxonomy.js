@@ -7,7 +7,8 @@
  * - ORDER：中文标签按维度（受众 → 类型 → 题材设定 → 情节桥段 → 人设 → 基调）排好的顺序；
  * - MAP：英文原标签（小写）→ 中文标签，允许一对多；
  * - ACTORS：ReelShort 混进 genres 的演员名（小写），卡片上的英文标签行要滤掉；
- * - IGNORED：看过、刻意不收的英文标签（小写，如全年龄、场景、地区、形式、职业词）。
+ * - IGNORED：看过、刻意不收的英文标签（小写，如全年龄、场景、地区、形式、职业词）；
+ * - SYNONYMS：中文标签 → 搜索同义词，只用于弹窗搜索，卡片上不显示（2026-10-29 审定）。
  * MAP / ACTORS / IGNORED 之外的英文标签就是「站点新出现、还没归类」的，同步服务统计后报在 /health。
  */
 (function (global) {
@@ -613,6 +614,63 @@
     "vintage", "violent", "visually striking", "warehouse", "writer"
   ]);
 
+  const SYNONYMS = Object.freeze({
+    "女频": Object.freeze(["女主"]),
+    "男频": Object.freeze(["男主"]),
+    "同性": Object.freeze(["耽美", "百合", "BL", "GL", "LGBTQ+", "女同"]),
+    "爱情": Object.freeze(["言情", "恋爱", "浪漫"]),
+    "喜剧": Object.freeze(["搞笑"]),
+    "奇幻": Object.freeze(["西幻"]),
+    "悬疑": Object.freeze(["推理"]),
+    "战争": Object.freeze(["军事", "战争军事"]),
+    "武侠": Object.freeze(["武术", "功夫"]),
+    "竞技": Object.freeze(["比赛"]),
+    "超自然": Object.freeze(["灵异"]),
+    "日常": Object.freeze(["生活"]),
+    "都市": Object.freeze(["现代", "当代"]),
+    "校园": Object.freeze(["学生"]),
+    "职场": Object.freeze(["办公室"]),
+    "豪门": Object.freeze(["豪宅", "别墅"]),
+    "黑帮": Object.freeze(["黑手党"]),
+    "魔法": Object.freeze(["魔导科技"]),
+    "修仙": Object.freeze(["修真", "修炼"]),
+    "穿越": Object.freeze(["异世界", "转生", "时间旅行"]),
+    "系统": Object.freeze(["数据流"]),
+    "地下城": Object.freeze(["副本"]),
+    "末世": Object.freeze(["末日", "废土"]),
+    "异能": Object.freeze(["超能力", "超级英雄"]),
+    "种田": Object.freeze(["基建", "建国", "制作", "打造"]),
+    "复仇": Object.freeze(["报仇"]),
+    "打脸": Object.freeze(["报应", "因果", "反击", "反杀", "虐渣"]),
+    "逆袭": Object.freeze(["废柴", "蜕变"]),
+    "扮猪吃虎": Object.freeze(["装傻"]),
+    "掉马": Object.freeze(["马甲", "隐藏身份", "隐藏大佬", "多重身份", "身份曝光", "揭露身份"]),
+    "火葬场": Object.freeze(["追妻", "追悔莫及"]),
+    "契约婚恋": Object.freeze(["契约恋人", "契约婚姻", "假戏真做", "假扮情侣"]),
+    "破镜重圆": Object.freeze(["重来", "第二次机会"]),
+    "死对头": Object.freeze(["欢喜冤家", "相爱相杀"]),
+    "三角恋": Object.freeze(["多角恋"]),
+    "禁忌恋": Object.freeze(["禁恋", "禁忌之恋"]),
+    "强制爱": Object.freeze(["占有欲", "强取豪夺"]),
+    "宠妻": Object.freeze(["护妻"]),
+    "出轨背叛": Object.freeze(["捉奸"]),
+    "错认": Object.freeze(["认错人"]),
+    "求生": Object.freeze(["生存"]),
+    "金手指": Object.freeze(["现代知识"]),
+    "霸总": Object.freeze(["总裁", "霸道总裁", "亿万富翁", "总裁文"]),
+    "千金": Object.freeze(["名媛"]),
+    "大女主": Object.freeze(["强女主", "独立女性"]),
+    "强者": Object.freeze(["强主角", "大男主"]),
+    "反英雄主角": Object.freeze(["反派主角"]),
+    "群像": Object.freeze(["多主角"]),
+    "战神": Object.freeze(["兵王"]),
+    "甜宠": Object.freeze(["甜文"]),
+    "虐恋": Object.freeze(["有毒关系"]),
+    "感人": Object.freeze(["温情"]),
+    "治愈": Object.freeze(["温馨"]),
+    "暗黑": Object.freeze(["黑暗"])
+  });
+
   const RANK = new Map(ORDER.map((tag, i) => [tag, i]));
   const ACTOR_SET = new Set(ACTORS);
   const IGNORED_SET = new Set(IGNORED);
@@ -666,7 +724,12 @@
     return [...found.values()].sort((a, b) => b.count - a.count || a.genre.localeCompare(b.genre));
   }
 
-  const api = { ORDER, MAP, ACTORS, IGNORED, zhTagsOf, isActor, displayGenres, isKnown, unmappedGenres };
+  /** 中文标签 → 它的搜索同义词（没有就是空数组） */
+  function synonymsOf(tag) {
+    return has(SYNONYMS, tag) ? SYNONYMS[tag] : [];
+  }
+
+  const api = { ORDER, MAP, ACTORS, IGNORED, SYNONYMS, zhTagsOf, isActor, displayGenres, isKnown, unmappedGenres, synonymsOf };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
